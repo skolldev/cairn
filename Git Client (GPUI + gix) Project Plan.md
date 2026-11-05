@@ -44,7 +44,7 @@ UI intent reaches git only through the job scheduler. Everything that flows back
 | `read` | gix queries: refs, revwalk, status, tree and blob diff | core, gix |
 | `write` | git CLI runner: spawn, environment, porcelain parsing, progress | core |
 | `graph` | Lane layout from a commit stream, incremental and cacheable | core |
-| `diff` | Line and word diff, highlighting of visible lines | core, imara-diff, syntect |
+| `diff` | Line and word diff, highlighting of visible lines | core, gix-diff, syntect |
 | `auth` | Token store and git credential-helper mode | core, keyring |
 | `app` | GPUI binary: windows, panels, actions, keymaps | all of the above, gpui, gpui-component |
 
@@ -54,15 +54,31 @@ Only `app` depends on GPUI. Every other crate can be tested headless, and they a
 
 | Decision | Choice | Why |
 | --- | --- | --- |
-| Read path | gix (gitoxide) | Pure Rust, `ThreadSafeRepository` handles that can be shared across threads, fast commit-graph walks |
+| Read path | gix (gitoxide), pinned to an exact revision: `main` at `39e093f` or later, or the first release after 0.90.0 | Pure Rust, `ThreadSafeRepository` handles that can be shared across threads, fast commit-graph walks. 0.90.0 lacks `rev_walk_topo` and status fixes Cairn needs, and each 0.x release is a semver break |
 | Write path | `git` CLI | Hooks, signing, credential helpers and rebase/merge semantics come free and match the user's config |
 | Not used | libgit2 / git2 | Adds a C dependency, has slower status on large trees, and lags behind upstream git |
-| UI | gpui, pinned to the rev that gpui-component pins, plus gpui-component 0.5.x | gpui has no standalone text input. gpui-component supplies Input, VirtualList, DataTable and Tree |
-| Diff algorithm | imara-diff (histogram) | The same engine gix uses. Fast and git-compatible |
+| UI | `gpui-component =0.9.0` or its umbrella crate `gpui-kit =0.9.0`, which pin `gpui-pre =0.3.11` (a snapshot of zed@f816e1f), with a committed `Cargo.lock`. Rust 1.98.1 in `rust-toolchain.toml`. Re-check the pin when the spikes start, because Zed has said automated weekly GPUI releases are coming | gpui has no standalone text input. gpui-component supplies Textarea, Input, VirtualList, DataTable and Tree. The 0.5.x line takes crates.io `gpui` 0.2.2 from October 2025, which predates Zed's Windows dead-key and IME rework |
+| Diff algorithm | The repo's `diff.algorithm` (Myers by default), through `gix-diff`'s vendored imara-diff. `patience` goes to the CLI | Diffs must match `git diff`, and git and gix both default to Myers. The Myers and slider parity fixes live in that fork, and gix doesn't implement patience |
 | Highlighting | syntect for the MVP, visible lines only, cached per blob oid | Broad grammar coverage with no setup. Move to tree-sitter only if profiling demands it |
 | Watching | notify + notify-debouncer-full | Cross-platform; debouncing collapses event bursts |
 | Cache | redb | Embedded pure-Rust KV store for graph layout and commit metadata |
 | Async | GPUI executors only, no tokio in the MVP | One scheduler. Git processes run on background tasks |
+
+**gix rules**
+
+- Don't use `repo.status()` for the fast path: it rebuilds an index from `HEAD^{tree}` on every call. Run HEAD vs index only when `.git/index` or HEAD changes, and scope index vs worktree to the watcher's paths.
+- Never call `Outcome::write_changes()`. It drops the fsmonitor and untracked-cache extensions and dissolves a split index. Use `git update-index -q --refresh` when stat-dirty entries stay high.
+- Keep the default `FastEq` comparison. `HashEq` disagrees with git.
+- Open with `permissions.config.git_binary = true`, or pass the config paths in, so gix sees the same system config as the `git` binary.
+
+**CLI fallback** has three scopes instead of one per-repo switch:
+
+| Scope | Trigger |
+| --- | --- |
+| Per repo, at open | Sparse index, partial clone, reduced trust or `core.safecrlf=true`. For diff only, `diff.algorithm=patience` |
+| Per call | Any `Err` from open or status, with the repo latched to the CLI after repeated failures |
+| Per result | A staged rename with similarity below 100%, because gix scores and pairs renames differently |
+| Per repo, by measurement | gix misses its floor on a repo where `core.fsmonitor` or `core.untrackedCache` is on. gix ignores both, so the CLI may be faster. Thresholds come from the spikes |
 
 **Data flow**
 
@@ -77,17 +93,17 @@ Only `app` depends on GPUI. Every other crate can be tested headless, and they a
 Phase 0 tests whether GPUI and gix carry their weight on both macOS and Windows before anything else gets built. Size: about 8–12 focused days, because each spike runs on both OSes.
 
 - [ ] Cargo workspace with the seven crates. CI runs fmt, clippy and test on macOS and Windows.
-- [ ] Pin gpui and gpui-component. Build a window with a 1M-row VirtualList and confirm smooth scrolling on both OSes.
-- [ ] Commit message spike: gpui-component's multi-line Input with IME, undo and copy/paste, tested separately on each OS because IME handling is platform-specific. A git client is unusable without it.
-- [ ] gix spike: open the Linux kernel repo, walk all of its history (with and without a commit-graph file), and time it. Run status on your work monorepo. Do both on macOS and Windows.
+- [ ] Pin Rust, gpui-component and `gpui-pre`. Build a window with 1.5M rows (the kernel fixture's size) using `uniform_list` plus `canvas`, painting graph lanes, nodes and edges, not just text. Measure presented frames, with PresentMon on Windows, because paint timers can read healthy while the screen is frozen. Measure at the end of the list too: `f32` scroll offsets step by 2 px past row ~700k and 4 px past row ~1.4M at 24 px (derived, not measured). Zed's own git graph is a reference only, because `git_ui` is GPL.
+- [ ] Commit message spike: gpui-component's `Textarea` (`Input` is single-line from 0.6.0) with IME, dead keys, undo and copy/paste, tested separately on each OS because IME handling is platform-specific. Include Cmd-Return during a dead key, IME near the screen bottom, CRLF and Excel paste, and a held key under background notifies. A git client is unusable without it.
+- [ ] gix spike: open the Linux kernel repo and time history walks with and without a commit-graph file, separately for HEAD only and all refs, because the topo walk goes down to the lowest tip's generation before yielding anything. On its worktree, time HEAD vs index, watcher-scoped index vs worktree and full status separately, and compare against git. Do all of it on macOS and Windows.
 - [ ] git CLI runner: `GIT_TERMINAL_PROMPT=0`, `LC_ALL=C`, `--no-pager`, porcelain formats wherever they exist, stderr captured for errors and `--progress`.
 - [ ] Windows process handling: spawn git with `CREATE_NO_WINDOW` so no console windows flash, measure process spawn cost, and test paths with spaces and paths over 260 characters.
 - [ ] Job scheduler with generation tokens and cancellation.
-- [ ] Benchmark harness: criterion for the core crates, `tracing` spans in the app, and three fixture repos (small, Linux kernel, work monorepo) available on both OSes.
+- [ ] Benchmark harness: criterion for the core crates, `tracing` spans in the app, and two fixture repos (small, Linux kernel) available on both OSes.
 
-**Gate:** on both macOS and Windows, the 1M-row list scrolls without dropped frames, the commit box handles real typing, and the history walk fits the budget in Performance budgets.
+**Gate:** on both macOS and Windows, the 1.5M-row list scrolls without dropped presented frames, the commit box handles real typing, and the history walk fits its floor. Floors are set before any spike runs and don't move once results are in.
 
-**Kill switch:** if GPUI basics (text input, scrolling, focus) block you for more than two weeks on either OS, keep every crate except `app` and build the UI in Tauri 2 + Angular instead.
+**Kill switch:** if GPUI basics (text input, scrolling, focus) block you for more than two weeks on either OS, GPUI is a no-go, and every crate except `app` is kept. Tauri 2 + Angular is not adopted automatically: it must pass the same spikes against the same floors first. Research says it probably can't meet launch or 8 ms scrolling on macOS, so adopting it would mean accepting different budgets, which is a product decision. The failure type matters: a webview fixes text input and IME failures, but is unlikely to rescue a scrolling failure on macOS.
 
 ## Phase 1: Repos, branches and checkout
 
@@ -134,12 +150,12 @@ A diff has to agree with `git diff` exactly, so correctness tests come before vi
 
 - [ ] File lists. Commit: tree-to-tree diff with rename detection. WIP: staged (HEAD vs index) and unstaged (index vs worktree) from gix status.
 - [ ] Worktree comparisons go through gix's filter pipeline (autocrlf, `.gitattributes`, clean filters such as LFS). Without it, every Windows-touched repo shows phantom changes.
-- [ ] Line diff with imara-diff (histogram), plus word-level highlights inside changed line pairs.
+- [ ] Line diff with the repo's `diff.algorithm` through `gix-diff`, plus word-level highlights inside changed line pairs. Keep line terminators, or a CRLF-to-LF change reads as no change.
 - [ ] Unified and side-by-side views, collapsible unchanged regions, virtualized for 50k-line files.
 - [ ] Syntax highlighting with syntect for visible lines only, cached per blob oid.
 - [ ] Binary and oversized files get a stub ("binary, 2.4 MB"). Respect `-diff` in `.gitattributes`.
 - [ ] Ignore-whitespace toggle.
-- [ ] Golden tests: for each fixture repo, `--numstat` totals must match `git diff --numstat`.
+- [ ] Golden tests: for each fixture repo, `--numstat` totals must match `git diff --numstat` and full hunks must match `git diff`, since numstat says nothing about hunk placement.
 
 **Gate:** golden tests pass on all fixtures, and a 10k-line file shows its first screen within budget.
 
@@ -202,7 +218,7 @@ Nothing below starts until the MVP gate is met. Order them by what you miss most
 
 ## Performance budgets
 
-These numbers are the definition of "blazing fast" for this project. They're targets set up front, not measurements, so revise them after the Phase 0 spikes, not after the features ship. Every budget applies on both macOS and Windows. Fixtures: a small repo, the Linux kernel (1M+ commits) and your work monorepo.
+These numbers are the definition of "blazing fast" for this project. They're targets set up front, not measurements, so revise them after the Phase 0 spikes, not after the features ship. Passing the Phase 0 gate is judged against floors set before the spikes, not against revised budgets. Every budget applies on both macOS and Windows. Fixtures: a small repo and the Linux kernel (about 1.5M commits).
 
 | Interaction | Target | Fixture |
 | --- | --- | --- |
@@ -212,7 +228,7 @@ These numbers are the definition of "blazing fast" for this project. They're tar
 | Graph scrolling | no frame over 8 ms | Linux kernel |
 | Select commit to file list | < 50 ms | Linux kernel |
 | Select file to first diff screen | < 50 ms for files under 10k lines | any |
-| Worktree save to updated status | < 150 ms (watcher debounce included) | work monorepo |
+| Worktree save to updated status | < 150 ms (watcher debounce included). Under review: the 100–200 ms debounce takes most or all of this | Linux kernel |
 | Git command finishes to UI updated | < 100 ms | any |
 | Memory with graph loaded | < 300 MB | Linux kernel |
 
@@ -225,11 +241,13 @@ The biggest risk isn't technical. It's a side project that never gets good enoug
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
 | Scope creep, lost momentum | Never replaces GitKraken | Strict MVP gate. Use it read-only from Phase 1, next to the terminal |
-| GPUI API churn, or Zed deprioritising GPUI ([community fork gpui-ce exists](https://github.com/gpui-ce/gpui-ce/)) | Breakage on every upgrade | Pin the rev through gpui-component. Keep every crate except `app` UI-free. Upgrade deliberately, not continuously |
-| GPUI widget gaps (IME, accessibility) | A commit box that fights you | Use gpui-component's Input. Phase 0 kill switch to Tauri 2 + Angular |
-| GPUI is less mature on Windows than on macOS | A second-class Windows build, or Windows-only blockers late in the project | Run every Phase 0 spike and gate on both OSes. A Windows failure counts toward the kill switch |
-| Windows file and process overhead (NTFS, antivirus scanning, process spawn cost) | Status and write budgets missed on Windows only | Measure status and git process round trips on the work monorepo on Windows in Phase 0, then revise the budgets from real numbers |
-| gix behaves differently from git (filters, autocrlf, sparse index, fsmonitor) | Phantom changes, wrong status | Golden tests against `git status --porcelain=v2` and `git diff --numstat`. Per-repo fallback to CLI status |
+| GPUI API churn, or Zed deprioritising GPUI ([community fork gpui-ce exists](https://github.com/gpui-ce/gpui-ce/), but moving to it likely means giving up gpui-component) | Breakage on every upgrade | Pin gpui-component and `gpui-pre` exactly and commit `Cargo.lock`. Keep every crate except `app` UI-free. Upgrade deliberately, not continuously |
+| `gpui-pre` is a Zed snapshot republished under one crates.io owner | The UI stack rests on one person's account | Move to Zed's own releases when they land. Re-check the pin before each upgrade |
+| [zed#61469](https://github.com/zed-industries/zed/issues/61469): on Windows, sustained input plus background notifies can stop frames being presented for seconds | Freezes while typing, invisible to paint timers | Measure presented frames with PresentMon. Test the reported app-level watchdog in Phase 0 |
+| GPUI widget gaps (IME, accessibility) | A commit box that fights you | Use gpui-component's `Textarea`. Phase 0 kill switch, under which Tauri 2 + Angular must pass the same spikes first |
+| GPUI is less mature on Windows than on macOS | A second-class Windows build, or Windows-only blockers late in the project | Run every Phase 0 spike and gate on both OSes. A Windows failure is a no-go for GPUI |
+| Windows file and process overhead (NTFS, antivirus scanning, process spawn cost) | Status and write budgets missed on Windows only | Measure status and git process round trips on the Linux kernel fixture on Windows in Phase 0, then revise the budgets from real numbers |
+| gix behaves differently from git (filters, autocrlf, sparse index, fsmonitor) | Phantom changes, wrong status | Golden tests against `git status --porcelain=v2`, `git diff --numstat` and full `git diff` hunks. Three-scope CLI fallback (see Architecture) |
 | CLI output differs across git versions | Broken write path | Porcelain formats, `LC_ALL=C`, a minimum git version (2.23+ for `switch`/`restore`), CI against the oldest version you support |
 | Patch builder for line staging corrupts the index | Lost work, lost trust | Property tests: stage then unstage must round-trip to the original diff |
 | Your client's Azure DevOps org restricts PATs | Layer 2 auth unusable there | Layer 1 (GCM with Entra sign-in) needs no PAT |
@@ -237,7 +255,9 @@ The biggest risk isn't technical. It's a side project that never gets good enoug
 
 ## Sources
 
-- [gpui-component on docs.rs](https://docs.rs/crate/gpui-component/latest) (VirtualList, Input, DataTable)
+- [gpui-component on docs.rs](https://docs.rs/crate/gpui-component/latest) (VirtualList, Input, Textarea, DataTable)
+- [gpui-kit](https://github.com/longbridge/gpui-kit), the renamed gpui-component repo
+- Phase 0 research: [GPUI state](https://github.com/skolldev/cairn/blob/research/gpui-state/docs/research/gpui-state.md), [gix fidelity](https://github.com/skolldev/cairn/blob/research/gix-fidelity/docs/research/gix-fidelity.md), [Tauri fallback](https://github.com/skolldev/cairn/blob/research/tauri-fallback/docs/research/tauri-fallback.md)
 - [gitoxide crate status](https://github.com/GitoxideLabs/gitoxide/blob/main/crate-status.md)
 - [GPUI book: licensing and missing text input](https://vanuan.github.io/gpui-book/appendix_a.html)
 - [gpui-ce community fork](https://github.com/gpui-ce/gpui-ce/)

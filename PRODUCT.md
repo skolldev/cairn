@@ -12,11 +12,11 @@ Native desktop app rendered with GPUI, not a web view. macOS and Windows are equ
 
 Rust workspace of seven crates. Only `app` depends on the UI framework.
 
-- UI: gpui, pinned to the rev gpui-component pins, plus gpui-component 0.5.x.
-- Reads: gix on background threads, returned as immutable snapshots.
+- UI: gpui-component 0.9.0, pinned exactly, which pins `gpui-pre` 0.3.11, a snapshot of Zed's GPUI. Rust 1.98.1.
+- Reads: gix, pinned to an exact revision, on background threads, returned as immutable snapshots. Cases gix can't handle fall back to the `git` CLI.
 - Writes: the `git` CLI, as cancellable jobs.
-- Diff and highlighting: imara-diff and syntect. Cache: redb. Watching: notify. Async: GPUI executors only, no tokio in the MVP.
-- Kill switch: if GPUI text input, scrolling or focus block for more than two weeks in Phase 0, keep every crate except `app` and rebuild the UI in Tauri 2 + Angular.
+- Diff and highlighting: `gix-diff`'s imara-diff, using the repo's `diff.algorithm`, and syntect. Cache: redb. Watching: notify. Async: GPUI executors only, no tokio in the MVP.
+- Kill switch: if GPUI text input, scrolling or focus block for more than two weeks in Phase 0, GPUI is a no-go and every crate except `app` is kept. Tauri 2 + Angular must pass the same spikes first. It probably can't meet launch or 8 ms scrolling on macOS, so adopting it would mean accepting different budgets.
 
 Full plan: `Git Client (GPUI + gix) Project Plan.md`.
 
@@ -34,14 +34,14 @@ Success has one test: Cairn fully replaces GitKraken for two weeks of real work 
 
 ## Positioning
 
-Cairn is the fast one. Speed is defined by published budgets measured on the Linux kernel and a real monorepo, and checked with a stopwatch against GitKraken and Sublime Merge before each phase gate. It reads through gix, writes through the real `git` CLI, and never has AI, telemetry or accounts.
+Cairn is the fast one. Speed is defined by published budgets measured on the Linux kernel, and checked with a stopwatch against GitKraken and Sublime Merge before each phase gate. It reads through gix, writes through the real `git` CLI, and never has AI, telemetry or accounts.
 
 When speed, absence of bloat and git fidelity conflict, speed wins. A feature that misses its budget gets cut or deferred, even if it's useful. Two limits apply: the plan's correctness gates (golden tests against git, round-trip tests on line staging) must still pass, and the Never list below is not open to trade.
 
 ## Operating Context
 
 - Runs in long stretches beside a terminal. Changes made in the terminal must appear in the app, so the two are used together.
-- Repos range from small projects to very large histories. The fixtures are a small repo, the Linux kernel (1M+ commits) and the work monorepo.
+- Repos range from small projects to very large histories. The fixtures are a small repo and the Linux kernel (about 1.5M commits).
 - Remotes are GitHub and Azure DevOps, reached through whatever git already has: Git Credential Manager, SSH keys, ssh-agent. App-managed tokens are a second layer.
 - Merge conflicts go to the user's configured `git mergetool`. Hooks, signing and credential helpers behave exactly as they do in the terminal.
 - Windows-touched repos are normal, so autocrlf, `.gitattributes` and clean filters are everyday cases.
@@ -77,6 +77,7 @@ When speed, absence of bloat and git fidelity conflict, speed wins. A feature th
 - Anything that mutates the repo is done by the `git` CLI. Porcelain is never reimplemented.
 - Tokens never appear in remote URLs, arguments, logs or `.git/config`.
 - Minimum git version is 2.23.
+- Windows parity is required. Every phase gate and budget applies to both OSes, and GPUI failing on Windows is a no-go for GPUI.
 
 **Not in the MVP:** PRs, issue trackers, provider avatars, a built-in conflict editor, an interactive rebase UI, drag-and-drop merge or rebase, and submodule or LFS management UI.
 
@@ -86,8 +87,7 @@ When speed, absence of bloat and git fidelity conflict, speed wins. A feature th
 
 - Name: Cairn comes from the repo name and is not yet confirmed as the public name.
 - Open source licence and release timing.
-- Accessibility target. The plan names IME and accessibility as GPUI widget gaps, and no standard has been set. This needs a decision before public release.
-- Whether Windows parity survives the Phase 0 spike. Every phase gate and budget now applies to both OSes, and a Windows failure counts toward the kill switch.
+- Accessibility target. The plan names IME and accessibility as GPUI widget gaps, and no standard has been set. gpui-kit documents AccessKit support, with open gaps. This needs a decision before public release.
 
 ## Brand Commitments
 
