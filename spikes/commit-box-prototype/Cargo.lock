@@ -775,6 +775,7 @@ checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 name = "commit-box-prototype"
 version = "0.0.0"
 dependencies = [
+ "async-channel",
  "block2 0.6.2",
  "gpui-component",
  "gpui-pre",

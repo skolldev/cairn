@@ -40,8 +40,8 @@ inside one.
 | Option-arrows or Ctrl-arrows, Home and End, Cmd-arrows | | |
 | Copy, cut and paste within the box, with umlauts and emoji | | |
 | **Paste** | | |
-| `Clipboard: CRLF`, paste: CR count is 0 | FAIL, stock | |
-| `Clipboard: Excel`, paste: CR count is 0 | FAIL, stock | |
+| `Clipboard: CRLF`, paste: CR count is 0 | FAIL, stock | FAIL, stock |
+| `Clipboard: Excel`, paste: CR count is 0 | FAIL, stock | FAIL, stock |
 | A real copy from Excel, if you have it: CR count is 0 | | |
 | Repeat the three with `--paste-fix` | | |
 | **Focus** | | |

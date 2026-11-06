@@ -191,6 +191,10 @@ mod mac {
         post(key, 11, false);
     }
 
+    pub fn claim_focus() -> bool {
+        true
+    }
+
     pub fn start_watchdog() {
         eprintln!("watchdog is Windows only, ignored");
     }
@@ -198,7 +202,6 @@ mod mac {
 
 #[cfg(target_os = "windows")]
 mod win {
-    //! UNTESTED until the first Windows run. Compiled by `cargo check` only.
     use super::{Key, Recording};
     use std::ffi::c_void;
     use std::process::{Child, Command};
@@ -222,11 +225,22 @@ mod win {
         fn GetForegroundWindow() -> *mut c_void;
         fn GetWindowThreadProcessId(hwnd: *mut c_void, pid: *mut u32) -> u32;
         fn RedrawWindow(hwnd: *mut c_void, rect: *const c_void, rgn: *const c_void, flags: u32) -> i32;
+        fn GetWindowTextW(hwnd: *mut c_void, text: *mut u16, len: i32) -> i32;
+        fn EnumWindows(f: extern "system" fn(*mut c_void, isize) -> i32, arg: isize) -> i32;
+        fn IsWindowVisible(hwnd: *mut c_void) -> i32;
+        fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
+    }
+    #[link(name = "winmm")]
+    unsafe extern "system" {
+        fn timeBeginPeriod(ms: u32) -> u32;
     }
 
     static SESSION: Mutex<Option<(Child, String)>> = Mutex::new(None);
 
-    pub fn install_frame_source() {}
+    /// The default timer tick is too coarse for the 8.33 ms `Frame` drain.
+    pub fn install_frame_source() {
+        unsafe { timeBeginPeriod(1) };
+    }
 
     /// Set CAIRN_PRESENTMON to the PresentMon console exe. Needs an elevated
     /// shell, or membership of the Performance Log Users group.
@@ -274,6 +288,20 @@ mod win {
             Key::Char(c) => c.to_ascii_uppercase() as u16,
         }
     }
+    /// SendInput goes to whatever has focus, so never fire it at another app. False
+    /// makes the run invalid, like the macOS key window check.
+    fn ours_in_front() -> bool {
+        let mut pid = 0;
+        let hwnd = unsafe { GetForegroundWindow() };
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        let ours = pid == std::process::id();
+        if !ours {
+            let mut title = [0u16; 128];
+            let n = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), 128) };
+            eprintln!("focus lost to pid {pid}: {}", String::from_utf16_lossy(&title[..n.max(0) as usize]));
+        }
+        ours
+    }
     fn send(key: Key, flags: u32) -> bool {
         let k = KeyInput {
             kind: 1,
@@ -288,7 +316,39 @@ mod win {
         unsafe { SendInput(1, &k, std::mem::size_of::<KeyInput>() as i32) == 1 }
     }
     pub fn inject_key_down(key: Key, _repeat: bool) -> bool {
-        send(key, 0)
+        ours_in_front() && send(key, 0)
+    }
+
+    extern "system" fn find_ours(hwnd: *mut c_void, out: isize) -> i32 {
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        if pid == std::process::id() && unsafe { IsWindowVisible(hwnd) } != 0 {
+            unsafe { *(out as *mut *mut c_void) = hwnd };
+            return 0;
+        }
+        1
+    }
+
+    /// A display mode change leaves the taskbar in front, and Windows won't let a
+    /// process launched in the background take over unless it has just had input.
+    /// A lone Alt tap is the usual way to satisfy that.
+    pub fn claim_focus() -> bool {
+        if ours_in_front() {
+            return true;
+        }
+        let mut hwnd: *mut c_void = std::ptr::null_mut();
+        unsafe { EnumWindows(find_ours, &mut hwnd as *mut _ as isize) };
+        if hwnd.is_null() {
+            return false;
+        }
+        let alt = |flags| {
+            let k = KeyInput { kind: 1, _align: 0, vk: 0x12, scan: 0, flags, time: 0, extra: 0, pad: 0 };
+            unsafe { SendInput(1, &k, std::mem::size_of::<KeyInput>() as i32) };
+        };
+        alt(0);
+        alt(2);
+        unsafe { SetForegroundWindow(hwnd) };
+        ours_in_front()
     }
     pub fn inject_key_up(key: Key) {
         send(key, 2);

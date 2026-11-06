@@ -31,12 +31,9 @@ Flags: `--runs 3`, `--rates frame,vsync,worst`, `--only burst`, `--hold 10`,
 
 ## Windows
 
-`src/sys.rs` has only been type-checked for Windows. GPUI's Windows crate can't be
-built from a Mac, so the whole program has never compiled there. Expect a fix or two
-on the first run.
-
 1. Set the primary display to 120 Hz.
-2. Install PresentMon and open an elevated shell.
+2. Install PresentMon. Use an elevated shell, unless your account is in the
+   Performance Log Users group.
 3. Set `CAIRN_PRESENTMON` to the PresentMon exe.
 4. Run `cargo run --release -- bench` and record the result, with no watchdog.
 5. If `Frame` fails, run it again with `--watchdog`. A pass then counts, but it must
@@ -63,11 +60,11 @@ across.
 
 | Rate | Drain | Role |
 | --- | --- | --- |
-| `frame` | A timer posts to the UI thread every 8.33 ms | Decides the Floor |
+| `frame` | A thread posts to the UI thread every 8.33 ms, on an absolute schedule | Decides the Floor |
 | `vsync` | `on_next_frame` | Recorded, design alternative |
-| `worst` | A notify every 1 ms | Recorded |
+| `worst` | The same, every 1 ms | Recorded |
 
-`frame` decides because a timer competes with `WM_PAINT` in the message queue, which
+`frame` decides because a post competes with `WM_PAINT` in the message queue, which
 is the mechanism zed#61469 describes. On Windows `on_next_frame` is driven by
 `WM_PAINT`, so a `vsync` drain starves itself when paints starve. It can't provoke
 the bug, though it may turn out to be the bridge Cairn should use.
@@ -83,7 +80,45 @@ nothing.
 
 The floor doesn't cover input-to-photon latency, and neither does this.
 
+## Windows results, 2026-11-06
+
+Radeon RX 7900 XT, primary at 3840x2160 and 120 Hz, window 1180x760 logical,
+`Composed: Flip`, PresentMon 2.6.0 `MsBetweenDisplayChange`, worst of three runs, no
+watchdog. Raw output is in `results/`, which is git-ignored, so these figures are the
+record.
+
+| Scenario | `frame` (Floor) | `vsync` | `worst` | Lost or duplicated | Result |
+| --- | --- | --- | --- | --- | --- |
+| Hold Backspace, 10 s | 16.7 ms | 8.6 ms | 8.6 ms | None | Pass |
+| Hold Left, 10 s | 16.7 ms | 8.4 ms | 8.6 ms | None | Pass |
+| Burst, 30 s | 16.7 ms | 8.6 ms | 8.6 ms | None | Pass |
+
+All 27 runs were valid. Each hold sent 300 keys and each burst 300 characters.
+
+- **Rates reached:** `frame` about 120 drains a second, `worst` about 800, not 1,000.
+- **Control:** `--stall-ms 120` read 116.7 ms at 120 Hz, FAIL, as it must.
+- **zed#61469 didn't appear:** no freeze, and `renders` stayed close to `presents`
+  (at most about 28% above), so the watchdog wasn't run. This only rules the bug out
+  for this light window. Injected keys also skip the OS key repeat, and that wasn't
+  tested.
+- **Other load:** not controlled. Nothing was closed for the run.
+- **Not a result about the IME:** `SendInput` keys cover the Floor's key input only.
+
+Paste, stock: CRLF keeps 4 `` and Excel keeps 3, so the Floor fails as shipped, as
+on macOS. `--paste-fix` cleans both and leaves Excel's tabs and quoted cell alone.
+
+**Void:** the first full run isn't a result. A display mode change left the taskbar in
+front, so 7 of the 9 `frame` runs were INVALID, and they may have sent no keys. `frame`
+also reached only about 65 drains a second, because it re-armed its timer from the UI
+thread, so each period included UI work. `worst` had the same cap. The Floor rate
+wasn't being tested, so `frame` and `worst` were moved to their own thread and the
+bench now claims focus before each run. Logs: `results/windows-full-selfclocked-INVALID.*`.
+
 ## macOS results, 2026-11-06
+
+**Provisional:** these runs used the old self-clocked `frame` and `worst` described
+under Windows. The drain rate they reached on macOS wasn't recorded, so rerun the bench
+there before calling the Floor passed.
 
 M3 Max, built-in display, on battery, window 1180x760, worst of three runs, nothing else
 from this spike open. Raw output is in `results/`, which is git-ignored, so these
@@ -121,4 +156,5 @@ Paste, stock: CRLF keeps 4 `\r` and Excel keeps 3, so **the Floor fails as shipp
 Excel's tabs and quoted cell are left alone. Both results were repeated with text
 rendering on. Whether that counts as a framework pass is a call for #13, though the fix is shippable.
 
-Not done: all of CHECKLIST.md on both OSes, and everything on Windows.
+Not done: all of CHECKLIST.md by hand on both OSes, a Japanese IME on the Windows PC,
+and the macOS bench rerun.

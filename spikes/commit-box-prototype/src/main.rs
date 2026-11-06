@@ -22,7 +22,7 @@ const EXCEL: &str = "sha\tauthor\tnote\r\nabc123\tJürgen\t\"two\nlines\"\r\ndef
 const BURST: &str = "the quick brown fox jumps over a lazy dog while we wait for the graph walk ";
 
 /// How background results reach the view. `Frame` decides the Floor: results are
-/// drained once per 120 Hz frame by a timer, which posts to the UI thread as the
+/// drained once per 120 Hz frame by a thread that posts to the UI thread as the
 /// scheduler's bridge would. `Vsync` drains from on_next_frame, which can't outrun
 /// presents. `Worst` is one notify per millisecond, recorded only.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -104,9 +104,22 @@ impl View {
             }
             Rate::Frame | Rate::Worst => {
                 let period = if rate == Rate::Frame { FRAME } else { WORST };
+                // An absolute schedule on its own thread, as the scheduler's bridge
+                // would post. Re-arming a timer from the UI thread runs slow, because
+                // each period then includes however long the UI thread was busy.
+                let (tx, rx) = async_channel::bounded::<()>(1);
+                std::thread::spawn(move || {
+                    let t0 = std::time::Instant::now();
+                    for i in 1u32.. {
+                        std::thread::sleep((t0 + period * i).saturating_duration_since(std::time::Instant::now()));
+                        if tx.is_closed() {
+                            break;
+                        }
+                        let _ = tx.try_send(());
+                    }
+                });
                 cx.spawn(async move |this: WeakEntity<View>, cx| {
-                    loop {
-                        cx.background_executor().timer(period).await;
+                    while rx.recv().await.is_ok() {
                         let live = this.update(cx, |t, cx| {
                             if t.generation == generation {
                                 t.drain(cx);
@@ -294,6 +307,7 @@ struct Outcome {
     rate: Rate,
     run: usize,
     gap: f64,
+    sent: usize,
     presents: usize,
     dropped: u64,
     renders: u64,
@@ -338,6 +352,7 @@ async fn paste_probe(
 async fn bench(this: WeakEntity<View>, cfg: Cfg, cx: &mut AsyncWindowContext) {
     wait(cx, 1.5).await;
     let _ = this.update_in(cx, |t, window, cx| {
+        sys::claim_focus();
         t.state.update(cx, |s, cx| s.focus(window, cx));
         if !window.is_window_active() {
             println!("window isn't active, results will be INVALID");
@@ -367,6 +382,9 @@ async fn bench(this: WeakEntity<View>, cfg: Cfg, cx: &mut AsyncWindowContext) {
             for run in 1..=cfg.runs {
                 let seconds = if kind == Kind::Burst { cfg.burst } else { cfg.hold };
                 let _ = this.update_in(cx, |t, window, cx| {
+                    if !sys::claim_focus() {
+                        println!("couldn't take focus, this run will be INVALID");
+                    }
                     let (text, at) = if kind == Kind::Burst { ("", 0) } else { (seed.as_str(), seed.len()) };
                     t.state.update(cx, |s, cx| {
                         s.set_value(text, window, cx);
@@ -429,6 +447,7 @@ async fn bench(this: WeakEntity<View>, cfg: Cfg, cx: &mut AsyncWindowContext) {
                         rate,
                         run,
                         gap,
+                        sent,
                         presents: rec.intervals_ms.len(),
                         dropped: rec.dropped,
                         renders: t.renders,
@@ -439,11 +458,12 @@ async fn bench(this: WeakEntity<View>, cfg: Cfg, cx: &mut AsyncWindowContext) {
                 });
                 if let Ok(o) = outcome {
                     println!(
-                        "{:<14} {:<6} run {} gap {:>7.1} ms  presents {:>5} dropped {:>3} renders {:>5} drains {:>5} {} {}",
+                        "{:<14} {:<6} run {} gap {:>7.1} ms  sent {:>4} presents {:>5} dropped {:>3} renders {:>5} drains {:>5} {} {}",
                         o.name,
                         format!("{:?}", o.rate),
                         o.run,
                         o.gap,
+                        o.sent,
                         o.presents,
                         o.dropped,
                         o.renders,

@@ -11,6 +11,7 @@ publish = false
 gpui = { package = "gpui-pre", version = "=0.3.11" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["font-kit"] }
 gpui-component = { version = "=0.9.0", default-features = false }
+async-channel = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
