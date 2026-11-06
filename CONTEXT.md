@@ -52,3 +52,11 @@ _Avoid_: Cancel
 **Abort**:
 Git's own exit from an in-progress merge, rebase, cherry-pick or revert. It is a Local write Job, not a way of stopping one.
 _Avoid_: Cancel
+
+**Budget**:
+The performance Cairn aims for on one interaction. A Budget may be revised from measurements.
+_Avoid_: Target
+
+**Floor**:
+The worst result that still passes a Phase 0 gate, fixed before any measurement. Each Floor names the one component that a miss condemns, and it never moves once results are in.
+_Avoid_: Budget, threshold

@@ -96,7 +96,7 @@ Only `app` depends on GPUI. Every other crate can be tested headless, and they a
 Phase 0 tests whether GPUI and gix carry their weight on both macOS and Windows before anything else gets built. Size: about 8–12 focused days, because each spike runs on both OSes.
 
 - [ ] Cargo workspace with the eight crates. CI runs fmt, clippy and test on macOS and Windows.
-- [ ] Pin Rust, gpui-component and `gpui-pre`. Build a window with 1.5M rows (the kernel fixture's size) using `uniform_list` plus `canvas`, painting graph lanes, nodes and edges, not just text. Measure presented frames, with PresentMon on Windows, because paint timers can read healthy while the screen is frozen. Measure at the end of the list too: `f32` scroll offsets step by 2 px past row ~700k and 4 px past row ~1.4M at 24 px (derived, not measured). Zed's own git graph is a reference only, because `git_ui` is GPL.
+- [ ] Pin Rust, gpui-component and `gpui-pre`. Build a window with 1.5M rows (the kernel fixture's size) using `uniform_list` plus `canvas`, painting graph lanes, nodes and edges, not just text. Measure presented frames, with PresentMon on Windows, because paint timers can read healthy while the screen is frozen. The scroll Floor covers the top 100k rows. Past that is recorded only: `f32` scroll offsets step by 2 px past row ~700k and 4 px past row ~1.4M at 24 px (derived, not measured). Zed's own git graph is a reference only, because `git_ui` is GPL.
 - [ ] Commit message spike: gpui-component's `Textarea` (`Input` is single-line from 0.6.0) with IME, dead keys, undo and copy/paste, tested separately on each OS because IME handling is platform-specific. Include Cmd-Return during a dead key, IME near the screen bottom, CRLF and Excel paste, and a held key under background notifies, at the coalesced rate of one drain per frame as well as at the worst case. A git client is unusable without it.
 - [ ] gix spike: open the Linux kernel repo and time history walks with and without a commit-graph file, separately for HEAD only and all refs, because the topo walk goes down to the lowest tip's generation before yielding anything. On its worktree, time HEAD vs index, watcher-scoped index vs worktree and full status separately, and compare against git. Do all of it on macOS and Windows.
 - [ ] git CLI runner: `GIT_TERMINAL_PROMPT=0`, `LC_ALL=C`, `--no-pager`, `--no-optional-locks` on every read, porcelain formats wherever they exist, stderr captured for errors and `--progress`.
@@ -104,9 +104,9 @@ Phase 0 tests whether GPUI and gix carry their weight on both macOS and Windows 
 - [ ] Job scheduler inside the `repo` crate: Job classes, per-repo queues, lanes, Slots and generation tokens, as specified in ADR 0001 and ADR 0002.
 - [ ] Benchmark harness: criterion for the core crates, `tracing` spans in the app, and two fixture repos (small, Linux kernel) available on both OSes.
 
-**Gate:** on both macOS and Windows, the 1.5M-row list scrolls without dropped presented frames, the commit box handles real typing, and the history walk fits its floor. Floors are set before any spike runs and don't move once results are in.
+**Gate:** on both macOS and Windows, the UI framework meets its Floors for scrolling, key input, real typing, launch and memory, and gix meets its Floors for history walks and status. The Floors are in [#8](https://github.com/skolldev/cairn/issues/8#issuecomment-6685134359) and don't move once results are in. Each one names the component a miss condemns: a framework miss counts against GPUI, while a gix miss sends that path to the CLI and leaves GPUI unaffected.
 
-**Kill switch:** if GPUI basics (text input, scrolling, focus) block you for more than two weeks on either OS, GPUI is a no-go, and every crate except `app` is kept. Tauri 2 + Angular is not adopted automatically: it must pass the same spikes against the same floors first. Research says it probably can't meet launch or 8 ms scrolling on macOS, so adopting it would mean accepting different budgets, which is a product decision. The failure type matters: a webview fixes text input and IME failures, but is unlikely to rescue a scrolling failure on macOS.
+**Kill switch:** if GPUI basics (text input, scrolling, focus) block you for more than two weeks on either OS, GPUI is a no-go, and every crate except `app` is kept. A failed result starts that window, which is shared across all failures on that OS, and it becomes a Floor miss when the window runs out. Tauri 2 + Angular is not adopted automatically: it must pass the same spikes against the same floors first. Research says it probably can't meet launch or 8 ms scrolling on macOS, so adopting it would mean accepting different budgets, which is a product decision. The failure type matters: a webview fixes text input and IME failures, but is unlikely to rescue a scrolling failure on macOS.
 
 ## Phase 1: Repos, branches and checkout
 
@@ -221,7 +221,7 @@ Nothing below starts until the MVP gate is met. Order them by what you miss most
 
 ## Performance budgets
 
-These numbers are the definition of "blazing fast" for this project. They're targets set up front, not measurements, so revise them after the Phase 0 spikes, not after the features ship. Passing the Phase 0 gate is judged against floors set before the spikes, not against revised budgets. Every budget applies on both macOS and Windows. Fixtures: a small repo and the Linux kernel (about 1.5M commits).
+These numbers are the definition of "blazing fast" for this project. They're targets set up front, not measurements, so revise them after the Phase 0 spikes, not after the features ship. Passing the Phase 0 gate is judged against [the Floors in #8](https://github.com/skolldev/cairn/issues/8#issuecomment-6685134359), not against revised budgets. Every budget applies on both macOS and Windows. Fixtures: a small repo and the Linux kernel (about 1.5M commits).
 
 | Interaction | Target | Fixture |
 | --- | --- | --- |
@@ -231,7 +231,7 @@ These numbers are the definition of "blazing fast" for this project. They're tar
 | Graph scrolling | no frame over 8 ms | Linux kernel |
 | Select commit to file list | < 50 ms | Linux kernel |
 | Select file to first diff screen | < 50 ms for files under 10k lines | any |
-| Worktree save to updated status | < 150 ms (watcher debounce included). Under review: the 100–200 ms debounce takes most or all of this | Linux kernel |
+| Worktree save to updated status | < 150 ms (watcher debounce included). Under review: the 100–200 ms debounce takes most or all of this, so the budget rewrite must settle it. The Floors time the read only | Linux kernel |
 | Git command finishes to UI updated | < 100 ms | any |
 | Memory with graph loaded | < 300 MB | Linux kernel |
 
