@@ -1,0 +1,5 @@
+10:10:10 start cold:linux-graph*5
+10:12:23 done cold:linux-graph*5
+10:12:23 start cold:linux-nograph*3
+10:13:33 done cold:linux-nograph*3
+10:13:33 all done
