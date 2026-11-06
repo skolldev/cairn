@@ -6,7 +6,7 @@ These are stopwatch-style reference numbers for GitKraken, not Cairn results. Th
 
 ## Setup
 
-- GitKraken 12.6.2, signed in, with `commits.maxCommitsInGraph` unset, so at its default. The 954 refs shown match the Mac.
+- GitKraken 12.6.2, signed in, with `commits.maxCommitsInGraph` unset, so at its default.
 - Ryzen 7 7800X3D, 64 GB, Radeon RX 7900 XT, Windows 11 build 26200, High performance power plan
 - Fixtures on `C:`, a SATA SSD, under `C:\Users\guita\cairn-fixtures`
 - Primary display 3840×2160 at 150%, set to 120 Hz for the run. GitKraken was maximized on it. The two side displays stayed on at 60 Hz.
@@ -56,7 +56,7 @@ To rerun, build with `cargo build --release` and start `windows/helper.ps1` elev
 
 - **The 120 Hz control failed.** A window repainting every refresh averaged 60 fps with the primary at 120 Hz, repeating 8, 8, 8, 33, 25 ms. It stayed near 60 fps at 240 Hz and with duplication pointed at another display. The cause is unknown. The side displays at 60 Hz are unconfirmed as a cause, because they were never turned off, and moving GitKraken between displays didn't change the average. So this run can't show what share of GitKraken's frames would pass a strict budget, and the Windows scroll row can't be compared directly with the Mac's.
 - **The scroll result still stands as a miss.** GitKraken's 36 fps is well under the 60 fps the control reached, and PresentMon and desktop duplication agree on it, at a 25.0 and 25.7 ms median.
-- **PresentMon has no control baseline.** On the three control runs in `raw.jsonl` it logged only 2 to 8 frames from the control window, while earlier ad-hoc runs logged 240 or more. That isn't explained. On GitKraken it logged 681 frames against desktop duplication's 715.
+- **PresentMon has no control baseline.** On the three control runs in `raw.jsonl` it logged only 2 to 8 frames from the control window, while earlier ad-hoc runs logged about 240 to 380. That isn't explained. On GitKraken it logged 681 frames against desktop duplication's 715.
 - **Click floor:** a window repainting inside `WM_LBUTTONDOWN` measured a median of 6.7 ms (1.5–14.1), so click rows include that. Taken off, file first paint would sit just inside budget.
 - **Commit limit:** GitKraken loads 2000 of the 1.5M commits, as on macOS.
 - **Memory** is one sample with the user's other tabs open, so it's an upper bound. Private working set and `phys_footprint` are different counters.
@@ -65,8 +65,8 @@ To rerun, build with `cargo build --release` and start `windows/helper.ps1` elev
 
 ## What GitKraken does here
 
-- **Window position:** it never saves the window's position on quit, so it reopens wherever `windowSettings` in `%APPDATA%\.gitkraken\config` says. Pointing that at the primary was needed for launch and cold rows, and it has been put back.
-- **Fixtures:** with fetches redirected, pins held on every check. It wrote a `multi-pack-index` to `linux-graph` and `ripgrep`, and a commit-graph chain to `ripgrep`. `linux-nograph` stayed clean, unlike on the Mac, because its tab was never open for more than about 40 s.
+- **Window position:** moving the window and quitting left `windowSettings` in `%APPDATA%\.gitkraken\config` unchanged, so it reopened on the old display. Pointing that at the primary was needed for launch and cold rows, and it has been put back.
+- **Fixtures:** with fetches redirected, pins held on every check. It wrote a `multi-pack-index` to `linux-graph` and `ripgrep`, and a commit-graph chain to `ripgrep`. `linux-nograph` stayed clean, unlike on the Mac, probably because its tab was never open for more than about 40 s.
 
 ## Set aside
 
