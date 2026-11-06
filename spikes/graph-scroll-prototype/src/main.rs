@@ -527,6 +527,29 @@ fn tick(view: Entity<View>, position: gpui::Point<gpui::Pixels>, window: &mut Wi
         }
         this.step(window, cx)
     });
+    // CAIRN_IDLE_SETTLE: stop driving frames once the scenarios are done, so the
+    // settled reading is taken with no GPU work in flight. Default is unchanged.
+    if std::env::var_os("CAIRN_IDLE_SETTLE").is_some() {
+        let v = view.read(cx);
+        let done = match &v.bench {
+            Some(b) => v.full && b.current.is_none() && b.queue.is_empty(),
+            None => v.cfg.mode == "empty" && v.drew,
+        };
+        if done {
+            let s = v.cfg.settle;
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs_f64(s));
+                let (now, peak) = sys::memory();
+                println!("idle settled {:.1} MB, peak {:.1} MB", now as f64 / 1e6, peak as f64 / 1e6);
+                let pid = std::process::id().to_string();
+                if let Ok(o) = std::process::Command::new("footprint").args(["-p", &pid]).output() {
+                    print!("{}", String::from_utf8_lossy(&o.stdout));
+                }
+                std::process::exit(0);
+            });
+            return;
+        }
+    }
     if let Some(d) = delta {
         let e = ScrollEvent {
             position,

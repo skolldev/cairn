@@ -39,6 +39,12 @@ The last one is a free window to scroll by hand.
 Flags: `--cap 32` lanes, `--rows 1500000`, `--runs 3`, `--seconds 8`,
 `--only <name>`, `--paint edge`, `--window 1280x800`, `--settle 10`.
 
+Set `CAIRN_IDLE_SETTLE=1` for memory runs. It stops driving frames once the
+scenarios finish, reads memory after `--settle`, prints `footprint` and exits.
+Without it the settle phase keeps rendering, and the reading includes a transient
+Metal driver pool of about 194 MB. Scroll figures are the same either way, but the
+summary table isn't printed.
+
 ## Windows
 
 `src/sys.rs` has a Windows path, but it has never been compiled or run. Expect
@@ -73,6 +79,7 @@ That is far above any lane cap, so every lane is occupied on every row. The cap 
 - **Held input:** real OS key events at 30 Hz through the platform queue, plus a
   notify every 8 ms. A run with no keys received is INVALID.
 - **Memory:** `phys_footprint` or private working set, checked against `footprint`.
+  Read it with `CAIRN_IDLE_SETTLE=1`, or it isn't a settled figure.
 - **Control:** same input path, a plain repaint and 2 ms of paint work. See
   `CAIRN_CONTROL_SPIN_US`. With no work it misses about 2% of frames, while the
   real graph doesn't.
@@ -91,7 +98,7 @@ so these figures are the record.
 | Scroll, row 100k, flick | same | 99.37%, 16.7 ms | 99.37%, 16.7 ms | Pass, provisional |
 | Scroll, held input, notifies | same | 99.69%, 16.7 ms | 99.79%, 16.7 ms | Pass, provisional |
 | Launch, 20 warm | median 400, max 800 ms | 276, 293 ms | 239, 247 ms | Pass |
-| Memory, settled | 300 MB | 738 MB, peak 757 | 466 MB, peak 468 | **Fail** |
+| Memory, settled, idle | 300 MB | 538 MB, peak 757 | 248 MB, peak 467 | **Fail**, plan's format |
 
 Recorded only, past row 100k: 99.05% to 99.69%, worst gap 16.7 ms, on both formats.
 
@@ -101,7 +108,11 @@ runs. Nothing independent has checked Metal's presented times yet, such as
 Instruments. Launch was measured with the first 5,000 rows only, since the rest
 arrive in the background.
 
-Memory by window size, `rows` / `delta`, top-wheel with a 3 s settle, one run:
+Memory is the idle re-measure below. The rest of the table is from the first
+runs, on battery.
+
+Memory by window size while still rendering, so each figure includes the driver
+pool. `rows` / `delta`, top-wheel with a 3 s settle, one run:
 
 | Window | Empty | `rows` | `delta` |
 | --- | --- | --- | --- |
@@ -109,6 +120,27 @@ Memory by window size, `rows` / `delta`, top-wheel with a 3 s settle, one run:
 | 1440x900 | 275 MB | 688 MB | 397 MB |
 | 1280x800 | 265 MB | 658 MB | 367 MB |
 
-`delta` misses the Floor at every size, so the miss isn't only the row store. On
-the full-size window, `footprint` showed about 380 MB of 439 MB in graphics
-memory. The Floor doesn't name a window size.
+The Floor doesn't name a window size.
+
+### Idle re-measure, 2026-11-06
+
+The first memory runs were wrong: `tick` re-arms `on_next_frame` unconditionally,
+so settle never went idle. Same machine and window on mains power, three separate
+processes per format, `CAIRN_IDLE_SETTLE=1`, worst of three. The empty window read
+85 MB idle, peak 296 MB.
+
+The driver pool is about 193 MB of `Owned physical footprint (unmapped)
+(graphics)`. A bare Metal program with no GPUI shows it too, so it isn't GPUI's. In
+11 trials it appeared within a second of rendering starting and left within a
+second of stopping, at 10 Hz to 1,000 Hz, with or without a window. That it's a
+driver working pool is inferred from this behaviour, not documented.
+
+After scrolling, GPUI holds 5 drawables at 28.3 MB each, 142 MB in total, against
+3 in a bare Metal window. The cause isn't known, and the frame hooks haven't been
+ruled out.
+
+Scroll from these six processes, worst of three, `rows` / `delta`: top wheel
+99.79% / 99.16%, top flick 99.58% / 99.90%, row 100k wheel 99.79% / **98.84%**, row
+100k flick 99.37% / 99.90%, held input 99.58% / 99.79%. Worst gap 16.7 ms. The
+control read 97.10% to 98.84%, so it failed in all six and these can't separate a
+real miss from noise.
