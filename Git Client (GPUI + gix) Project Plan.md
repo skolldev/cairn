@@ -30,25 +30,26 @@ Phases run in order of dependency, not of the priority list: browsing comes befo
 
 ## Architecture
 
-One rule shapes the whole design: the UI thread never touches git. Reads use gix on background threads and come back as immutable snapshots. Writes are cancellable jobs that run the `git` CLI. A file watcher invalidates the snapshots that are affected.
+One rule shapes the whole design: the UI thread never touches git. Reads use gix on background threads and come back as immutable snapshots. Writes are Jobs that run the `git` CLI, and a Local write Job always runs to completion. A file watcher invalidates the snapshots that are affected.
 
 &#91;embedded content: architecture · UI, repo service, outside world\]
 
-UI intent reaches git only through the job scheduler. Everything that flows back up to the UI is an immutable snapshot.
+UI intent reaches git only through the Repo service. Everything that flows back up to the UI is an immutable snapshot. See [ADR 0001](docs/adr/0001-repo-crate-runs-jobs-on-its-own-threads.md) and [ADR 0002](docs/adr/0002-local-write-jobs-always-run-to-completion.md).
 
 **Crates**
 
 | Crate | Owns | Depends on |
 | --- | --- | --- |
-| `core` | Domain types (`Oid`, `RefName`, `BranchInfo`, `CommitRow`, `FileStatus`), errors, job trait | nothing |
+| `core` | Domain types (`Oid`, `RefName`, `BranchInfo`, `CommitRow`, `FileStatus`), errors | nothing |
 | `read` | gix queries: refs, revwalk, status, tree and blob diff | core, gix |
 | `write` | git CLI runner: spawn, environment, porcelain parsing, progress | core |
 | `graph` | Lane layout from a commit stream, incremental and cacheable | core |
 | `diff` | Line and word diff, highlighting of visible lines | core, gix-diff, syntect |
 | `auth` | Token store and git credential-helper mode | core, keyring |
-| `app` | GPUI binary: windows, panels, actions, keymaps | all of the above, gpui, gpui-component |
+| `repo` | Repo service: Intents in, Snapshots out. Privately owns the Job scheduler, watcher, CLI fallback and cache access | core, read, write, graph, diff, notify, redb |
+| `app` | GPUI binary: windows, panels, actions, keymaps, and the bridge that drains Snapshots | all of the above, gpui, gpui-component |
 
-Only `app` depends on GPUI. Every other crate can be tested headless, and they all survive a UI framework swap. That's the hedge against GPUI risk (see Risks).
+Only `app` depends on GPUI. Every other crate can be tested headless, and they all survive a UI framework swap. That's the hedge against GPUI risk (see Risks). A swap costs the whole UI layer but no git behaviour.
 
 **Key decisions**
 
@@ -62,12 +63,12 @@ Only `app` depends on GPUI. Every other crate can be tested headless, and they a
 | Highlighting | syntect for the MVP, visible lines only, cached per blob oid | Broad grammar coverage with no setup. Move to tree-sitter only if profiling demands it |
 | Watching | notify + notify-debouncer-full | Cross-platform; debouncing collapses event bursts |
 | Cache | redb | Embedded pure-Rust KV store for graph layout and commit metadata |
-| Async | GPUI executors only, no tokio in the MVP | One scheduler. Git processes run on background tasks |
+| Async | No tokio in the MVP. Jobs run on threads owned by `repo`; GPUI executors are for UI-side async only | Git work blocks, so dropping a GPUI `Task` can't stop it, and a pool we own can be capped. Keeps the scheduler headless and out of the UI swap |
 
 **gix rules**
 
 - Don't use `repo.status()` for the fast path: it rebuilds an index from `HEAD^{tree}` on every call. Run HEAD vs index only when `.git/index` or HEAD changes, and scope index vs worktree to the watcher's paths.
-- Never call `Outcome::write_changes()`. It drops the fsmonitor and untracked-cache extensions and dissolves a split index. Use `git update-index -q --refresh` when stat-dirty entries stay high.
+- Never call `Outcome::write_changes()`. It drops the fsmonitor and untracked-cache extensions and dissolves a split index. Use `git update-index -q --refresh` when stat-dirty entries stay high, as a Local write Job, because it takes `index.lock`.
 - Keep the default `FastEq` comparison. `HashEq` disagrees with git.
 - Open with `permissions.config.git_binary = true`, or pass the config paths in, so gix sees the same system config as the `git` binary.
 
@@ -82,23 +83,25 @@ Only `app` depends on GPUI. Every other crate can be tested headless, and they a
 
 **Data flow**
 
-1. A user action becomes a GPUI action, and the action becomes a job.
-2. The job runs on the background executor and carries a generation token. A newer job of the same kind (for example, selecting another commit) cancels the older one.
-3. The result is an `Arc` snapshot. It's swapped into a GPUI entity, followed by `cx.notify()`.
-4. The watcher observes `.git/` (HEAD, refs, packed-refs, index, FETCH\_HEAD) and the worktree. After a 100–200 ms debounce, it refreshes only the affected snapshot: refs, status or both.
-5. Every write job ends with a targeted refresh. There are no full reloads.
+1. A user action becomes a GPUI action, and `app` turns it into an Intent for the Repo service, which turns it into one or more Jobs.
+2. A Read Job carries a generation token and runs in the Interactive lane or the Background lane. A newer Read Job for the same Slot Supersedes the older one. A Slot holds at most one running and one pending Job.
+3. Network Jobs and Local write Jobs each have a queue per repo, run one at a time within it, and may overlap each other. Read Jobs overlap both. A Local write Job is never stopped once started, and a Network Job stops only when the user asks.
+4. The result is an `Arc` snapshot. A coalesced bridge in `app` drains results at most once per frame, drops stale generations, swaps the snapshots into GPUI entities, and calls `cx.notify()` only for entities that changed.
+5. The watcher observes `.git/` (HEAD, refs, packed-refs, index, FETCH\_HEAD) and the worktree. After a 100–200 ms debounce, it refreshes only the affected snapshot: refs, status or both.
+6. Every Local write Job, and any stopped Network Job, ends with a targeted refresh. There are no full reloads.
+7. Quit drops Read Jobs and stops Network Jobs, asking first for a push. It waits for Local write Jobs, because exiting closes git's pipes and can kill it mid-step. A warned Force quit is the only exception.
 
 ## Phase 0: Spike and foundations
 
 Phase 0 tests whether GPUI and gix carry their weight on both macOS and Windows before anything else gets built. Size: about 8–12 focused days, because each spike runs on both OSes.
 
-- [ ] Cargo workspace with the seven crates. CI runs fmt, clippy and test on macOS and Windows.
+- [ ] Cargo workspace with the eight crates. CI runs fmt, clippy and test on macOS and Windows.
 - [ ] Pin Rust, gpui-component and `gpui-pre`. Build a window with 1.5M rows (the kernel fixture's size) using `uniform_list` plus `canvas`, painting graph lanes, nodes and edges, not just text. Measure presented frames, with PresentMon on Windows, because paint timers can read healthy while the screen is frozen. Measure at the end of the list too: `f32` scroll offsets step by 2 px past row ~700k and 4 px past row ~1.4M at 24 px (derived, not measured). Zed's own git graph is a reference only, because `git_ui` is GPL.
-- [ ] Commit message spike: gpui-component's `Textarea` (`Input` is single-line from 0.6.0) with IME, dead keys, undo and copy/paste, tested separately on each OS because IME handling is platform-specific. Include Cmd-Return during a dead key, IME near the screen bottom, CRLF and Excel paste, and a held key under background notifies. A git client is unusable without it.
+- [ ] Commit message spike: gpui-component's `Textarea` (`Input` is single-line from 0.6.0) with IME, dead keys, undo and copy/paste, tested separately on each OS because IME handling is platform-specific. Include Cmd-Return during a dead key, IME near the screen bottom, CRLF and Excel paste, and a held key under background notifies, at the coalesced rate of one drain per frame as well as at the worst case. A git client is unusable without it.
 - [ ] gix spike: open the Linux kernel repo and time history walks with and without a commit-graph file, separately for HEAD only and all refs, because the topo walk goes down to the lowest tip's generation before yielding anything. On its worktree, time HEAD vs index, watcher-scoped index vs worktree and full status separately, and compare against git. Do all of it on macOS and Windows.
-- [ ] git CLI runner: `GIT_TERMINAL_PROMPT=0`, `LC_ALL=C`, `--no-pager`, porcelain formats wherever they exist, stderr captured for errors and `--progress`.
+- [ ] git CLI runner: `GIT_TERMINAL_PROMPT=0`, `LC_ALL=C`, `--no-pager`, `--no-optional-locks` on every read, porcelain formats wherever they exist, stderr captured for errors and `--progress`.
 - [ ] Windows process handling: spawn git with `CREATE_NO_WINDOW` so no console windows flash, measure process spawn cost, and test paths with spaces and paths over 260 characters.
-- [ ] Job scheduler with generation tokens and cancellation.
+- [ ] Job scheduler inside the `repo` crate: Job classes, per-repo queues, lanes, Slots and generation tokens, as specified in ADR 0001 and ADR 0002.
 - [ ] Benchmark harness: criterion for the core crates, `tracing` spans in the app, and two fixture repos (small, Linux kernel) available on both OSes.
 
 **Gate:** on both macOS and Windows, the 1.5M-row list scrolls without dropped presented frames, the commit box handles real typing, and the history walk fits its floor. Floors are set before any spike runs and don't move once results are in.
@@ -128,7 +131,7 @@ The graph is the hardest UI piece and the main reason people stay with GitKraken
 **Data (`graph` crate)**
 
 - [ ] Revwalk from all refs, HEAD and (optionally) stashes, in topological order with commit date as the tie-breaker.
-- [ ] Use the commit-graph file for generation numbers. If it's missing, offer to run `git commit-graph write --reachable` once.
+- [ ] Use the commit-graph file for generation numbers. If it's missing, offer to run `git commit-graph write --reachable` once, as a Local write Job.
 - [ ] Streaming lane assignment: each row is a node column plus incoming and outgoing edges per lane. Store it compactly (u16 columns, small edge vectors) and give each branch line a stable colour.
 - [ ] Compute the first \~5,000 rows synchronously and stream the rest. In the MVP, a ref change triggers a full recompute in the background. Optimise only if it measures slow.
 - [ ] Cache the layout in redb, keyed by a hash of the tip oids, so warm opens skip layout.
@@ -161,7 +164,7 @@ A diff has to agree with `git diff` exactly, so correctness tests come before vi
 
 ## Phase 4: Common git operations
 
-Every mutation in this phase is a thin UI over one `git` command, and the work is mostly state handling and error display. Size: about 10–14 days.
+Every mutation in this phase is a thin UI over one `git` command, except Pull, and the work is mostly state handling and error display. Size: about 10–14 days.
 
 | Operation | Command | Notes |
 | --- | --- | --- |
@@ -170,7 +173,7 @@ Every mutation in this phase is a thin UI over one `git` command, and the work i
 | Discard changes | `git restore -- <path>` or a reverse patch on the worktree | Always asks for confirmation |
 | Commit / amend | `git commit -F -` (message on stdin) / `--amend` | Hooks run as normal. Hook output shows on failure |
 | Push | `git push [-u <remote> <branch>]`, `--force-with-lease` behind a confirm | Uses inherited credentials until Phase 5 |
-| Pull | `git pull --ff-only` by default, rebase as an option | No surprise merge commits |
+| Pull | `git fetch <remote>` as a Network Job, then `git merge --ff-only @{upstream}` by default or `git rebase @{upstream}` as an option, as a Local write Job | No surprise merge commits. The second Job starts only if the fetch succeeded. Disabled with no upstream. Golden tests against the real `git pull` |
 | Branch create / rename / delete | `git branch`, `git branch -m`, `git branch -d` (`-D` behind a confirm) | Right-click menus on the sidebar and the graph |
 | Merge | `git merge [--no-ff] <branch>` | On conflict, show the banner (below) |
 | Rebase onto | `git rebase <target>` | Non-interactive only. Continue / skip / abort |
@@ -243,7 +246,7 @@ The biggest risk isn't technical. It's a side project that never gets good enoug
 | Scope creep, lost momentum | Never replaces GitKraken | Strict MVP gate. Use it read-only from Phase 1, next to the terminal |
 | GPUI API churn, or Zed deprioritising GPUI ([community fork gpui-ce exists](https://github.com/gpui-ce/gpui-ce/), but moving to it likely means giving up gpui-component) | Breakage on every upgrade | Pin gpui-component and `gpui-pre` exactly and commit `Cargo.lock`. Keep every crate except `app` UI-free. Upgrade deliberately, not continuously |
 | `gpui-pre` is a Zed snapshot republished under one crates.io owner | The UI stack rests on one person's account | Move to Zed's own releases when they land. Re-check the pin before each upgrade |
-| [zed#61469](https://github.com/zed-industries/zed/issues/61469): on Windows, sustained input plus background notifies can stop frames being presented for seconds | Freezes while typing, invisible to paint timers | Measure presented frames with PresentMon. Test the reported app-level watchdog in Phase 0 |
+| [zed#61469](https://github.com/zed-industries/zed/issues/61469): on Windows, sustained input plus background notifies can stop frames being presented for seconds | Freezes while typing, invisible to paint timers | Coalesce notifies through the bridge, which caps the rate but doesn't remove the bug. Measure presented frames with PresentMon. Test the reported app-level watchdog in Phase 0 |
 | GPUI widget gaps (IME, accessibility) | A commit box that fights you | Use gpui-component's `Textarea`. Phase 0 kill switch, under which Tauri 2 + Angular must pass the same spikes first |
 | GPUI is less mature on Windows than on macOS | A second-class Windows build, or Windows-only blockers late in the project | Run every Phase 0 spike and gate on both OSes. A Windows failure is a no-go for GPUI |
 | Windows file and process overhead (NTFS, antivirus scanning, process spawn cost) | Status and write budgets missed on Windows only | Measure status and git process round trips on the Linux kernel fixture on Windows in Phase 0, then revise the budgets from real numbers |

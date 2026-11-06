@@ -10,12 +10,12 @@ Native desktop app rendered with GPUI, not a web view. macOS and Windows are equ
 
 ## Stack
 
-Rust workspace of seven crates. Only `app` depends on the UI framework.
+Rust workspace of eight crates. Only `app` depends on the UI framework.
 
 - UI: gpui-component 0.9.0, pinned exactly, which pins `gpui-pre` 0.3.11, a snapshot of Zed's GPUI. Rust 1.98.1.
 - Reads: gix, pinned to an exact revision, on background threads, returned as immutable snapshots. Cases gix can't handle fall back to the `git` CLI.
-- Writes: the `git` CLI, as cancellable jobs.
-- Diff and highlighting: `gix-diff`'s imara-diff, using the repo's `diff.algorithm`, and syntect. Cache: redb. Watching: notify. Async: GPUI executors only, no tokio in the MVP.
+- Writes: the `git` CLI, as Jobs. Local write Jobs always run to completion; Network Jobs stop only when the user asks.
+- Diff and highlighting: `gix-diff`'s imara-diff, using the repo's `diff.algorithm`, and syntect. Cache: redb. Watching: notify. Async: no tokio in the MVP. Jobs run on threads owned by the `repo` crate, and GPUI executors are for UI-side async only.
 - Kill switch: if GPUI text input, scrolling or focus block for more than two weeks in Phase 0, GPUI is a no-go and every crate except `app` is kept. Tauri 2 + Angular must pass the same spikes first. It probably can't meet launch or 8 ms scrolling on macOS, so adopting it would mean accepting different budgets.
 
 Full plan: `Git Client (GPUI + gix) Project Plan.md`.
@@ -56,7 +56,7 @@ When speed, absence of bloat and git fidelity conflict, speed wins. A feature th
 - Commit and WIP panel: changed files, hunk- and line-level staging, commit message box.
 - Diff viewer: unified and side-by-side, with syntax highlighting.
 - Network: fetch, pull and push, with token auth for GitHub and Azure DevOps.
-- Common git operations, each a thin UI over one `git` command. Merge, rebase, cherry-pick and revert show an in-progress banner with Open mergetool, Mark resolved, Continue and Abort.
+- Common git operations, each a thin UI over one `git` command, except Pull, which is a fetch followed by a merge or rebase. Merge, rebase, cherry-pick and revert show an in-progress banner with Open mergetool, Mark resolved, Continue and Abort.
 
 **Performance budgets** (targets set up front, not yet measured; revise after the Phase 0 spikes)
 
