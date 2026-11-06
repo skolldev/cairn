@@ -5,7 +5,9 @@ Set-Location $PSScriptRoot
 Remove-Item cold.trigger, cold.done, pm.trigger, pm.started, pm.done, stop.trigger -ErrorAction SilentlyContinue
 $res = Join-Path $PSScriptRoot '..\results\windows'
 New-Item -ItemType Directory -Force $res | Out-Null
-Get-MpPreference | Select-Object ExclusionPath, ExclusionProcess, ExclusionExtension | Format-List |
+# Not Format-List: it stops at $FormatEnumerationLimit, 4 items by default.
+$mp = Get-MpPreference
+'ExclusionPath', 'ExclusionProcess', 'ExclusionExtension' | ForEach-Object { $_; $mp.$_; '' } |
     Out-File -Encoding utf8 (Join-Path $res 'defender-exclusions.txt')
 New-Item -ItemType File -Force helper.ready | Out-Null
 Write-Host 'Ready. Leave this window open.'

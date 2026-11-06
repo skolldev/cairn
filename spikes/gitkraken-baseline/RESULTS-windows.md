@@ -10,7 +10,7 @@ These are stopwatch-style reference numbers for GitKraken, not Cairn results. Th
 - Ryzen 7 7800X3D, 64 GB, Radeon RX 7900 XT, Windows 11 build 26200, High performance power plan
 - Fixtures on `C:`, a SATA SSD, under `C:\Users\guita\cairn-fixtures`
 - Primary display 3840×2160 at 150%, set to 120 Hz for the run. GitKraken was maximized on it. The two side displays stayed on at 60 Hz.
-- Defender real-time protection on, in its normal state
+- Defender real-time protection on, in its normal state. The fixtures and `git.exe` are not excluded.
 - Taken 2026-11-06, with the user's 15 repo tabs open in other tabs
 
 ## Results
