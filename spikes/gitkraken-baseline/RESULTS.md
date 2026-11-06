@@ -1,6 +1,6 @@
 # GitKraken baseline: macOS half of issue 7
 
-Windows is not measured. These are stopwatch-style reference numbers for GitKraken, not Cairn results.
+The Windows half is in `RESULTS-windows.md`. These are stopwatch-style reference numbers for GitKraken, not Cairn results.
 
 ## Setup
 

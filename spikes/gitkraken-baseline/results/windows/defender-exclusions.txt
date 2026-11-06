@@ -1,0 +1,9 @@
+﻿
+
+ExclusionPath      : {C:\Program Files\Black Tree Gaming Ltd\Vortex, C:\Program Files\JetBrains\Rider\r2r, 
+                     C:\Users\guita\.nuget, C:\Users\guita\AppData\Local\JetBrains\Rider2025.3...}
+ExclusionProcess   : 
+ExclusionExtension : 
+
+
+

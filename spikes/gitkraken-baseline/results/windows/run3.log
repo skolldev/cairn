@@ -1,0 +1,13 @@
+17:57:57 state {'linux-graph': ['commit-graph', 'packs', 'midx'], 'linux-nograph': [], 'ripgrep': ['commit-graphs', 'packs', 'midx']}
+17:57:58 start control
+17:58:06 done control
+17:58:06 start scroll:linux-graph
+17:59:12 done scroll:linux-graph
+17:59:12 start closefx
+17:59:29 done closefx
+17:59:29 start cold:linux-graph*5
+18:01:15 done cold:linux-graph*5
+18:01:15 start cold:linux-nograph*5
+18:05:27 done cold:linux-nograph*5
+18:05:37 state {'linux-graph': ['commit-graph', 'packs', 'midx'], 'linux-nograph': [], 'ripgrep': ['commit-graphs', 'packs', 'midx']}
+18:05:37 all done

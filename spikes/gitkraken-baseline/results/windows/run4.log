@@ -1,0 +1,9 @@
+18:08:27 state {'linux-graph': ['commit-graph', 'packs', 'midx'], 'linux-nograph': [], 'ripgrep': ['commit-graphs', 'packs', 'midx']}
+18:08:28 start control
+18:08:36 done control
+18:08:36 start cold:linux-graph*5
+18:11:42 done cold:linux-graph*5
+18:11:42 start control
+18:11:50 done control
+18:12:06 state {'linux-graph': ['commit-graph', 'packs', 'midx'], 'linux-nograph': [], 'ripgrep': ['commit-graphs', 'packs', 'midx']}
+18:12:06 all done

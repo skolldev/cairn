@@ -1,0 +1,8 @@
+17:53:26 state {'linux-graph': ['commit-graph', 'packs', 'midx'], 'linux-nograph': [], 'ripgrep': ['commit-graphs', 'packs', 'midx']}
+17:53:26 start launch
+17:55:25 done launch
+17:55:25 start memory
+17:55:52 memory MB 1096.486912 of 7 processes
+17:55:52 done memory
+17:56:00 state {'linux-graph': ['commit-graph', 'packs', 'midx'], 'linux-nograph': [], 'ripgrep': ['commit-graphs', 'packs', 'midx']}
+17:56:00 all done

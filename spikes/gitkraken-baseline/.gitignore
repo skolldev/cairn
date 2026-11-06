@@ -2,3 +2,12 @@ probe
 cold.trigger
 cold.done
 __pycache__/
+windows/target/
+windows/*.png
+windows/bin/
+windows/*.trigger
+windows/*.done
+windows/*.started
+windows/*.ready
+windows/*.result
+windows/*.log
