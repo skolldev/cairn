@@ -1,0 +1,20 @@
+# PROTOTYPE: throwaway spike for issue #10. Not part of Cairn. See README.md.
+[package]
+name = "commit-box-prototype"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11" }
+gpui-component = { version = "=0.9.0", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+
+[profile.release]
+opt-level = 3
+debug = "line-tables-only"
