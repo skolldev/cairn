@@ -85,30 +85,40 @@ The floor doesn't cover input-to-photon latency, and neither does this.
 
 ## macOS results, 2026-11-06
 
-M3 Max, built-in display, on battery, window 1180x760, worst of three runs. Raw
-output is in `results/`, which is git-ignored, so these figures are the record.
+M3 Max, built-in display, on battery, window 1180x760, worst of three runs, nothing else
+from this spike open. Raw output is in `results/`, which is git-ignored, so these
+figures are the record.
 
 | Scenario | `frame` (Floor) | `vsync` | `worst` | Lost or duplicated | Result |
 | --- | --- | --- | --- | --- | --- |
-| Hold Backspace, 10 s | 25.0 ms | 16.7 ms | 16.7 ms | None | Pass |
-| Hold Left, 10 s | 16.7 ms | 16.7 ms | 16.7 ms | None | Pass |
-| Burst, 30 s | 16.7 ms | 16.7 ms | 16.7 ms | None | Pass |
+| Hold Backspace, 10 s | 25.0 ms | 8.3 ms | 16.7 ms | None | Pass |
+| Hold Left, 10 s | 16.7 ms | 16.7 ms | 8.3 ms | None | Pass |
+| Burst, 30 s | 25.0 ms | 16.7 ms | 25.0 ms | None | Pass |
 
 No watchdog, which doesn't exist on macOS. The refresh rate wasn't read from the
 system during the run, but the 8.3 ms gaps show the display was at 120 Hz.
 
+**Contended run:** an earlier run with a second copy of this window open and being
+typed in hit 58.3 ms on one `frame` burst, FAIL, and exactly 50.0 ms on one `worst`
+burst. The clean run replaced it, and the rule to run once and keep the result was
+set before it. It does show the margin isn't huge when another GPUI app is competing
+for the machine. Log: `results/macos-full-contended.log`.
+
+**Void:** the first run on this branch, commit ce84a4e, had no text system. Without
+`gpui_platform`'s `font-kit` feature, macOS GPUI uses a no-op text system that draws no
+glyphs, so those gaps measured an app with no text. Its log is
+`results/macos-full-notext-INVALID.log`. The #9 spike's binary has the same fallback.
+
 - **Not a result about real keys:** events are posted to the app, so the OS key
   repeat and the IME are bypassed.
-- **`worst` is a weaker test than its name:** the timer reached about 530 notifies a
+- **`worst` is a weaker test than its name:** the timer reached about 500 notifies a
   second, not 1,000.
-- **`frame` drops presents:** about 7% to 9% of drawables were never presented, and
-  almost none at `vsync` or `worst`. A timer drain drifts against the display link,
-  which fits the pattern, but the cause wasn't confirmed. It's the only rate that hit
-  25 ms. Worth a look when the bridge is designed.
+- **`frame` drops presents:** about 8% to 11% of drawables were never presented, and
+  almost none at `vsync` or `worst`. The cause isn't confirmed.
 
 Paste, stock: CRLF keeps 4 `\r` and Excel keeps 3, so **the Floor fails as shipped**.
 `Textarea::on_paste` cleans both in about five lines of app code (`--paste-fix`), and
-Excel's tabs and quoted cell are left alone. Whether that counts as a framework pass
-is a call for #13, though the fix is shippable.
+Excel's tabs and quoted cell are left alone. Both results were repeated with text
+rendering on. Whether that counts as a framework pass is a call for #13, though the fix is shippable.
 
 Not done: all of CHECKLIST.md on both OSes, and everything on Windows.
