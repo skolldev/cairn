@@ -15,12 +15,22 @@ fn refs_of(snapshot: &Snapshot) -> Option<&Arc<RefsSnapshot>> {
     }
 }
 
+/// The newest refs Snapshot in `seen`. A drain returns the status Slots' Snapshots after
+/// the refs one, so the refs Snapshot isn't always the last thing drained.
+fn last_refs(seen: &[Snapshot]) -> Arc<RefsSnapshot> {
+    seen.iter()
+        .rev()
+        .find_map(refs_of)
+        .expect("a refs Snapshot")
+        .clone()
+}
+
 /// Opens `path` and returns the refs Snapshot that answers the Open.
 fn open(path: &Path) -> Arc<RefsSnapshot> {
     let harness = Harness::start();
     harness.service.send(Intent::Open(path.to_path_buf()));
     let seen = harness.drain_until(|s| refs_of(s).is_some());
-    refs_of(seen.last().unwrap()).unwrap().clone()
+    last_refs(&seen)
 }
 
 /// One line per ref, in the shape `git for-each-ref` prints with the same format.
@@ -143,11 +153,11 @@ fn each_refs_snapshot_carries_a_newer_generation() {
     let fixture = small_fixture();
     harness.service.send(Intent::Open(fixture.clone()));
     let first = harness.drain_until(|s| refs_of(s).is_some());
-    let first = refs_of(first.last().unwrap()).unwrap().clone();
+    let first = last_refs(&first);
 
     harness.service.send(Intent::Open(fixture));
     let second = harness.drain_until(|s| refs_of(s).is_some());
-    let second = refs_of(second.last().unwrap()).unwrap().clone();
+    let second = last_refs(&second);
 
     assert!(second.generation > first.generation);
 }
