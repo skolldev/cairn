@@ -1,0 +1,6 @@
+# Fixture for scripts/test-check-gpui-free.sh. Not part of Cairn's workspace.
+# `app` may depend on GPUI. Every other member except `clean` reaches a stub GPUI crate somehow.
+[workspace]
+resolver = "3"
+members = ["app", "clean", "direct", "mid", "transitive", "devonly", "builddep", "underscore"]
+exclude = ["stubs"]

@@ -1,0 +1,8 @@
+[package]
+name = "underscore"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gpui_macros = { path = "../stubs/gpui_macros" }

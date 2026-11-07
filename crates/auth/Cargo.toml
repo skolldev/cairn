@@ -1,0 +1,11 @@
+[package]
+name = "cairn-auth"
+description = "Token store and git credential-helper mode. Empty until Phase 5."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cairn-core.workspace = true
+keyring.workspace = true

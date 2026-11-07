@@ -1,0 +1,8 @@
+[package]
+name = "devonly"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dev-dependencies]
+gpui = { path = "../stubs/gpui" }

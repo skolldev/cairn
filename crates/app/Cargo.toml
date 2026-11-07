@@ -1,0 +1,23 @@
+[package]
+name = "cairn-app"
+description = "The Cairn GPUI binary. The only crate allowed to depend on GPUI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "cairn"
+path = "src/main.rs"
+
+[dependencies]
+cairn-core.workspace = true
+cairn-read.workspace = true
+cairn-write.workspace = true
+cairn-graph.workspace = true
+cairn-diff.workspace = true
+cairn-auth.workspace = true
+cairn-repo.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui-component.workspace = true

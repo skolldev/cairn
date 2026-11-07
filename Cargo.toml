@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["spikes", "scripts/gpui-guard-fixture"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98.1" # keep equal to rust-toolchain.toml
+publish = false
+
+[workspace.dependencies]
+cairn-core = { path = "crates/core" }
+cairn-read = { path = "crates/read" }
+cairn-write = { path = "crates/write" }
+cairn-graph = { path = "crates/graph" }
+cairn-diff = { path = "crates/diff" }
+cairn-auth = { path = "crates/auth" }
+cairn-repo = { path = "crates/repo" }
+
+# gix: main at bc4d813, the revision #11 measured. No release after 0.90.0 exists yet,
+# and 0.90.0 lacks the topo walk and status fixes (#3). Move to the first release that
+# contains bc4d813, as its own commit. gix-diff must come from the same revision.
+gix = { git = "https://github.com/GitoxideLabs/gitoxide", rev = "bc4d8135306797b528170709b231faf3e6ebe170" }
+gix-diff = { git = "https://github.com/GitoxideLabs/gitoxide", rev = "bc4d8135306797b528170709b231faf3e6ebe170" }
+
+# GPUI, for cairn-app only (enforced by scripts/check-gpui-free.sh). Exact pins, and
+# Cargo.lock is committed because gpui-component's sibling crates are not exact (#2).
+# gpui-pre 0.3.11 is a snapshot of zed@f816e1f. See docs/pins.md.
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["font-kit"] }
+gpui-component = { version = "=0.9.0", default-features = false }
+
+keyring = "4.2.0"
+notify = "8.2.1"
+redb = "4.5.0"
+# Pure-Rust regex engine: no oniguruma C dependency.
+syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+
+[profile.release]
+debug = "line-tables-only"

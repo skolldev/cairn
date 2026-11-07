@@ -1,0 +1,12 @@
+[package]
+name = "cairn-diff"
+description = "Line and word diff, and highlighting of visible lines. Empty until Phase 3."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cairn-core.workspace = true
+gix-diff.workspace = true
+syntect.workspace = true

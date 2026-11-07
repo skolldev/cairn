@@ -1,0 +1,6 @@
+# Zed's toolchain at f816e1f, the snapshot gpui-pre 0.3.11 republishes (#2).
+# Moving to a newer Rust is a deliberate upgrade with its own commit.
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

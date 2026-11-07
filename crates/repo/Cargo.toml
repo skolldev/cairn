@@ -1,0 +1,16 @@
+[package]
+name = "cairn-repo"
+description = "The Repo service: Intents in, Snapshots out."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cairn-core.workspace = true
+cairn-read.workspace = true
+cairn-write.workspace = true
+cairn-graph.workspace = true
+cairn-diff.workspace = true
+notify.workspace = true
+redb.workspace = true
