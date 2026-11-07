@@ -1,0 +1,14 @@
+# PROTOTYPE: throwaway spike for issue #12. Not part of Cairn. See README.md.
+[package]
+name = "git-spawn-prototype"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+debug = "line-tables-only"
