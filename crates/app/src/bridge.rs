@@ -11,11 +11,17 @@ use cairn_repo::{Generation, RepoService, Snapshot};
 use gpui::{Context, Entity, Window};
 
 use crate::refs_view::RefsView;
+use crate::status_view::StatusView;
 
 pub struct Bridge {
     service: Arc<RepoService>,
     refs: Entity<RefsView>,
+    status: Entity<StatusView>,
+    /// The newest generation shown, per Slot. Generations of different Slots are unrelated.
     refs_shown: Option<Generation>,
+    staged_shown: Option<Generation>,
+    unstaged_shown: Option<Generation>,
+    untracked_shown: Option<Generation>,
     /// A drain already ran this frame. The next-frame callback drains whatever came since.
     armed: bool,
 }
@@ -25,6 +31,7 @@ impl Bridge {
         service: Arc<RepoService>,
         woken: async_channel::Receiver<()>,
         refs: Entity<RefsView>,
+        status: Entity<StatusView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -42,7 +49,11 @@ impl Bridge {
         Self {
             service,
             refs,
+            status,
             refs_shown: None,
+            staged_shown: None,
+            unstaged_shown: None,
+            untracked_shown: None,
             armed: false,
         }
     }
@@ -71,20 +82,68 @@ impl Bridge {
         for snapshot in snapshots {
             match snapshot {
                 Snapshot::Refs(refs) => {
-                    if self
-                        .refs_shown
-                        .is_some_and(|shown| shown >= refs.generation)
-                    {
-                        tracing::debug!(parent: &refs.span, generation = refs.generation.get(), "stale refs snapshot dropped");
-                        continue;
+                    if newer(&mut self.refs_shown, refs.generation, "refs", &refs.span) {
+                        self.refs.update(cx, |view, cx| {
+                            view.set_snapshot(refs);
+                            cx.notify();
+                        });
                     }
-                    self.refs_shown = Some(refs.generation);
-                    self.refs.update(cx, |view, cx| {
-                        view.set_snapshot(refs);
-                        cx.notify();
-                    });
+                }
+                Snapshot::Staged(staged) => {
+                    if newer(
+                        &mut self.staged_shown,
+                        staged.generation,
+                        "staged",
+                        &staged.span,
+                    ) {
+                        self.status.update(cx, |view, cx| {
+                            view.set_staged(staged);
+                            cx.notify();
+                        });
+                    }
+                }
+                Snapshot::Unstaged(unstaged) => {
+                    if newer(
+                        &mut self.unstaged_shown,
+                        unstaged.generation,
+                        "unstaged",
+                        &unstaged.span,
+                    ) {
+                        self.status.update(cx, |view, cx| {
+                            view.set_unstaged(unstaged);
+                            cx.notify();
+                        });
+                    }
+                }
+                Snapshot::Untracked(untracked) => {
+                    if newer(
+                        &mut self.untracked_shown,
+                        untracked.generation,
+                        "untracked",
+                        &untracked.span,
+                    ) {
+                        self.status.update(cx, |view, cx| {
+                            view.set_untracked(untracked);
+                            cx.notify();
+                        });
+                    }
                 }
             }
         }
     }
+}
+
+/// Records `generation` as shown and returns true, unless it is no newer than `shown`.
+fn newer(
+    shown: &mut Option<Generation>,
+    generation: Generation,
+    slot: &str,
+    span: &tracing::Span,
+) -> bool {
+    if shown.is_some_and(|shown| shown >= generation) {
+        tracing::debug!(parent: span, slot, generation = generation.get(), "stale snapshot dropped");
+        return false;
+    }
+    *shown = Some(generation);
+    true
 }

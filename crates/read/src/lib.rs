@@ -6,13 +6,17 @@
 //! - Never use `repo.status()` on the fast path: it rebuilds an index from `HEAD^{tree}`.
 //! - Never call `Outcome::write_changes()`: it drops index extensions.
 //! - Keep the default `FastEq` comparison. `HashEq` disagrees with git.
+//!
+//! Untracked files come from the directory walk alone. Staged and Unstaged are read by the
+//! CLI (#13), so an index-vs-worktree pass here would only repeat their work.
 
 mod refs;
+mod untracked;
 
 use std::fmt;
 use std::path::Path;
 
-pub use cairn_core::Refs;
+pub use cairn_core::{Refs, RepoPath};
 
 /// A gix error, as text. Reads never retry, so the caller only shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,5 +58,11 @@ impl Repo {
     /// Every ref Cairn shows: local and remote branches, tags, stashes and HEAD.
     pub fn refs(&self) -> Result<Refs, ReadError> {
         refs::read(&self.0.to_thread_local())
+    }
+
+    /// Untracked, unignored paths, sorted, as `git status` lists them. An all-untracked
+    /// directory is one entry ending in `/` unless `status.showUntrackedFiles=all`.
+    pub fn untracked(&self) -> Result<Vec<RepoPath>, ReadError> {
+        untracked::read(&self.0.to_thread_local())
     }
 }

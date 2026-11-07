@@ -57,6 +57,10 @@ jobs:
       - name: Small fixture
         shell: bash
         run: ./scripts/fixtures.sh small
+      # Built locally in well under a second, so it isn't cached.
+      - name: autocrlf and filters fixture
+        shell: bash
+        run: ./scripts/fixtures.sh filters
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy

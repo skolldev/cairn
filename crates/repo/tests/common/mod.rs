@@ -114,3 +114,71 @@ impl Harness {
         }
     }
 }
+
+/// Runs git in `repo` as a Read Job would, with `--no-optional-locks`, so that commands
+/// like `git status` don't refresh the index on disk. Panics with git's stderr on failure.
+pub fn git_read(repo: &Path, args: &[&str]) -> Vec<u8> {
+    hermetic();
+    let git = Git::shared().expect("a usable git is installed");
+    let out = git
+        .run(&Invocation::new(JobClass::Read, repo).args(args))
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        out.stderr_text()
+    );
+    out.stdout
+}
+
+/// A fresh clone of the small fixture in a temp dir, safe to change.
+pub fn small_fixture_clone() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("copy");
+    git(
+        dir.path(),
+        &[
+            "clone",
+            "--quiet",
+            small_fixture().to_str().unwrap(),
+            repo.to_str().unwrap(),
+        ],
+    );
+    (dir, repo)
+}
+
+/// The autocrlf and filters fixture. `scripts/fixtures.sh filters` creates it.
+pub fn filters_fixture() -> PathBuf {
+    let root = std::env::var_os("CAIRN_FIXTURES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| real_home().join("cairn-fixtures"));
+    let path = root.join("filters");
+    assert!(
+        path.join(".git").exists(),
+        "the filters fixture is missing at {}. Create it with `scripts/fixtures.sh filters`, \
+         or point CAIRN_FIXTURES at a directory that holds it.",
+        path.display()
+    );
+    path
+}
+
+/// A file-by-file copy of the filters fixture, config and all. Copying gives every file a
+/// new mtime, so every index entry starts stat-dirty.
+pub fn filters_fixture_copy() -> (tempfile::TempDir, PathBuf) {
+    fn copy(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("filters");
+    copy(&filters_fixture(), &repo);
+    (dir, repo)
+}
