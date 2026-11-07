@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the oldest git Cairn supports from source, so the runner tests can run against it
+# Builds the oldest git Cairn supports from source, so the tests that run git can run against it
 # locally exactly as the `oldest-git` CI job does. Skips the build if the prefix already
 # holds that version. Prints the bin directory to put first on PATH.
 #
@@ -7,7 +7,9 @@
 # Defaults: 2.23.0, and ~/git-<version>. Needs make, a C compiler, curl and zlib headers.
 #
 #   PATH="$(scripts/oldest-git.sh):$PATH" CAIRN_EXPECT_GIT_VERSION=2.23.0 \
-#     cargo test -p cairn-write --no-fail-fast
+#     cargo test -p cairn-write -p cairn-repo --no-fail-fast
+#
+# Create the fixtures first with your usual git: 2.23 is built without curl.
 set -euo pipefail
 
 version="${1:-2.23.0}"

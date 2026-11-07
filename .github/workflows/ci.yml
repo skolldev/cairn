@@ -68,11 +68,11 @@ jobs:
       - name: test
         run: cargo test --workspace --locked --no-fail-fast
 
-  # The oldest supported git is a tested claim: the runner tests run against git 2.23
-  # itself. Linux, because building an old git from source is quickest there; the
+  # The oldest supported git is a tested claim: every test that runs git runs against
+  # git 2.23 itself. Linux, because building an old git from source is quickest there; the
   # runner's resolution there is simply the first git on PATH.
   oldest-git:
-    name: runner tests against git 2.23
+    name: git tests against git 2.23
     runs-on: ubuntu-latest
     env:
       GIT_VERSION: 2.23.0
@@ -86,14 +86,26 @@ jobs:
         with:
           path: ~/git-${{ env.GIT_VERSION }}
           key: git-${{ env.GIT_VERSION }}-${{ runner.os }}-${{ hashFiles('scripts/oldest-git.sh') }}
+      # Made with the runner's own git, before 2.23 goes on PATH: 2.23 is built without
+      # curl, so it can't clone the small fixture over HTTPS.
+      - name: Cache the small fixture
+        uses: actions/cache@v4
+        with:
+          path: ~/cairn-fixtures/ripgrep
+          key: fixture-ripgrep-91f5d22ef48bde459d90a8c7dbeab416e97d0f2b-${{ runner.os }}
+      - name: Fixtures
+        run: |
+          ./scripts/fixtures.sh small
+          ./scripts/fixtures.sh filters
       - name: Build git ${{ env.GIT_VERSION }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libz-dev
           ./scripts/oldest-git.sh "$GIT_VERSION" "$HOME/git-$GIT_VERSION" >> "$GITHUB_PATH"
-      - name: runner tests
+      # Every crate whose tests run git: the runner itself, and the Repo service's reads.
+      - name: runner and Repo service tests
         env:
           CAIRN_EXPECT_GIT_VERSION: ${{ env.GIT_VERSION }}
         run: |
           git --version
-          cargo test -p cairn-write --locked --no-fail-fast
+          cargo test -p cairn-write -p cairn-repo --locked --no-fail-fast

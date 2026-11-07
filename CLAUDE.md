@@ -14,4 +14,4 @@ Single-context: one `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/age
 
 ### Coding standards
 
-Review rules, including how tests are written: `CODING_STANDARDS.md`. Runner changes must pass on git 2.23: `scripts/oldest-git.sh` builds it.
+Review rules, including how tests are written: `CODING_STANDARDS.md`. Anything that runs git must pass on git 2.23: `scripts/oldest-git.sh` builds it.
