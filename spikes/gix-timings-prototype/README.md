@@ -177,6 +177,94 @@ than in I/O, so a later gix may close them, but that's for the Budget rewrite, n
 Not run on macOS: cold runs (need `sudo purge`), and anything with Defender or NTFS, which is
 the Windows half.
 
-## Windows results
+## Windows results, 2026-11-07
 
-Not run yet. See [CHECKLIST.md](CHECKLIST.md).
+Ryzen 7 7800X3D (8 cores, 16 threads), 64 GB, Windows 11 build 26200. Fixtures on `C:`, a
+SATA SSD, NTFS. Git for Windows 2.52.0.windows.1, Rust 1.98.1, the same gix pin. Defender
+real-time protection on in its normal state. Its exclusions (recorded in the GitKraken baseline
+spike) don't cover the fixtures or this repo. GitKraken was closed before the run. Steam,
+Stream Deck and the Claude app were running, idle. Raw output is in `results/windows-full.log`,
+which is git-ignored, so these figures are the record.
+
+**Fixture state, recorded, not repaired:** `linux-graph` has a single commit-graph file
+(90 MB, no chain), one pack and a `multi-pack-index` dated Nov 6, from GitKraken. HEAD is
+`05441d6`, 1,505,332 commits. Status showed only the 13 baseline paths, all `1 .M` with equal
+hashes, before and after the run, and the graph and `multi-pack-index` were unchanged.
+`core.autocrlf=true` and `core.fscache=true` both come from Git for Windows' system
+`etc/gitconfig`. gix reads the same config, so the kernel figures are taken with autocrlf on.
+
+### Walks, layout excluded
+
+| Floor | Pass | gix worst | `git` worst | Result |
+| --- | --- | --- | --- | --- |
+| HEAD, first 5,000, graph | 100 ms | 45.7 ms | 46.0 ms | Pass |
+| All refs, first 5,000, graph | 1.5 s | 1.32 s | 999 ms | Pass |
+| All refs, everything, graph | 6 s | 2.27 s | 2.23 s | Pass |
+| All refs, first 5,000, no graph | 12 s | 22.64 s | 7.56 s | **Fail** |
+
+Recorded only: HEAD first 5,000 without a graph took 22.50 s (`git` 7.54 s). HEAD everything
+took 2.03 s with a graph (`git` 2.14 s) and 36.88 s without (`git` 8.77 s). Every walk had
+the same order as `git`.
+
+- **Same picture as macOS.** The no-graph walk misses by the same structural margin, about
+  three times `git`. The graph walks pass. All refs, first 5,000 has 12% headroom, against 8%
+  on the Mac.
+
+### Status
+
+| Floor | Pass | gix worst | `git` worst | Result |
+| --- | --- | --- | --- | --- |
+| HEAD vs index | 50 ms | 78.2 ms | 18.6 ms | **Fail** |
+| Watcher-scoped index vs worktree, 10 paths | 30 ms | 24.7 ms | 28.6 ms | Pass |
+| Full status with untracked files | 1 s | 358.7 ms | 93.6 ms | Pass |
+
+Recorded only:
+
+| Case | gix worst | `git` worst |
+| --- | --- | --- |
+| Index vs worktree, whole tree, no untracked | 84.9 ms | 60.2 ms |
+| Full status without untracked files | 127.2 ms | 64.8 ms |
+| HEAD vs index, part: reading the index | 12.0 ms | - |
+| HEAD vs index, part: building an index from `HEAD^{tree}` | 58.6 ms | - |
+| Watcher-scoped, index already in memory | 11.9 ms | - |
+
+- **HEAD vs index misses by more than on macOS,** 56% over the Floor against 19%. The
+  tree-to-index build alone is 58.6 ms, already over the Floor. `git diff-index --cached` is
+  18.6 ms including spawn, faster than on the Mac.
+- **The watcher case passes on Windows,** with 18% headroom, where it missed on macOS. With the
+  index in memory it's 11.9 ms, half the Mac's 22.8 ms. `git diff-files` passes with only 5%
+  headroom, spawn included, so neither tool has much room here.
+- **`git` is much faster than gix at full status on Windows,** 93.6 ms against 358.7 ms. That's
+  the opposite of macOS, where gix was faster. Both pass the 1 s Floor. `git` has `fscache` on
+  here, which batches the `lstat` calls, and that's the likely reason, but it wasn't verified.
+
+### Parity
+
+| Check | Result |
+| --- | --- |
+| Kernel status, 17 lines, untracked included, autocrlf on | Pass. 13 of 13 baseline lines also identical |
+| Kernel hunks, 11 unstaged files and 1 staged | Pass. 24 hunks byte for byte |
+| Filters fixture status, before refresh | Pass. 10 lines |
+| Filters fixture status, after refresh | Pass. 10 lines |
+| Filters fixture hunks, 9 unstaged files and 1 staged | Pass. 5 hunks, 4 empty diffs, 1 binary |
+
+- **The `upper` clean filter ran.** gix found `sh` and `tr` from Git for Windows, with no
+  error.
+- The "dirty with no diff" files (`b.crlf`, `c.lf`, `e.up`) behave as on macOS: `git` reports
+  them `.M` with no hunks, before and after a refresh, and gix matches.
+
+### What the Windows run changes
+
+- **No-graph walks:** a miss on both OSes, so they go to `git rev-list` or Cairn makes sure a
+  graph exists. That's still #13's call.
+- **HEAD vs index:** a miss on both OSes, worse on Windows. It goes to `git diff-index --cached`,
+  which is 18.6 ms on Windows with the spawn.
+- **Watcher-scoped check:** passes on Windows, misses on macOS. If the gate is per path on both
+  OSes, it still goes to `git diff-files`. A per-OS split is for #13. Either way, `git`'s 28.6 ms
+  on Windows leaves 1.4 ms of headroom, so a CLI fallback on every watcher event is tight, and
+  #12's spawn numbers should be read with this.
+- **Full status:** passes with both tools on both OSes. On Windows `git` is about four times
+  faster, which matters for the Budget rewrite more than for this gate.
+
+Not run on Windows: cold runs, which need a reboot with the fixture unopened. They're optional
+and recorded only.
