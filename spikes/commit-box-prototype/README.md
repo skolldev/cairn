@@ -104,7 +104,8 @@ All 27 runs were valid. Each hold sent 300 keys and each burst 300 characters.
 - **Other load:** not controlled. Nothing was closed for the run.
 - **Not a result about the IME:** `SendInput` keys cover the Floor's key input only.
 
-Paste, stock: CRLF keeps 4 `` and Excel keeps 3, so the Floor fails as shipped, as
+Paste, stock: CRLF keeps 4 `
+` and Excel keeps 3, so the Floor fails as shipped, as
 on macOS. `--paste-fix` cleans both and leaves Excel's tabs and quoted cell alone.
 
 **Void:** the first full run isn't a result. A display mode change left the taskbar in
@@ -114,24 +115,34 @@ thread, so each period included UI work. `worst` had the same cap. The Floor rat
 wasn't being tested, so `frame` and `worst` were moved to their own thread and the
 bench now claims focus before each run. Logs: `results/windows-full-selfclocked-INVALID.*`.
 
-## macOS results, 2026-11-06
+## macOS results, 2026-11-07
 
-**Provisional:** these runs used the old self-clocked `frame` and `worst` described
-under Windows. The drain rate they reached on macOS wasn't recorded, so rerun the bench
-there before calling the Floor passed.
+Rerun with `frame` and `worst` posting from their own thread, as on Windows. It
+replaces the 2026-11-06 figures, which used the old self-clocked timer.
 
-M3 Max, built-in display, on battery, window 1180x760, worst of three runs, nothing else
-from this spike open. Raw output is in `results/`, which is git-ignored, so these
-figures are the record.
+M3 Max, built-in display, window 1180x760, worst of three runs, nothing else from this
+spike open. Raw output is `results/macos-full-ownthread.log`, which is git-ignored, so
+these figures are the record.
 
 | Scenario | `frame` (Floor) | `vsync` | `worst` | Lost or duplicated | Result |
 | --- | --- | --- | --- | --- | --- |
-| Hold Backspace, 10 s | 25.0 ms | 8.3 ms | 16.7 ms | None | Pass |
-| Hold Left, 10 s | 16.7 ms | 16.7 ms | 8.3 ms | None | Pass |
+| Hold Backspace, 10 s | 25.0 ms | 16.7 ms | 16.7 ms | None | Pass |
+| Hold Left, 10 s | 16.7 ms | 16.7 ms | 16.7 ms | None | Pass |
 | Burst, 30 s | 25.0 ms | 16.7 ms | 25.0 ms | None | Pass |
 
+All 27 runs were valid. Each hold sent 300 keys and each burst 300 characters.
+
+- **Rates reached:** `frame` drained as often as `vsync`, which drains once per frame,
+  so about 120 a second. `worst` reached about 740 a second, up from about 500.
+- **Same Floor figures as the old timer:** the self-clocked `frame` wasn't hiding a
+  slower result on macOS.
+- **Dropped presents:** `frame` dropped about 3% of drawables on the holds and 3% to 6%
+  on the burst. `worst` dropped about as many, and `vsync` 0% to 3% on the holds and
+  about 4% on the burst. That replaces the old note that only `frame` dropped
+  (8% to 11%). The cause still isn't confirmed.
+
 No watchdog, which doesn't exist on macOS. The refresh rate wasn't read from the
-system during the run, but the 8.3 ms gaps show the display was at 120 Hz.
+system during the run, but the 8.3 ms present cadence shows the display was at 120 Hz.
 
 **Contended run:** an earlier run with a second copy of this window open and being
 typed in hit 58.3 ms on one `frame` burst, FAIL, and exactly 50.0 ms on one `worst`
@@ -146,10 +157,7 @@ glyphs, so those gaps measured an app with no text. Its log is
 
 - **Not a result about real keys:** events are posted to the app, so the OS key
   repeat and the IME are bypassed.
-- **`worst` is a weaker test than its name:** the timer reached about 500 notifies a
-  second, not 1,000.
-- **`frame` drops presents:** about 8% to 11% of drawables were never presented, and
-  almost none at `vsync` or `worst`. The cause isn't confirmed.
+- **`worst` is a weaker test than its name:** about 740 drains a second, not 1,000.
 
 Paste, stock: CRLF keeps 4 `\r` and Excel keeps 3, so **the Floor fails as shipped**.
 `Textarea::on_paste` cleans both in about five lines of app code (`--paste-fix`), and
@@ -174,4 +182,3 @@ Not run:
 - **Recorded-only rows:** IME placement near the screen bottom, other IMEs and
   right-to-left text.
 
-Not done: the macOS bench rerun.
