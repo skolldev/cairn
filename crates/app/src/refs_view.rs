@@ -43,7 +43,7 @@ impl Render for RefsView {
             self.shown = Some(snapshot.generation);
             tracing::info!(parent: &snapshot.span, generation = snapshot.generation.get(), "snapshot shown");
         }
-        let refs = match &snapshot.refs {
+        let refs = match &snapshot.result {
             Ok(refs) => refs,
             Err(error) => {
                 return body.child(div().text_color(rgb(0xff7a90)).child(format!(

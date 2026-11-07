@@ -11,6 +11,7 @@ use common::{Harness, git, git_output, small_fixture};
 fn refs_of(snapshot: &Snapshot) -> Option<&Arc<RefsSnapshot>> {
     match snapshot {
         Snapshot::Refs(refs) => Some(refs),
+        _ => None,
     }
 }
 
@@ -92,7 +93,7 @@ fn assert_matches_git(repo: &Path, refs: &Refs) {
 fn refs_snapshot_of_the_small_fixture_matches_git_for_each_ref() {
     let fixture = small_fixture();
     let snapshot = open(&fixture);
-    let refs = snapshot.refs.as_ref().expect("the fixture opens");
+    let refs = snapshot.result.as_ref().expect("the fixture opens");
     assert!(!refs.tags.is_empty(), "the fixture has tags");
     assert_matches_git(&fixture, refs);
 }
@@ -123,7 +124,7 @@ fn refs_snapshot_covers_branches_stashes_annotated_tags_and_symrefs() {
     }
 
     let snapshot = open(&repo);
-    let refs = snapshot.refs.as_ref().expect("the copy opens");
+    let refs = snapshot.result.as_ref().expect("the copy opens");
     assert_eq!(refs.stashes.len(), 2);
     assert!(
         refs.remote.iter().any(|r| r.symref.is_some()),
@@ -155,7 +156,7 @@ fn each_refs_snapshot_carries_a_newer_generation() {
 fn opening_a_path_that_is_not_a_repo_publishes_the_error() {
     let dir = tempfile::tempdir().unwrap();
     let snapshot = open(dir.path());
-    let error = snapshot.refs.as_ref().expect_err("not a repository");
+    let error = snapshot.result.as_ref().expect_err("not a repository");
     assert!(!error.is_empty());
     assert_eq!(snapshot.workdir, dir.path());
 }
@@ -187,7 +188,12 @@ fn a_newer_open_supersedes_older_ones_and_no_stale_generation_follows_it() {
         "superseded Opens must not all publish: {generations:?}"
     );
 
-    // Nothing older arrives after the latest generation.
+    // No refs Snapshot, older or otherwise, arrives after the latest generation. The
+    // status Slots answer the same Opens on their own schedule, so they may still arrive.
     std::thread::sleep(std::time::Duration::from_millis(200));
-    assert!(harness.service.drain().is_empty());
+    let late: Vec<_> = harness.service.drain();
+    assert!(
+        !late.iter().any(|s| refs_of(s).is_some()),
+        "a refs Snapshot followed the latest: {late:?}"
+    );
 }

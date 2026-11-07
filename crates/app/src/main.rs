@@ -1,6 +1,6 @@
 //! The Cairn GPUI binary.
 //!
-//! `cairn [repo-path]` opens a window on the repository and shows its refs. `app` speaks to
+//! `cairn [repo-path]` opens a window on the repository and shows its refs and status. `app` speaks to
 //! the Repo service only in Intents, and hears back only through Snapshots drained by the
 //! bridge. `RUST_LOG` filters the `tracing` output (default `info`).
 
@@ -8,6 +8,7 @@ mod bridge;
 #[cfg(debug_assertions)]
 mod frame_overlay;
 mod refs_view;
+mod status_view;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,10 +21,12 @@ use gpui::{
 
 use bridge::Bridge;
 use refs_view::RefsView;
+use status_view::StatusView;
 
 struct Workspace {
     service: Arc<RepoService>,
     refs: Entity<RefsView>,
+    status: Entity<StatusView>,
     _bridge: Entity<Bridge>,
     #[cfg(debug_assertions)]
     frame_clock: Option<std::rc::Rc<frame_overlay::FrameClock>>,
@@ -37,13 +40,24 @@ impl Workspace {
             let _ = wake.try_send(());
         }));
         let refs = cx.new(|_| RefsView::default());
-        let bridge = cx.new(|cx| Bridge::new(service.clone(), woken, refs.clone(), window, cx));
+        let status = cx.new(|_| StatusView::default());
+        let bridge = cx.new(|cx| {
+            Bridge::new(
+                service.clone(),
+                woken,
+                refs.clone(),
+                status.clone(),
+                window,
+                cx,
+            )
+        });
         if let Some(path) = path {
             service.send(Intent::Open(path));
         }
         Self {
             service,
             refs,
+            status,
             _bridge: bridge,
             #[cfg(debug_assertions)]
             frame_clock: frame_overlay::FrameClock::enabled().then(Default::default),
@@ -104,7 +118,21 @@ impl Render for Workspace {
             .text_color(rgb(0xe6edf3))
             .text_size(px(13.))
             .child(header)
-            .child(div().flex_1().min_h_0().child(self.refs.clone()));
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(div().flex_1().min_w_0().child(self.refs.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .border_l_1()
+                            .border_color(rgb(0x2a2f37))
+                            .child(self.status.clone()),
+                    ),
+            );
         #[cfg(debug_assertions)]
         if let Some(clock) = &self.frame_clock {
             root = root.child(clock.overlay()).child(clock.end_marker());
