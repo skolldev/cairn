@@ -114,12 +114,23 @@ Recorded only:
 | Full status without untracked files | 112.6 ms | 134.7 ms |
 | HEAD vs index, part: reading the index | 8.6 ms | - |
 | HEAD vs index, part: building an index from `HEAD^{tree}` | 54.1 ms | - |
+| HEAD vs index, HEAD tree index held (rerun) | 10.6 ms | - |
 | Watcher-scoped, index already in memory (separate run) | 22.8 ms | - |
+
+The held tree index row comes from a later full `all` rerun, logged in
+`results/macos-rerun.log`, with GitKraken closed and the fixture at the same baseline. The rerun
+moved no result, and parity passed everywhere again. Most rows came within 10% of the first
+run. The exceptions: HEAD, first 5,000 with a graph took 31.0 ms (first run 38.6 ms), building
+the index from `HEAD^{tree}` took 45.8 ms (54.1 ms), and full status with untracked files took
+287.6 ms (317.6 ms). HEAD vs index was 58.6 ms and the watcher case 31.1 ms, still misses.
 
 - **HEAD vs index misses on its tree-to-index build.** gix turns the whole `HEAD^{tree}` into a
   97,000-entry index on every call, which takes 54 ms alone. `git diff-index --cached` finishes
   in 27 ms including spawn. Its cache-tree extension is the likely reason, but that wasn't
   verified here.
+- **Holding the HEAD tree index brings HEAD vs index to 10.6 ms,** under the 50 ms Floor and
+  faster than `git`'s 26.1 ms in the same run. As on Windows, that includes reading
+  `.git/index` fresh, and the tree index is only rebuilt when HEAD moves.
 - **The watcher case misses on fixed cost, not on the 10 files.** Even with the index already
   in memory it takes 22.8 ms for 10 paths, against 117.9 ms for all 97,000. The remainder is
   setup, such as pathspec, attribute and ignore stacks, before any file is compared.
@@ -175,8 +186,8 @@ The misses are 19% (HEAD vs index) and 11% (watcher) over their Floors on macOS.
 move and gix gets no fix window, so they're misses. Both causes are in gix's call path rather
 than in I/O, so a later gix may close them, but that's for the Budget rewrite, not this gate.
 
-Not run on macOS: cold runs (need `sudo purge`), anything with Defender or NTFS, which is
-the Windows half, and the held tree index row, which was added after the macOS run.
+Not run on macOS: cold runs (need `sudo purge`) and anything with Defender or NTFS, which is
+the Windows half.
 
 ## Windows results, 2026-11-07
 
@@ -273,8 +284,8 @@ and `git diff-files` took 23.8 ms (first run 28.6 ms).
   graph exists. That's still #13's call.
 - **HEAD vs index:** a miss on both OSes as measured, worse on Windows, so by the #8 rules it goes
   to `git diff-index --cached`, which is 18.6 ms on Windows with the spawn. The held tree index
-  passes at 16.2 ms on Windows, though. Whether that design counts for the gate, and whether a
-  macOS run of that row is needed, is for #13.
+  passes at 16.2 ms on Windows and 10.6 ms on macOS, though. Whether that design counts for the
+  gate is for #13.
 - **Watcher-scoped check:** passes on Windows, misses on macOS. If the gate is per path on both
   OSes, it still goes to `git diff-files`. A per-OS split is for #13. Either way, `git`'s 28.6 ms
   on Windows leaves 1.4 ms of headroom, so a CLI fallback on every watcher event is tight, and
