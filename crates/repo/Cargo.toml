@@ -14,3 +14,7 @@ cairn-graph.workspace = true
 cairn-diff.workspace = true
 notify.workspace = true
 redb.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
