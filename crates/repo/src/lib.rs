@@ -41,14 +41,6 @@ pub enum Snapshot {
     Refs(Arc<RefsSnapshot>),
 }
 
-impl Snapshot {
-    pub fn generation(&self) -> Generation {
-        match self {
-            Snapshot::Refs(refs) => refs.generation,
-        }
-    }
-}
-
 /// The refs of the open repository, or why they couldn't be read.
 #[derive(Debug)]
 pub struct RefsSnapshot {

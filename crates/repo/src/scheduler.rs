@@ -180,7 +180,13 @@ impl Slot {
                     slot = slot.0.name,
                     generation = generation.0
                 );
-                span.in_scope(|| job(&context));
+                // A panicking Read Job must not wedge its Slot or kill a lane worker.
+                let outcome = span.in_scope(|| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&context)))
+                });
+                if outcome.is_err() {
+                    tracing::error!(parent: &parent, slot = slot.0.name, generation = generation.0, "read job panicked");
+                }
             } else {
                 tracing::debug!(parent: &parent, slot = slot.0.name, generation = generation.0, "superseded before it ran");
             }

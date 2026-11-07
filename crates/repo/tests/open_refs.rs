@@ -142,7 +142,7 @@ fn refs_snapshot_covers_branches_stashes_annotated_tags_and_symrefs() {
 }
 
 #[test]
-fn refs_snapshot_carries_its_generation_and_is_shared() {
+fn each_refs_snapshot_carries_a_newer_generation() {
     let harness = Harness::start();
     let fixture = small_fixture();
     harness.service.send(Intent::Open(fixture.clone()));
@@ -154,9 +154,6 @@ fn refs_snapshot_carries_its_generation_and_is_shared() {
     let second = refs_of(second.last().unwrap()).unwrap().clone();
 
     assert!(second.generation > first.generation);
-    // Snapshots are immutable and shared, never copied per reader.
-    let Snapshot::Refs(again) = Snapshot::Refs(second.clone());
-    assert!(Arc::ptr_eq(&again, &second));
 }
 
 #[test]

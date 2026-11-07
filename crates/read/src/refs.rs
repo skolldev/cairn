@@ -15,7 +15,7 @@ pub(crate) fn read(repo: &gix::Repository) -> Result<Refs, ReadError> {
     let mut remote = Vec::new();
     let mut tags = Vec::new();
     for reference in platform.all().map_err(err)? {
-        let mut reference = reference.map_err(|e| ReadError(e.to_string()))?;
+        let mut reference = reference.map_err(err)?;
         let name = reference.name().as_bstr().to_string();
         let list = if name.starts_with("refs/heads/") {
             &mut local
