@@ -17,16 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::Arc;
 
-pub use resolve::Git;
-pub use run::{Invocation, JobClass, MAX_WINDOWS_REPO_PATH, Output};
-
-/// A git version, as `git --version` reports it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct GitVersion {
-    pub major: u32,
-    pub minor: u32,
-    pub patch: u32,
-}
+pub use resolve::{Git, GitVersion};
+pub use run::{Invocation, JobClass, Output};
 
 /// Why Cairn can't run git on this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +49,11 @@ impl fmt::Display for ResolveError {
 }
 
 impl std::error::Error for ResolveError {}
+
+/// On Windows git can't use a repository whose own path is over this many characters, even
+/// with `core.longpaths` (#12). Counted in UTF-16 units,
+/// the unit Windows path limits use.
+pub const MAX_WINDOWS_REPO_PATH: usize = 260;
 
 /// Why a git invocation didn't produce the output asked for.
 #[derive(Debug, Clone)]

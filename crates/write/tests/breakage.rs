@@ -5,7 +5,7 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use common::{Repo, ok, read, write};
+use common::{Repo, local_write, ok, read};
 
 /// The untracked paths `git status --porcelain=v2 -z` reports, as raw bytes.
 fn untracked(repo: &Repo) -> BTreeSet<Vec<u8>> {
@@ -65,11 +65,11 @@ fn awkward_paths_round_trip_through_status_add_and_ls_files() {
 
     // Each name as its own pathspec, after `--` so `-dash.txt` isn't read as an option.
     for name in names() {
-        ok(write(&repo.path, &["add", "--", name], None));
+        ok(local_write(&repo.path, &["add", "--", name], None));
     }
     assert_eq!(untracked(&repo), BTreeSet::new());
     assert_eq!(tracked(&repo), expected);
-    ok(write(
+    ok(local_write(
         &repo.path,
         &["commit", "-q", "-m", "awkward names"],
         None,
@@ -79,7 +79,7 @@ fn awkward_paths_round_trip_through_status_add_and_ls_files() {
 #[test]
 fn awkward_branch_names_round_trip() {
     let repo = Repo::new();
-    ok(write(
+    ok(local_write(
         &repo.path,
         &["commit", "-q", "--allow-empty", "-m", "root"],
         None,
@@ -92,8 +92,8 @@ fn awkward_branch_names_round_trip() {
         "%PATH%",
     ];
     for branch in branches {
-        ok(write(&repo.path, &["branch", branch], None));
-        ok(write(&repo.path, &["switch", "-q", branch], None));
+        ok(local_write(&repo.path, &["branch", branch], None));
+        ok(local_write(&repo.path, &["switch", "-q", branch], None));
         let head = ok(read(&repo.path, &["symbolic-ref", "--short", "HEAD"]));
         assert_eq!(head.stdout, format!("{branch}\n").as_bytes());
     }
@@ -124,12 +124,12 @@ fn awkward_branch_names_round_trip() {
 #[test]
 fn a_branch_name_with_a_space_is_refused_in_gits_own_words() {
     let repo = Repo::new();
-    ok(write(
+    ok(local_write(
         &repo.path,
         &["commit", "-q", "--allow-empty", "-m", "root"],
         None,
     ));
-    let out = write(&repo.path, &["branch", "with space"], None);
+    let out = local_write(&repo.path, &["branch", "with space"], None);
     assert!(!out.status.success());
     // The wording is git's own; only its final full stop varies between versions.
     let stderr = out.stderr_text().into_owned();
@@ -158,7 +158,7 @@ fn commit_messages_on_stdin_arrive_exactly_as_typed() {
     ];
     for message in messages {
         // verbatim keeps git from tidying whitespace, so the bytes compare exactly.
-        ok(write(
+        ok(local_write(
             &repo.path,
             &[
                 "commit",
@@ -181,8 +181,12 @@ fn commit_messages_on_stdin_arrive_exactly_as_typed() {
 fn patches_on_stdin_apply_exactly() {
     let repo = Repo::new();
     repo.file("a.txt", "one\n");
-    ok(write(&repo.path, &["add", "a.txt"], None));
-    ok(write(&repo.path, &["commit", "-q", "-m", "one"], None));
+    ok(local_write(&repo.path, &["add", "a.txt"], None));
+    ok(local_write(
+        &repo.path,
+        &["commit", "-q", "-m", "one"],
+        None,
+    ));
     let patch = "\
 diff --git a/a.txt b/a.txt
 --- a/a.txt
@@ -191,7 +195,7 @@ diff --git a/a.txt b/a.txt
  one
 +two \"quoted\" \\ %PATH% !^&|<>
 ";
-    ok(write(
+    ok(local_write(
         &repo.path,
         &["apply", "--cached", "-"],
         Some(patch.as_bytes()),
@@ -221,8 +225,8 @@ fn a_file_path_over_260_characters_is_listed_added_and_committed() {
     assert!(absolute.as_os_str().len() > 260, "{}", absolute.display());
 
     assert_eq!(untracked(&repo), BTreeSet::from([rel.as_bytes().to_vec()]));
-    ok(write(&repo.path, &["add", "--", &rel], None));
-    ok(write(
+    ok(local_write(&repo.path, &["add", "--", &rel], None));
+    ok(local_write(
         &repo.path,
         &["commit", "-q", "-m", "long path"],
         None,

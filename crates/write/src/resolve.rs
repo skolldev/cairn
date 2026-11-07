@@ -9,7 +9,15 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
 
-use crate::{GitVersion, ResolveError, git_command};
+use crate::{ResolveError, git_command};
+
+/// A git version, as `git --version` reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GitVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+}
 
 /// The git binary Cairn runs, with the version it reported.
 #[derive(Debug, Clone)]
@@ -28,9 +36,8 @@ impl Git {
             .map_err(Clone::clone)
     }
 
-    /// Finds the real git binary on this machine and checks its version. Prefer
-    /// [`Git::shared`], which does this once per run.
-    pub fn resolve() -> Result<Git, ResolveError> {
+    /// Finds the real git binary on this machine and checks its version.
+    fn resolve() -> Result<Git, ResolveError> {
         Git::at(find()?)
     }
 

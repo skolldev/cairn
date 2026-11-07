@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{Repo, ok, read, write};
+use common::{Repo, local_write, ok, read};
 
 #[test]
 fn every_call_turns_on_long_paths() {
@@ -37,8 +37,8 @@ fn reads_never_take_the_index_lock() {
     use std::time::{Duration, SystemTime};
     let repo = Repo::new();
     let file = repo.file("a.txt", "a\n");
-    ok(write(&repo.path, &["add", "a.txt"], None));
-    ok(write(&repo.path, &["commit", "-q", "-m", "a"], None));
+    ok(local_write(&repo.path, &["add", "a.txt"], None));
+    ok(local_write(&repo.path, &["commit", "-q", "-m", "a"], None));
     let index = repo.path.join(".git").join("index");
     let make_stat_dirty = |secs| {
         let when = SystemTime::now() - Duration::from_secs(secs);
@@ -61,7 +61,11 @@ fn reads_never_take_the_index_lock() {
     ok(read(&repo.path, &["status", "--porcelain=v2", "-z"]));
     assert_eq!(snapshot(), before, "a Read Job rewrote the index");
 
-    ok(write(&repo.path, &["status", "--porcelain=v2", "-z"], None));
+    ok(local_write(
+        &repo.path,
+        &["status", "--porcelain=v2", "-z"],
+        None,
+    ));
     assert_ne!(
         snapshot(),
         before,

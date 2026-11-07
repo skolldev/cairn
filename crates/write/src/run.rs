@@ -3,10 +3,12 @@
 use std::borrow::Cow;
 use std::ffi::OsString;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 
+#[cfg(windows)]
+use crate::MAX_WINDOWS_REPO_PATH;
 use crate::{Git, RunError, git_command};
 
 /// What a Job is, as far as spawning git goes.
@@ -61,10 +63,6 @@ impl Invocation {
         self.stdin = Some(bytes.into());
         self
     }
-
-    pub fn repo(&self) -> &Path {
-        &self.repo
-    }
 }
 
 /// What git did: its exit status, its stdout, and its stderr exactly as written.
@@ -80,8 +78,9 @@ impl Output {
     /// as git stored them, never octal-escaped, whatever `core.quotepath` says.
     pub fn records(&self) -> impl Iterator<Item = &[u8]> {
         let body = self.stdout.strip_suffix(b"\0").unwrap_or(&self.stdout);
-        body.split(|&b| b == 0)
-            .filter(move |_| !self.stdout.is_empty())
+        // Empty output holds no records, not one empty one.
+        let records = (!body.is_empty()).then(|| body.split(|&b| b == 0));
+        records.into_iter().flatten()
     }
 
     /// stderr as text, for showing to the user. Invalid UTF-8 is replaced, nothing else.
@@ -101,10 +100,6 @@ impl Output {
         }
     }
 }
-
-/// On Windows git can't use a repository whose own path is over this many characters, even
-/// with `core.longpaths` (#12).
-pub const MAX_WINDOWS_REPO_PATH: usize = 260;
 
 impl Git {
     /// Runs git once and waits for it. A non-zero exit is not an error here: it comes back in
@@ -157,7 +152,7 @@ impl Git {
 }
 
 #[cfg(windows)]
-fn check_windows_repo_path(repo: &Path) -> Result<(), RunError> {
+fn check_windows_repo_path(repo: &std::path::Path) -> Result<(), RunError> {
     use std::os::windows::ffi::OsStrExt;
     let absolute = std::path::absolute(repo).unwrap_or_else(|_| repo.to_owned());
     let chars = absolute.as_os_str().encode_wide().count();

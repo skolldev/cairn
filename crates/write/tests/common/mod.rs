@@ -39,7 +39,7 @@ pub fn read(repo: &Path, args: &[&str]) -> Output {
 }
 
 /// Runs a Local write Job in `repo`, with optional stdin.
-pub fn write(repo: &Path, args: &[&str], stdin: Option<&[u8]>) -> Output {
+pub fn local_write(repo: &Path, args: &[&str], stdin: Option<&[u8]>) -> Output {
     let mut invocation = Invocation::new(JobClass::LocalWrite, repo).args(args);
     if let Some(bytes) = stdin {
         invocation = invocation.stdin(bytes.to_vec());
@@ -64,9 +64,13 @@ impl Repo {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("repo");
         std::fs::create_dir(&path).unwrap();
-        ok(write(&path, &["init", "-q"], None));
-        ok(write(&path, &["config", "user.name", "Cairn Test"], None));
-        ok(write(
+        ok(local_write(&path, &["init", "-q"], None));
+        ok(local_write(
+            &path,
+            &["config", "user.name", "Cairn Test"],
+            None,
+        ));
+        ok(local_write(
             &path,
             &["config", "user.email", "test@cairn.invalid"],
             None,
