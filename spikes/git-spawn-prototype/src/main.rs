@@ -704,6 +704,12 @@ fn console(o: &Opts) {
     let out = root.join("probe.txt");
     let out_s = out.to_string_lossy().replace('\\', "/");
     std::fs::write(repo.join(".git/hooks/post-commit"), format!("#!/bin/sh\n\"{me}\" probe \"{out_s}\"\n")).unwrap();
+    // git skips hooks without the exec bit on Unix; Windows doesn't check it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(repo.join(".git/hooks/post-commit"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     println!("# what a post-commit hook (sh -> probe exe) sees");
     for sp in &spawners {

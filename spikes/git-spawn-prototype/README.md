@@ -90,9 +90,9 @@ spawner. Then it times commit with auto-maintenance on and off.
 
 ## macOS checklist
 
-- [ ] `cargo run --release -- bench > results/macos-bench.log`
-- [ ] `cargo run --release -- paths > results/macos-paths.log`
-- [ ] `cargo run --release -- console --iters 50 > results/macos-console.log`
+- [x] `cargo run --release -- bench > results/macos-bench.log`
+- [x] `cargo run --release -- paths > results/macos-paths.log`
+- [x] `cargo run --release -- console --iters 50 > results/macos-console.log`
 - [ ] Paste the three logs into #12.
 
 Expected on macOS: `shim` against `direct` shows what the xcrun shim costs. The
@@ -229,5 +229,106 @@ interaction budget on Windows only if it's tuned. A CLI fallback for reads costs
 at least 9 ms a call, so it can't sit on a per-keystroke or per-frame path, but a
 single read per refresh is cheap.
 
-macOS numbers are pending (see the checklist), so the cross-OS comparison the
-ticket asks for isn't done.
+The macOS numbers are below.
+
+## macOS results
+
+Recorded 2026-11-07 on a MacBook Pro, Apple M3 Max, 36 GB, macOS 27.0.1, with
+fixtures on the internal SSD. The only git on the machine is Apple's, 2.39.3
+(Apple Git-145), from Xcode. There's no Homebrew git, so a current upstream git
+wasn't measured. Same settings as Windows: 3 runs of 100 timed spawns per case,
+after 5 warmup spawns. Both spawners inherit, since macOS has no console flags.
+
+### Spawn cost, worst p50 of 3 runs, ms, against Windows
+
+| Case | macOS shim | macOS direct | Windows shim, no-window | Windows direct, detached |
+| --- | ---: | ---: | ---: | ---: |
+| `noop` (OS floor, no git) | | 2.0 | | 4.5 |
+| `version` | 10.4 | 2.8 | 24.1 | 7.6 |
+| `rev-parse small` | 10.6 | 3.1 | 25.4 | 9.2 |
+| `rev-parse kernel` | 10.2 | 3.1 | 25.4 | |
+| `status small` | 14.0 | 6.3 | 30.3 | |
+| `diff-index kernel` | 16.2 | 8.7 | 35.1 | |
+| `hash-object stdin` | 10.8 | 3.5 | 25.3 | |
+| `update-ref` | 10.5 | 3.3 | 26.0 | |
+| `commit scratch` | 17.8 | 10.5 | 52.2 | 36.7 |
+
+Windows `direct, detached` was only run for some cases, so its blanks are
+untested, not zero. p95 is within 1 ms of p50 in almost every macOS row, and the
+worst single spawn in about 5,000 was 21 ms. The `first` column's worst was
+28 ms, on the first `diff-index kernel` run.
+
+### Where the time goes on macOS, p50
+
+| Part | Cost | Evidence |
+| --- | ---: | --- |
+| Making a process | 1.7 to 2.0 ms | `noop` |
+| git starting, no repo | +0.9 ms | `version` against `noop` |
+| Finding the repo | +0.3 ms | `rev-parse` against `version`. The kernel costs the same as ripgrep |
+| The `/usr/bin/git` xcrun shim | +7.3 to 7.6 ms | shim against direct, in every row |
+| Auto-maintenance after commit | +4 to 5 ms | `commit` 10.4 → 6.6, and 11.5 → 6.2 on a rerun, with `maintenance.auto=false` |
+
+The shim is the whole story on macOS. It costs about as much as everything else
+in a read put together, and it's what a GUI app gets by default: an app started
+from the Finder or the Dock gets launchd's `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`),
+so "find `git` on `PATH`" lands on `/usr/bin/git`. Untested: what the shim does
+when the Command Line Tools aren't installed (it's expected to pop Apple's
+install dialog), and how a Homebrew git, which has no shim, compares.
+
+**Typical GUI app** (`/usr/bin/git`, auto-maintenance on): about 10.5 ms per read
+and 18 ms per commit. **Tuned** (`xcrun --find git` resolved once, no
+auto-maintenance): about 3 ms per read and 6.5 ms per commit. The typical macOS
+path is already about as fast as the tuned Windows one.
+
+**Parallel:** 8 threads each running `rev-parse small` reached 1,600 to 1,780
+spawns a second, about 5.5 times Windows. Per-spawn p50 rose from 3.1 to 4.6 ms,
+and the worst spawn took 8.9 ms.
+
+### Hooks
+
+The post-commit hook ran under both spawners. There's no console question on
+macOS, so the probe only shows that the hook ran. The first run reported "hook
+did not run" because the spike wrote the hook without the exec bit, which git
+requires on Unix and Windows ignores. That's fixed in `console`, and the logged
+run is the fixed one.
+
+### Breakage checklist
+
+87 checks, 0 failures. Full log: `results/macos-paths.log`.
+
+- **Spaces, umlauts, CJK and emoji** in the repo path, file names and branch
+  names pass through both `-C` and the working directory.
+- **A repo path over 260 characters** (307 to 318) works through both `-C` and
+  the working directory, with or without `core.longpaths`. Paths near
+  `PATH_MAX` (1024) weren't tried.
+- **A file path over 260 characters** (323) works for add, status, commit,
+  restore and clone, with or without `core.longpaths`.
+- **Argument quoting** and pathspecs: all pass, as on Windows.
+- **Paths in output are octal-escaped unless `-z`,** as on Windows.
+
+So all three Windows bugs are Windows-only, except the `-z` rule, which applies
+everywhere.
+
+### For the CLI runner spec, macOS
+
+- **Resolve the real git once and don't go through `/usr/bin/git`.** Run
+  `xcrun --find git` at startup, or prefer a non-shim git if the user has one.
+  Saves about 7 ms a call.
+- **Own maintenance,** as on Windows. Saves 4 to 5 ms a commit.
+- **`-z` everywhere.** `-c core.longpaths=true` is harmless here, so the runner
+  can pass the same arguments on every OS.
+
+### For the budget rewrite and #13, cross-OS
+
+A four-spawn commit (`add`, `commit`, `status`, a log refresh) on a small repo
+costs, before any git work on a big repo:
+
+| | Typical | Tuned |
+| --- | ---: | ---: |
+| Windows | about 125 ms | about 50 ms |
+| macOS | about 50 ms | about 20 ms |
+
+macOS has plenty of room in a 100 ms interaction either way. Windows sets the
+budget, and only fits it tuned. A CLI read costs at least 3 ms on macOS and 9 ms
+on Windows, so the "once per refresh, never per keystroke or frame" rule from the
+Windows results holds on both.
