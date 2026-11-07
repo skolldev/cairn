@@ -159,8 +159,13 @@ fn find() -> Result<PathBuf, ResolveError> {
     }
 }
 
-/// Windows: the real `mingw64\bin\git.exe` behind the first git on `PATH`, found next to the
-/// `cmd` (or `bin`) shim or through `git --exec-path`.
+/// The MSYS2 environments Git for Windows ships its real binary in: `mingw64` historically,
+/// `ucrt64` in current releases, `clangarm64` on ARM.
+#[cfg(windows)]
+const WINDOWS_ENVIRONMENTS: [&str; 3] = ["mingw64", "ucrt64", "clangarm64"];
+
+/// Windows: the real `<environment>\bin\git.exe` behind the first git on `PATH`, found next to
+/// the `cmd` (or `bin`) shim or through `git --exec-path`.
 #[cfg(windows)]
 fn find() -> Result<PathBuf, ResolveError> {
     let Some(first) = on_path().into_iter().next() else {
@@ -168,12 +173,14 @@ fn find() -> Result<PathBuf, ResolveError> {
             reason: "no git.exe was found on PATH. Install Git for Windows.".to_owned(),
         });
     };
-    let real = |root: &Path| root.join("mingw64").join("bin").join(EXE);
-    // Git\cmd\git.exe and Git\bin\git.exe: the real binary is Git\mingw64\bin\git.exe.
+    // Git\cmd\git.exe and Git\bin\git.exe: the real binary is Git\<environment>\bin\git.exe.
     if let Some(root) = first.parent().and_then(Path::parent) {
-        let candidate = real(root);
-        if candidate.is_file() {
-            return Ok(candidate);
+        let real = WINDOWS_ENVIRONMENTS
+            .iter()
+            .map(|env| root.join(env).join("bin").join(EXE))
+            .find(|candidate| candidate.is_file());
+        if let Some(real) = real {
+            return Ok(real);
         }
     }
     // Otherwise ask git: its exec path is <prefix>\libexec\git-core, beside <prefix>\bin.

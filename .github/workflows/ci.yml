@@ -70,7 +70,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/git-${{ env.GIT_VERSION }}
-          key: git-${{ env.GIT_VERSION }}-${{ runner.os }}-v1
+          key: git-${{ env.GIT_VERSION }}-${{ runner.os }}-v2
       - name: Build git ${{ env.GIT_VERSION }}
         if: steps.git-cache.outputs.cache-hit != 'true'
         run: |
@@ -78,7 +78,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends libz-dev
           curl -fsSL "https://mirrors.edge.kernel.org/pub/software/scm/git/git-$GIT_VERSION.tar.gz" | tar xz
           cd "git-$GIT_VERSION"
-          make -j"$(nproc)" prefix="$HOME/git-$GIT_VERSION" \
+          # Current gcc defaults to C23, where thread_local is a keyword git 2.23 uses as a
+          # name, and rejects some pre-C99 idioms outright. Build it as the C it was written in.
+          make -j"$(nproc)" prefix="$HOME/git-$GIT_VERSION" CFLAGS="-O2 -std=gnu11 -fpermissive" \
             NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_CURL=1 NO_EXPAT=1 NO_OPENSSL=1 \
             install
       - name: Put git ${{ env.GIT_VERSION }} first on PATH

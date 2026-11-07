@@ -27,10 +27,11 @@ fn resolves_the_real_git_for_windows_binary_not_the_cmd_shim() {
         .take(3)
         .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
         .collect();
-    assert_eq!(
-        parts,
-        ["git.exe", "bin", "mingw64"],
-        "{}",
+    // Git for Windows moved from mingw64 to ucrt64; ARM builds use clangarm64.
+    let real = ["mingw64", "ucrt64", "clangarm64"].contains(&parts[2].as_str());
+    assert!(
+        parts[..2] == ["git.exe", "bin"] && real,
+        "not the real binary: {}",
         git.path().display()
     );
 }
