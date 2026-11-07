@@ -61,7 +61,7 @@ Only `app` depends on GPUI. Every other crate can be tested headless, and they a
 | UI | `gpui-component =0.9.0` or its umbrella crate `gpui-kit =0.9.0`, which pin `gpui-pre =0.3.11` (a snapshot of zed@f816e1f), with a committed `Cargo.lock`. Rust 1.98.1 in `rust-toolchain.toml`. Re-check the pin when the spikes start, because Zed has said automated weekly GPUI releases are coming | gpui has no standalone text input. gpui-component supplies Textarea, Input, VirtualList, DataTable and Tree. The 0.5.x line takes crates.io `gpui` 0.2.2 from October 2025, which predates Zed's Windows dead-key and IME rework |
 | Diff algorithm | The repo's `diff.algorithm` (Myers by default), through `gix-diff`'s vendored imara-diff. `patience` goes to the CLI | Diffs must match `git diff`, and git and gix both default to Myers. The Myers and slider parity fixes live in that fork, and gix doesn't implement patience |
 | Highlighting | syntect for the MVP, visible lines only, cached per blob oid | Broad grammar coverage with no setup. Move to tree-sitter only if profiling demands it |
-| Watching | notify + notify-debouncer-full | Cross-platform; debouncing collapses event bursts |
+| Watching | notify, with no debouncer | Cross-platform. Slots collapse event bursts, so a debounce timer would only add latency ([ADR 0004](docs/adr/0004-watcher-coalesces-through-the-slot.md)) |
 | Cache | redb | Embedded pure-Rust KV store for graph layout and commit metadata |
 | Async | No tokio in the MVP. Jobs run on threads owned by `repo`; GPUI executors are for UI-side async only | Git work blocks, so dropping a GPUI `Task` can't stop it, and a pool we own can be capped. Keeps the scheduler headless and out of the UI swap |
 
@@ -87,7 +87,7 @@ Only `app` depends on GPUI. Every other crate can be tested headless, and they a
 2. A Read Job carries a generation token and runs in the Interactive lane or the Background lane. A newer Read Job for the same Slot Supersedes the older one. A Slot holds at most one running and one pending Job.
 3. Network Jobs and Local write Jobs each have a queue per repo, run one at a time within it, and may overlap each other. Read Jobs overlap both. A Local write Job is never stopped once started, and a Network Job stops only when the user asks.
 4. The result is an `Arc` snapshot. A coalesced bridge in `app` drains results at most once per frame, drops stale generations, swaps the snapshots into GPUI entities, and calls `cx.notify()` only for entities that changed.
-5. The watcher observes `.git/` (HEAD, refs, packed-refs, index, FETCH\_HEAD) and the worktree. After a 100–200 ms debounce, it refreshes only the affected snapshot: refs, status or both.
+5. The watcher observes `.git/` (HEAD, refs, packed-refs, index, FETCH\_HEAD) and the worktree. Its first event starts a refresh of only the affected snapshot (refs, status or both) straight away. Events that arrive while that refresh runs leave one pending refresh in the same Slot, so a burst costs at most two refreshes and there is no debounce timer ([ADR 0004](docs/adr/0004-watcher-coalesces-through-the-slot.md)).
 6. Every Local write Job, and any stopped Network Job, ends with a targeted refresh. There are no full reloads.
 7. Quit drops Read Jobs and stops Network Jobs, asking first for a push. It waits for Local write Jobs, because exiting closes git's pipes and can kill it mid-step. A warned Force quit is the only exception.
 
@@ -122,7 +122,7 @@ After Phase 1, the app is a live branch browser you can keep open next to your t
 - [ ] Fetch all remotes (`git fetch --all --prune --progress`) with the user's existing credentials. See Phase 5 for why this already works for most setups.
 - [ ] Watcher: a `git checkout` run in the terminal shows up in the sidebar.
 
-**Gate:** a branch switched in the terminal appears in the sidebar within 200 ms, and fetch works against your GitHub and Azure DevOps repos.
+**Gate:** a branch switched in the terminal meets the External change Budget, Cairn's own checkouts meet the Local write Job Budget, and fetch works against your GitHub and Azure DevOps repos.
 
 ## Phase 2: Commit graph
 
@@ -131,7 +131,8 @@ The graph is the hardest UI piece and the main reason people stay with GitKraken
 **Data (`graph` crate)**
 
 - [ ] Revwalk from all refs, HEAD and (optionally) stashes, in topological order with commit date as the tie-breaker.
-- [ ] Use the commit-graph file for generation numbers. If it's missing, offer to run `git commit-graph write --reachable` once, as a Local write Job.
+- [ ] Use the commit-graph file for generation numbers. If it's missing, say so on the first screen and offer to run `git commit-graph write --reachable` once, as a Local write Job.
+- [ ] First open paints HEAD's history first, then merges the other tips in behind it without moving HEAD's row on screen.
 - [ ] Streaming lane assignment: each row is a node column plus incoming and outgoing edges per lane. Store it compactly (u16 columns, small edge vectors) and give each branch line a stable colour.
 - [ ] Compute the first \~5,000 rows synchronously and stream the rest. In the MVP, a ref change triggers a full recompute in the background. Optimise only if it measures slow.
 - [ ] Cache the layout in redb, keyed by a hash of the tip oids, so warm opens skip layout.
@@ -145,7 +146,7 @@ The graph is the hardest UI piece and the main reason people stay with GitKraken
 - [ ] Jump to a commit by sha prefix. Message search runs as a background job.
 - [ ] Toggle to hide remote-only branches. Large repos need it.
 
-**Gate:** the Linux kernel graph shows its first screen within budget, scrolling never drops a frame, and selecting a commit feels instant.
+**Gate:** the Linux kernel meets the Cached open, First open, Graph scrolling, Select commit and Memory Budgets.
 
 ## Phase 3: Diff viewer
 
@@ -160,7 +161,7 @@ A diff has to agree with `git diff` exactly, so correctness tests come before vi
 - [ ] Ignore-whitespace toggle.
 - [ ] Golden tests: for each fixture repo, `--numstat` totals must match `git diff --numstat` and full hunks must match `git diff`, since numstat says nothing about hunk placement.
 
-**Gate:** golden tests pass on all fixtures, and a 10k-line file shows its first screen within budget.
+**Gate:** golden tests pass on all fixtures, and the Select file Budget is met.
 
 ## Phase 4: Common git operations
 
@@ -221,19 +222,45 @@ Nothing below starts until the MVP gate is met. Order them by what you miss most
 
 ## Performance budgets
 
-These numbers are the definition of "blazing fast" for this project. They're targets set up front, not measurements, so revise them after the Phase 0 spikes, not after the features ship. Passing the Phase 0 gate is judged against [the Floors in #8](https://github.com/skolldev/cairn/issues/8#issuecomment-6685134359), not against revised budgets. Every budget applies on both macOS and Windows. Fixtures: a small repo and the Linux kernel (about 1.5M commits).
+These numbers are the definition of "blazing fast" for this project. Each Budget is the number an interaction must reach for a phase gate to pass, and this table is the only place Budgets are written down: `PRODUCT.md` and the phase gates name them without restating numbers. They were rewritten from the Phase 0 measurements (#7, #9, #11, #12, #13). Passing the Phase 0 gate was judged against [the Floors in #8](https://github.com/skolldev/cairn/issues/8#issuecomment-6685134359), not against these.
 
-| Interaction | Target | Fixture |
-| --- | --- | --- |
-| Launch to first window | < 150 ms | any |
-| Open repo to first graph screen, warm cache | < 200 ms | Linux kernel |
-| Open repo to first graph screen, cold | < 1 s | Linux kernel |
-| Graph scrolling | no frame over 8 ms | Linux kernel |
-| Select commit to file list | < 50 ms | Linux kernel |
-| Select file to first diff screen | < 50 ms for files under 10k lines | any |
-| Worktree save to updated status | < 150 ms (watcher debounce included). Under review: the 100–200 ms debounce takes most or all of this, so the budget rewrite must settle it. The Floors time the read only | Linux kernel |
-| Git command finishes to UI updated | < 100 ms | any |
-| Memory with graph loaded | < 300 MB | Linux kernel |
+**Rules**
+
+- **Evidence:** a Budget is set from measurements. A row with no measurement behind it is **unproven**: it carries a number to design toward, but gates nothing until the phase named in its row measures it on both OSes. A Budget that misses moves only on a new measurement, never in advance.
+- **Both OSes, one number:** every Budget applies to macOS and Windows alike, and the slower OS on that row sets it. A row splits by OS only for a physical reason written into the row.
+- **Statistic:** latency rows pass at p95, over at least 20 samples per run, worst of three runs, with the worst sample recorded. Launch and scrolling define their own statistic in the row.
+- **Method:** as the Floors define it. Presented frames, never paint timers, with PresentMon on Windows. Memory is `phys_footprint` on macOS and private working set on Windows, summed across the process tree, with dedicated GPU memory recorded separately. The OS file cache is warm unless a row says otherwise.
+- **Fixtures:** a small repo and the Linux kernel (about 1.5M commits, with a commit-graph).
+
+| Interaction | Budget | Fixture | Status |
+| --- | --- | --- | --- |
+| Launch, process start to the first presented frame of Cairn's own UI (no repo content required) | median < 300 ms, none over 400 ms, across 20 warm launches | any | Proven on macOS (239 ms median, framework only). Windows needs a PresentMon trace (Phase 1) |
+| Cached open, from the Intent to the first graph screen, including a restore at startup | < 200 ms | Linux kernel | Unproven (Phase 2) |
+| First open of a repo (no Cairn cache), to the first screen of HEAD's history | < 1 s | Linux kernel | Unproven (Phase 2) |
+| Graph scrolling, at 120 Hz, over the top 100k rows, in the Floor's five scenarios | at least 99.5% of presented intervals within 12.5 ms, no gap over 25 ms | Linux kernel | Proven on Windows. macOS needs an Instruments cross-check (Phase 2) |
+| Select commit to file list, settled (merges diffed against the first parent) | < 50 ms | Linux kernel | Unproven (Phase 2) |
+| Select file to first diff screen, settled with highlighting, for files under 10k lines | < 50 ms | any | Unproven (Phase 3) |
+| External change to UI updated: a file saved or a `git` command run outside Cairn, to the updated status, sidebar and graph | < 100 ms | Linux kernel | Unproven (Phase 1) |
+| Intent to UI updated after a Local write Job, such as Commit pressed to the updated graph and status | < 100 ms | small repo | Unproven (Phase 1). Needs the tuned CLI runner: a four-spawn commit is about 50 ms tuned and 125 ms naive on Windows |
+| Memory, settled after the scroll scenarios plus 10 s, at a 1728x1117 logical window, with commit metadata resident | < 500 MB | Linux kernel | Unproven (Phase 2). The framework and delta row store measured 248 MB on macOS and 37 MB on Windows |
+
+**Recorded only, never gating:**
+
+- Startup restore of the last repo, launch and cached open together. It keeps a skeleton launch honest.
+- The full graph settling after HEAD's first screen.
+- Peak memory while scrolling (about 467 MB on macOS in the delta format).
+- Opens with the OS file cache purged.
+- Merges touching more than N files, with N chosen in Phase 2 from the kernel's real distribution.
+- A first open with no commit-graph. `git rev-list` needs about 8 s for the kernel, and no design gets topo order much faster without a graph. Cairn shows that it's building one and offers the commit-graph write on the first screen.
+- Rare 110–190 ms Windows spawn outliers. p95 absorbs them while they stay under 5% of samples.
+
+**What these Budgets require of the design:**
+
+- The watcher has no debounce timer. Its first event starts a refresh, and the Slot coalesces the rest. See [ADR 0004](docs/adr/0004-watcher-coalesces-through-the-slot.md).
+- The tuned CLI runner from #13 is a Budget requirement, not a suggestion.
+- Launch does nothing slow before the first frame. Opening gix, redb and the last repo runs alongside window creation or after it.
+- The first open paints HEAD's history first and merges the other tips in behind it, keeping HEAD's row in place on screen.
+- Loading has no commit cap, and commit metadata stays resident for every loaded commit.
 
 **How to measure:** criterion benches for the core crates, run in CI with a regression threshold. `tracing` spans plus a debug-build frame-time overlay in the app. Before each phase gate, do a side-by-side stopwatch run against GitKraken and Sublime Merge on the same fixtures, on both OSes.
 
@@ -249,7 +276,7 @@ The biggest risk isn't technical. It's a side project that never gets good enoug
 | [zed#61469](https://github.com/zed-industries/zed/issues/61469): on Windows, sustained input plus background notifies can stop frames being presented for seconds | Freezes while typing, invisible to paint timers | Coalesce notifies through the bridge, which caps the rate but doesn't remove the bug. Measure presented frames with PresentMon. Test the reported app-level watchdog in Phase 0 |
 | GPUI widget gaps (IME, accessibility) | A commit box that fights you | Use gpui-component's `Textarea`. Phase 0 kill switch, under which Tauri 2 + Angular must pass the same spikes first |
 | GPUI is less mature on Windows than on macOS | A second-class Windows build, or Windows-only blockers late in the project | Run every Phase 0 spike and gate on both OSes. A Windows failure is a no-go for GPUI |
-| Windows file and process overhead (NTFS, antivirus scanning, process spawn cost) | Status and write budgets missed on Windows only | Measure status and git process round trips on the Linux kernel fixture on Windows in Phase 0, then revise the budgets from real numbers |
+| Windows file and process overhead (NTFS, antivirus scanning, process spawn cost) | Status and write Budgets missed on Windows only | Measured in Phase 0 (#11, #12). The tuned CLI runner is required, and Windows sets the write-path Budget |
 | gix behaves differently from git (filters, autocrlf, sparse index, fsmonitor) | Phantom changes, wrong status | Golden tests against `git status --porcelain=v2`, `git diff --numstat` and full `git diff` hunks. Three-scope CLI fallback (see Architecture) |
 | CLI output differs across git versions | Broken write path | Porcelain formats, `LC_ALL=C`, a minimum git version (2.23+ for `switch`/`restore`), CI against the oldest version you support |
 | Patch builder for line staging corrupts the index | Lost work, lost trust | Property tests: stage then unstage must round-trip to the original diff |

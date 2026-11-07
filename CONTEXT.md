@@ -45,6 +45,9 @@ _Avoid_: Write (alone, because a push also writes)
 **Pull**:
 One user action made of two Jobs: a Network Job that fetches the upstream, then a Local write Job that integrates it. The second starts only if the first succeeds.
 
+**External change**:
+A change to the repository made outside Cairn, such as a file saved in an editor or a `git` command run in a terminal. Cairn learns of it through the watcher, never from a Job of its own.
+
 **Supersede**:
 To drop a Read Job because a newer Read Job for the same purpose has made its result unwanted.
 _Avoid_: Cancel
@@ -54,7 +57,7 @@ Git's own exit from an in-progress merge, rebase, cherry-pick or revert. It is a
 _Avoid_: Cancel
 
 **Budget**:
-The performance Cairn aims for on one interaction. A Budget may be revised from measurements.
+The performance one interaction must reach for a phase gate to pass. A Budget is set from measurements, and a Budget with no measurement behind it is unproven and gates nothing until a phase measures it.
 _Avoid_: Target
 
 **Floor**:

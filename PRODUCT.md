@@ -58,18 +58,7 @@ When speed, absence of bloat and git fidelity conflict, speed wins. A feature th
 - Network: fetch, pull and push, with token auth for GitHub and Azure DevOps.
 - Common git operations, each a thin UI over one `git` command, except Pull, which is a fetch followed by a merge or rebase. Merge, rebase, cherry-pick and revert show an in-progress banner with Open mergetool, Mark resolved, Continue and Abort.
 
-**Performance budgets** (targets set up front, not yet measured; revise after the Phase 0 spikes)
-
-| Interaction | Target |
-| --- | --- |
-| Launch to first window | < 150 ms |
-| Open repo to first graph screen | < 200 ms warm, < 1 s cold (Linux kernel) |
-| Graph scrolling | no frame over 8 ms |
-| Select commit to file list | < 50 ms |
-| Select file to first diff screen | < 50 ms under 10k lines |
-| Worktree save to updated status | < 150 ms, debounce included |
-| Git command finishes to UI updated | < 100 ms |
-| Memory with graph loaded | < 300 MB (Linux kernel) |
+**Performance budgets** live in one table in `Git Client (GPUI + gix) Project Plan.md`, under Performance budgets. Every interaction has one, it applies on both OSes, and a phase gate passes only when its Budgets are met. This file never restates the numbers.
 
 **Hard constraints**
 
@@ -98,7 +87,7 @@ When speed, absence of bloat and git fidelity conflict, speed wins. A feature th
 ## Evidence on Hand
 
 - `Git Client (GPUI + gix) Project Plan.md` holds the scope, architecture, phases, budgets and risks.
-- No code, benchmarks or users exist yet. Budgets are targets. Never present them as measured results or as proven wins over GitKraken or Sublime Merge.
+- No product code or users exist yet. Phase 0 spikes measured the framework and gix, but most Budgets are still unproven. Never present a Budget as a measured result of Cairn, or as a proven win over GitKraken or Sublime Merge.
 - No testimonials, screenshots, licence, pricing or adoption figures exist. Do not invent them.
 
 ## Product Principles
