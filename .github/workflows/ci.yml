@@ -51,3 +51,41 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: test
         run: cargo test --workspace --locked
+
+  # The oldest supported git is a tested claim: the runner tests run against git 2.23
+  # itself. Linux, because building an old git from source is quickest there; the
+  # runner's resolution there is simply the first git on PATH.
+  oldest-git:
+    name: runner tests against git 2.23
+    runs-on: ubuntu-latest
+    env:
+      GIT_VERSION: 2.23.0
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache git ${{ env.GIT_VERSION }}
+        id: git-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/git-${{ env.GIT_VERSION }}
+          key: git-${{ env.GIT_VERSION }}-${{ runner.os }}-v1
+      - name: Build git ${{ env.GIT_VERSION }}
+        if: steps.git-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libz-dev
+          curl -fsSL "https://mirrors.edge.kernel.org/pub/software/scm/git/git-$GIT_VERSION.tar.gz" | tar xz
+          cd "git-$GIT_VERSION"
+          make -j"$(nproc)" prefix="$HOME/git-$GIT_VERSION" \
+            NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_CURL=1 NO_EXPAT=1 NO_OPENSSL=1 \
+            install
+      - name: Put git ${{ env.GIT_VERSION }} first on PATH
+        run: echo "$HOME/git-$GIT_VERSION/bin" >> "$GITHUB_PATH"
+      - name: runner tests
+        env:
+          CAIRN_EXPECT_GIT_VERSION: ${{ env.GIT_VERSION }}
+        run: |
+          git --version
+          cargo test -p cairn-write --locked
