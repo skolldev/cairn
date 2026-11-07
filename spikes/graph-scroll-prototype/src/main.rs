@@ -75,6 +75,7 @@ struct Outcome {
     within: f64,
     p99: f64,
     median: f64,
+    mean: f64,
     worst: f64,
     dropped: u64,
     keys: u64,
@@ -431,6 +432,7 @@ impl View {
             within: v.iter().filter(|x| **x <= 12.5).count() as f64 / n as f64 * 100.0,
             p99: v.get(n * 99 / 100).copied().unwrap_or(0.0),
             median: v.get(n / 2).copied().unwrap_or(0.0),
+            mean: v.iter().sum::<f64>() / n as f64,
             worst: v.last().copied().unwrap_or(0.0),
             dropped: rec.dropped,
             keys: self.keys - b.keys_at,
@@ -446,8 +448,8 @@ impl View {
 
 fn line(o: &Outcome) -> String {
     format!(
-        "{}{:<12} #{} frames {:>5}  median {:>5.2}  <=12.5ms {:>6.2}%  p99 {:>6.2}  worst {:>6.1}  dropped {:>3}  keys {:>3}  notifies {:>4}  rows {:>7.0}  paint avg {:>5.0}us max {:>6}us",
-        if o.invalid { "[INACTIVE] " } else { "" }, o.scenario.name, o.run, o.frames, o.median, o.within, o.p99, o.worst, o.dropped, o.keys, o.notifies, o.rows_moved, o.paint_avg_us, o.paint_max_us
+        "{}{:<12} #{} frames {:>5}  median {:>5.2}  mean {:>5.2}  <=12.5ms {:>6.2}%  p99 {:>6.2}  worst {:>6.1}  dropped {:>3}  keys {:>3}  notifies {:>4}  rows {:>7.0}  paint avg {:>5.0}us max {:>6}us",
+        if o.invalid { "[INACTIVE] " } else { "" }, o.scenario.name, o.run, o.frames, o.median, o.mean, o.within, o.p99, o.worst, o.dropped, o.keys, o.notifies, o.rows_moved, o.paint_avg_us, o.paint_max_us
     )
 }
 
@@ -463,7 +465,7 @@ fn finish(cfg: &Cfg, store: &Store, results: &[Outcome]) {
         "\n== {:?} cap {} {} rows, paint {}, source: {src}",
         cfg.format, cfg.cap, cfg.rows, if cfg.per_edge { "per-edge" } else { "per-colour" }
     ));
-    let control_ok = results.iter().filter(|r| r.scenario.name == "control").all(|r| r.median < 9.0 && r.within >= 99.0);
+    let control_ok = results.iter().filter(|r| r.scenario.name == "control").all(|r| r.mean < 9.0 && r.within >= 99.0);
     say(format!("control: {}", if control_ok { "PASS (source can be trusted at 120 Hz)" } else { "FAIL, every result below is suspect" }));
     for r in results {
         say(line(r));
@@ -478,7 +480,9 @@ fn finish(cfg: &Cfg, store: &Store, results: &[Outcome]) {
         let worst = rs.iter().map(|r| r.worst).fold(0.0, f64::max);
         let moved = sc.motion == Motion::Still || rs.iter().all(|r| r.rows_moved > 1.0);
         let keyed = !sc.held || rs.iter().all(|r| r.keys > 0);
-        let frames = rs.iter().all(|r| r.median < 9.0);
+        // Mean, not median: at 120 Hz, DWM's display intervals alternate about
+        // 7.0 / 9.65 ms on Windows, which puts the median at 9.6 ms.
+        let frames = rs.iter().all(|r| r.mean < 9.0);
         let verdict = if rs.iter().any(|r| r.invalid) {
             "INVALID (window lost focus during the run)"
         } else if !sc.floor {

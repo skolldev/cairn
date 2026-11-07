@@ -200,9 +200,12 @@ mod win {
         private_ws: usize,
         shared_commit: u64,
     }
+    /// INPUT with KEYBDINPUT. The union is 8-aligned on x64, so `_align` keeps
+    /// `vk` at offset 8 and the total at 40 bytes, or SendInput rejects it.
     #[repr(C)]
     struct KeyInput {
         kind: u32,
+        _align: u32,
         vk: u16,
         scan: u16,
         flags: u32,
@@ -278,7 +281,7 @@ mod win {
     }
 
     fn send(flags: u32) {
-        let k = KeyInput { kind: 1, vk: 0x28, scan: 0, flags, time: 0, extra: 0, pad: 0 };
+        let k = KeyInput { kind: 1, _align: 0, vk: 0x28, scan: 0, flags, time: 0, extra: 0, pad: 0 };
         unsafe { SendInput(1, &k, std::mem::size_of::<KeyInput>() as i32) };
     }
     pub fn inject_key_down(_repeat: bool) {
