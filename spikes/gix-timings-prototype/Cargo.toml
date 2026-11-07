@@ -1,0 +1,17 @@
+# PROTOTYPE: throwaway spike for issue #11. Not part of Cairn. See README.md.
+[package]
+name = "gix-timings-prototype"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+# No release after 0.90.0 yet, and 0.90.0 lacks the topo walk and status fixes (#3).
+gix = { git = "https://github.com/GitoxideLabs/gitoxide", rev = "bc4d8135306797b528170709b231faf3e6ebe170" }
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+debug = "line-tables-only"
