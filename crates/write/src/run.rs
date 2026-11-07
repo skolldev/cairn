@@ -168,7 +168,12 @@ impl Git {
                         err.extend_from_slice(&chunk[..n]);
                     }
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(e) => break Err(e),
+                    Err(e) => {
+                        // Keep the pipe drained, or git could block writing to it while
+                        // the stdout reader waits for git to exit.
+                        let _ = io::copy(&mut stderr, &mut io::sink());
+                        break Err(e);
+                    }
                 }
             };
             let out = stdout.join().expect("the stdout reader doesn't panic");

@@ -5,15 +5,8 @@ mod common;
 use std::path::Path;
 use std::sync::Arc;
 
-use cairn_repo::{Generation, Head, Intent, JobSnapshot, JobState, RefsSnapshot, Snapshot};
+use cairn_repo::{Generation, Head, Intent, JobSnapshot, JobState, Snapshot};
 use common::{Harness, git, git_output, git_read, small_fixture_clone};
-
-fn refs_of(snapshot: &Snapshot) -> Option<&Arc<RefsSnapshot>> {
-    match snapshot {
-        Snapshot::Refs(refs) => Some(refs),
-        _ => None,
-    }
-}
 
 fn job_of(snapshot: &Snapshot) -> Option<&Arc<JobSnapshot>> {
     match snapshot {
@@ -43,11 +36,44 @@ fn repo_with_other_branch() -> (tempfile::TempDir, std::path::PathBuf, String) {
     (dir, repo, start)
 }
 
-/// Opens `repo` and returns the generation of the refs Snapshot that answers it.
-fn open(harness: &Harness, repo: &Path) -> Generation {
+/// The generation each Slot answered an Open with.
+struct Opened {
+    refs: Generation,
+    staged: Generation,
+    unstaged: Generation,
+    untracked: Generation,
+}
+
+/// Opens `repo` and waits until every Slot has answered it.
+fn open(harness: &Harness, repo: &Path) -> Opened {
     harness.service.send(Intent::Open(repo.to_path_buf()));
-    let seen = harness.drain_until(|s| refs_of(s).is_some());
-    refs_of(seen.last().unwrap()).unwrap().generation
+    let (mut refs, mut staged, mut unstaged, mut untracked) = (None, None, None, None);
+    harness.drain_until(|s| {
+        match s {
+            Snapshot::Refs(r) if r.workdir == repo => refs = Some(r.generation),
+            Snapshot::Staged(s) if s.workdir == repo => staged = Some(s.generation),
+            Snapshot::Unstaged(s) if s.workdir == repo => unstaged = Some(s.generation),
+            Snapshot::Untracked(s) if s.workdir == repo => untracked = Some(s.generation),
+            _ => {}
+        }
+        refs.is_some() && staged.is_some() && unstaged.is_some() && untracked.is_some()
+    });
+    Opened {
+        refs: refs.unwrap(),
+        staged: staged.unwrap(),
+        unstaged: unstaged.unwrap(),
+        untracked: untracked.unwrap(),
+    }
+}
+
+/// The workdir a Read Slot's Snapshot answers, or `None` for a Job's.
+fn read_workdir(snapshot: &Snapshot) -> Option<&Path> {
+    match snapshot {
+        Snapshot::Refs(s) => Some(&s.workdir),
+        Snapshot::Staged(s) | Snapshot::Unstaged(s) => Some(&s.workdir),
+        Snapshot::Untracked(s) => Some(&s.workdir),
+        Snapshot::Job(_) => None,
+    }
 }
 
 /// Drains until the first Local write Job this test sent has finished, and returns it.
@@ -75,17 +101,17 @@ fn a_switch_runs_git_switch_and_refreshes_refs_and_status() {
 
     harness.service.send(Intent::Switch("other".to_owned()));
     // The refresh may publish before the Job's outcome, so drain for all of them at once.
-    // The Open was each status Slot's first generation, so a second one answers the
-    // refresh.
     let (mut job, mut refs, mut staged, mut unstaged, mut untracked) =
         (None, None, None, None, None);
     harness.drain_until(|s| {
         match s {
             Snapshot::Job(j) if is_done(j) => job = Some(j.clone()),
-            Snapshot::Refs(r) if r.generation > opened => refs = Some(r.clone()),
-            Snapshot::Staged(s) if s.generation.get() > 1 => staged = Some(s.clone()),
-            Snapshot::Unstaged(s) if s.generation.get() > 1 => unstaged = Some(s.clone()),
-            Snapshot::Untracked(s) if s.generation.get() > 1 => untracked = Some(s.clone()),
+            Snapshot::Refs(r) if r.generation > opened.refs => refs = Some(r.clone()),
+            Snapshot::Staged(s) if s.generation > opened.staged => staged = Some(s.clone()),
+            Snapshot::Unstaged(s) if s.generation > opened.unstaged => unstaged = Some(s.clone()),
+            Snapshot::Untracked(s) if s.generation > opened.untracked => {
+                untracked = Some(s.clone())
+            }
             _ => {}
         }
         job.is_some()
@@ -270,5 +296,80 @@ fn a_switch_refused_for_local_changes_publishes_gits_message() {
     assert_eq!(
         std::fs::read_to_string(repo.join("README.md")).unwrap(),
         "edited in the worktree\n"
+    );
+}
+
+#[test]
+fn a_switch_never_creates_a_branch_from_a_remote_tracking_one() {
+    let (_dir, repo, start) = repo_with_other_branch();
+    git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/only-remote", "HEAD"],
+    );
+    let harness = Harness::start();
+    open(&harness, &repo);
+
+    harness
+        .service
+        .send(Intent::Switch("only-remote".to_owned()));
+    let job = wait_for_done(&harness);
+
+    let JobState::Done(Err(error)) = &job.state else {
+        panic!("only-remote is not a local branch: {job:?}");
+    };
+    assert_eq!(error, &terminal_switch_error(&repo, "only-remote"));
+    assert_eq!(current_branch(&repo), format!("refs/heads/{start}"));
+    assert!(
+        git_output(
+            &repo,
+            &["rev-parse", "--verify", "-q", "refs/heads/only-remote"]
+        )
+        .stdout
+        .is_empty()
+    );
+    // Control: a plain `git switch` would have created it from the remote-tracking branch.
+    git(&repo, &["switch", "--quiet", "only-remote"]);
+    assert_eq!(current_branch(&repo), "refs/heads/only-remote");
+}
+
+#[test]
+fn a_switch_that_finishes_after_another_open_doesnt_refresh_the_new_repo_with_the_old() {
+    let (dir, repo, _start) = repo_with_other_branch();
+    let (_other_dir, newer) = small_fixture_clone();
+    let log = dir.path().join("hook.log");
+    let release = dir.path().join("release");
+    install_blocking_hook(&repo, &log, &release);
+    let harness = Harness::start();
+    let _release = Release(&release);
+    open(&harness, &repo);
+
+    harness.service.send(Intent::Switch("other".to_owned()));
+    let mut jobs = Jobs::default();
+    jobs.until(&harness, |j| {
+        j.nth(0)
+            .is_some_and(|job| job.output.contains("hook waiting on other"))
+    });
+    open(&harness, &newer);
+
+    std::fs::write(&release, "").unwrap();
+    // The Job still finishes, in the repo it was asked for.
+    let mut late = Vec::new();
+    late.extend(harness.drain_until(|s| job_of(s).is_some_and(|j| is_done(j))));
+    let done = late.iter().filter_map(job_of).find(|j| is_done(j)).unwrap();
+    assert_eq!(done.state, JobState::Done(Ok(())), "{done:?}");
+    assert_eq!(done.workdir, repo);
+    assert_eq!(current_branch(&repo), "refs/heads/other");
+
+    // A refresh is queued before the outcome is published, so one that ran would publish
+    // within this window. The first test is the control: a switch is refreshed there.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    late.extend(harness.service.drain());
+    let stale: Vec<_> = late
+        .iter()
+        .filter(|s| read_workdir(s).is_some_and(|w| w == repo))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "the old repo's refresh replaced the new one's: {stale:?}"
     );
 }

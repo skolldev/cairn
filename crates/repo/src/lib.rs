@@ -86,7 +86,9 @@ pub enum JobState {
 }
 
 /// One Job's state. A Job publishes a new one each time its state or output changes, and
-/// each holds everything before it, so only the newest per Job matters.
+/// each holds everything before it, so only the newest per Job matters. Jobs carry a
+/// [`JobId`] rather than a [`Generation`]: nothing Supersedes a Job, and one Job's
+/// Snapshots are published in order.
 #[derive(Debug)]
 pub struct JobSnapshot {
     pub id: JobId,
@@ -131,8 +133,6 @@ pub struct RepoService {
     reads: Arc<Reads>,
     // Dropping the lane joins its threads. Kept as a field for that, not read.
     _interactive: Lane,
-    /// The repository the last Open named.
-    workdir: Mutex<Option<PathBuf>>,
     next_job: AtomicU64,
 }
 
@@ -143,6 +143,8 @@ struct Reads {
     unstaged_slot: Slot,
     untracked_slot: Slot,
     outbox: Arc<Outbox>,
+    /// The repository the last Open named.
+    open: Mutex<Option<PathBuf>>,
 }
 
 impl RepoService {
@@ -161,9 +163,9 @@ impl RepoService {
                     pending: Mutex::new(Pending::default()),
                     wake: Box::new(wake),
                 }),
+                open: Mutex::new(None),
             }),
             _interactive: interactive,
-            workdir: Mutex::new(None),
             next_job: AtomicU64::new(1),
         }
     }
@@ -173,7 +175,7 @@ impl RepoService {
             Intent::Open(path) => {
                 let span = tracing::info_span!("intent", kind = "open", path = %path.display());
                 let _entered = span.enter();
-                *self.workdir.lock().unwrap() = Some(path.clone());
+                *self.reads.open.lock().unwrap() = Some(path.clone());
                 self.reads.refresh(&path, &span);
             }
             Intent::Switch(branch) => {
@@ -215,7 +217,7 @@ impl RepoService {
         run: impl FnOnce(&Path, &mut dyn FnMut(&[u8])) -> Result<(), String> + Send + 'static,
     ) {
         let id = JobId(self.next_job.fetch_add(1, Ordering::Relaxed));
-        let workdir = self.workdir.lock().unwrap().clone();
+        let workdir = self.reads.open.lock().unwrap().clone();
         let job = JobPublisher {
             id,
             kind,
@@ -234,13 +236,22 @@ impl RepoService {
                 tracing::info_span!(parent: &job.span, "local_write_job", id = id.0).entered();
             job.publish(JobState::Running, "");
             let mut output = Vec::new();
-            let result = run(&workdir, &mut |chunk| {
-                output.extend_from_slice(chunk);
-                job.publish(JobState::Running, &String::from_utf8_lossy(&output));
+            // A panic must still end the Job and refresh, or its Snapshot would stay Running.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run(&workdir, &mut |chunk| {
+                    output.extend_from_slice(chunk);
+                    job.publish(JobState::Running, &String::from_utf8_lossy(&output));
+                })
+            }))
+            .unwrap_or_else(|_| {
+                tracing::error!("local write job panicked");
+                Err("Cairn hit an internal error while running this Job".to_owned())
             });
             // Refresh before reporting done, so that by the time the UI sees the outcome
-            // the Read Jobs that show its effect are already queued.
-            reads.refresh(&workdir, &job.span);
+            // the Read Jobs that show its effect are already queued. Only while its repo
+            // is still the open one: otherwise the refresh would replace the newer repo's
+            // Snapshots in the shared Slots.
+            reads.refresh_if_open(&workdir, &job.span);
             job.publish(JobState::Done(result), &String::from_utf8_lossy(&output));
         });
     }
@@ -269,6 +280,16 @@ impl JobPublisher {
 }
 
 impl Reads {
+    /// [`refresh`](Self::refresh), unless an Open has named another repository since.
+    fn refresh_if_open(&self, path: &Path, span: &tracing::Span) {
+        let open = self.open.lock().unwrap();
+        if open.as_deref() == Some(path) {
+            self.refresh(path, span);
+        } else {
+            tracing::debug!(path = %path.display(), "repository no longer open; refresh skipped");
+        }
+    }
+
     /// Reads refs and status again: everything a switch can change, and everything an
     /// Open shows. Later Intents that change less refresh less.
     fn refresh(&self, path: &Path, span: &tracing::Span) {
