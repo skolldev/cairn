@@ -156,5 +156,22 @@ Paste, stock: CRLF keeps 4 `\r` and Excel keeps 3, so **the Floor fails as shipp
 Excel's tabs and quoted cell are left alone. Both results were repeated with text
 rendering on. Whether that counts as a framework pass is a call for #13, though the fix is shippable.
 
-Not done: all of CHECKLIST.md by hand on both OSes, a Japanese IME on the Windows PC,
-and the macOS bench rerun.
+## Hand checklist, 2026-11-07
+
+Every case that was run passed on both macOS and Windows, German layout. The
+per-case marks are in [CHECKLIST.md](CHECKLIST.md). That covers characters with
+AltGr and the Option layer, dead keys, commit during a dead key, press-and-hold
+accents, the emoji picker with a ZWJ family, undo and redo, selection and
+navigation, focus, and paste with `--paste-fix`. Stock paste still fails, as the
+bench found.
+
+Not run:
+
+- **Japanese IME:** dropped as irrelevant to Cairn, so the four IME cases and the
+  Japanese undo and focus cases have no result. The issue asked for one Japanese IME,
+  so this narrows what the pass covers.
+- **A real copy from Excel:** only the scripted Excel clipboard was pasted.
+- **Recorded-only rows:** IME placement near the screen bottom, other IMEs and
+  right-to-left text.
+
+Not done: the macOS bench rerun.
