@@ -25,6 +25,18 @@ jobs:
       - name: Every crate except cairn-app is GPUI-free
         run: ./scripts/check-gpui-free.sh
 
+  # Only cairn-write's runner may start processes, so every git call gets its rules. A
+  # source scan, so one OS is enough. The self-test shows it fails on deliberate violations.
+  single-git-spawn:
+    name: git spawned only by cairn-write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Guard self-test (deliberate violations must fail)
+        run: ./scripts/test-check-single-git-spawn.sh
+      - name: Only cairn-write starts processes
+        run: ./scripts/check-single-git-spawn.sh
+
   check:
     name: fmt, clippy, test (${{ matrix.os }})
     strategy:
@@ -50,4 +62,34 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast
+
+  # The oldest supported git is a tested claim: the runner tests run against git 2.23
+  # itself. Linux, because building an old git from source is quickest there; the
+  # runner's resolution there is simply the first git on PATH.
+  oldest-git:
+    name: runner tests against git 2.23
+    runs-on: ubuntu-latest
+    env:
+      GIT_VERSION: 2.23.0
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache git ${{ env.GIT_VERSION }}
+        uses: actions/cache@v4
+        with:
+          path: ~/git-${{ env.GIT_VERSION }}
+          key: git-${{ env.GIT_VERSION }}-${{ runner.os }}-${{ hashFiles('scripts/oldest-git.sh') }}
+      - name: Build git ${{ env.GIT_VERSION }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libz-dev
+          ./scripts/oldest-git.sh "$GIT_VERSION" "$HOME/git-$GIT_VERSION" >> "$GITHUB_PATH"
+      - name: runner tests
+        env:
+          CAIRN_EXPECT_GIT_VERSION: ${{ env.GIT_VERSION }}
+        run: |
+          git --version
+          cargo test -p cairn-write --locked --no-fail-fast

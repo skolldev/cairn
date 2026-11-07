@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use cairn_repo::{Head, Intent, RefEntry, Refs, RefsSnapshot, Snapshot};
-use common::{Harness, git, small_fixture};
+use common::{Harness, git, git_output, small_fixture};
 
 fn refs_of(snapshot: &Snapshot) -> Option<&Arc<RefsSnapshot>> {
     match snapshot {
@@ -81,13 +81,8 @@ fn assert_matches_git(repo: &Path, refs: &Refs) {
             assert_eq!(target.as_ref().map(|t| t.as_str()), Some(head_oid.as_str()));
         }
         Head::Detached { target } => {
-            let symbolic = std::process::Command::new("git")
-                .arg("-C")
-                .arg(repo)
-                .args(["symbolic-ref", "-q", "HEAD"])
-                .status()
-                .unwrap();
-            assert!(!symbolic.success(), "git says HEAD is on a branch");
+            let symbolic = git_output(repo, &["symbolic-ref", "-q", "HEAD"]);
+            assert!(!symbolic.status.success(), "git says HEAD is on a branch");
             assert_eq!(target.as_str(), head_oid);
         }
     }
