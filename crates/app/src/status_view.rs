@@ -58,7 +58,7 @@ fn untracked(snapshot: &UntrackedSnapshot) -> Result<Vec<AnyElement>, String> {
     snapshot
         .result
         .as_ref()
-        .map(|paths| paths.iter().map(|p| row("?", p.to_string())).collect())
+        .map(|paths| paths.iter().map(|p| row('?', p.to_string())).collect())
         .map_err(Clone::clone)
 }
 
@@ -71,16 +71,11 @@ fn changes(snapshot: &ChangesSnapshot) -> Result<Vec<AnyElement>, String> {
 }
 
 fn change_row(change: &FileChange) -> AnyElement {
-    let (letter, path) = match &change.kind {
-        ChangeKind::Added => ("A", change.path.to_string()),
-        ChangeKind::Deleted => ("D", change.path.to_string()),
-        ChangeKind::Modified => ("M", change.path.to_string()),
-        ChangeKind::TypeChanged => ("T", change.path.to_string()),
-        ChangeKind::Unmerged => ("U", change.path.to_string()),
-        ChangeKind::Renamed { from, .. } => ("R", format!("{from} -> {}", change.path)),
-        ChangeKind::Copied { from, .. } => ("C", format!("{from} -> {}", change.path)),
+    let path = match &change.kind {
+        ChangeKind::Renamed { from, .. } => format!("{from} -> {}", change.path),
+        _ => change.path.to_string(),
     };
-    row(letter, path)
+    row(change.kind.letter(), path)
 }
 
 /// A titled list. `None` while the Slot hasn't answered yet.
@@ -104,11 +99,15 @@ fn section(title: &'static str, rows: Option<Result<Vec<AnyElement>, String>>) -
         .children(body)
 }
 
-fn row(letter: &'static str, path: String) -> AnyElement {
+fn row(letter: char, path: String) -> AnyElement {
     div()
         .flex()
         .gap(px(8.))
-        .child(div().text_color(rgb(DIM)).child(letter))
+        .child(
+            div()
+                .text_color(rgb(DIM))
+                .child(SharedString::from(letter.to_string())),
+        )
         .child(div().child(path))
         .into_any_element()
 }

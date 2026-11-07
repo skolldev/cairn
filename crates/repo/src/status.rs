@@ -144,7 +144,7 @@ struct Raw {
     src_oid: String,
     status: u8,
     score: u8,
-    /// The source of a rename or copy.
+    /// The source of a rename.
     from: Option<RepoPath>,
     path: RepoPath,
 }
@@ -153,10 +153,6 @@ impl Raw {
     fn into_change(self) -> FileChange {
         let kind = match (self.status, self.from) {
             (b'R', Some(from)) => ChangeKind::Renamed {
-                from,
-                score: self.score,
-            },
-            (b'C', Some(from)) => ChangeKind::Copied {
                 from,
                 score: self.score,
             },
@@ -174,7 +170,7 @@ impl Raw {
 }
 
 /// Parses `-z` raw output: `:srcmode dstmode srcoid dstoid STATUS[score]`, then the path,
-/// then for a rename or copy the destination path, each its own record.
+/// then for a rename the destination path, each its own record.
 fn parse_raw(out: &Output) -> Result<Vec<Raw>, String> {
     let malformed = |what: &[u8]| {
         format!(
@@ -197,10 +193,14 @@ fn parse_raw(out: &Output) -> Result<Vec<Raw>, String> {
             .as_bytes()
             .split_first()
             .ok_or_else(|| malformed(header))?;
-        let score = std::str::from_utf8(score)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        // Only a rename carries a score. An unreadable one means malformed output.
+        let score = match score {
+            [] => 0,
+            digits => std::str::from_utf8(digits)
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| malformed(header))?,
+        };
         let mut next_path = || {
             records
                 .next()
@@ -208,7 +208,8 @@ fn parse_raw(out: &Output) -> Result<Vec<Raw>, String> {
                 .ok_or_else(|| malformed(header))
         };
         let first = next_path()?;
-        let (from, path) = if matches!(letter, b'R' | b'C') {
+        // `diff-index -M` finds renames but never copies, so no `C` record arrives.
+        let (from, path) = if letter == b'R' {
             (Some(first), next_path()?)
         } else {
             (None, first)

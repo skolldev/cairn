@@ -50,17 +50,26 @@ pub enum ChangeKind {
         from: RepoPath,
         score: u8,
     },
-    /// Copied from `from`, with git's similarity score in percent.
-    Copied {
-        from: RepoPath,
-        score: u8,
-    },
+}
+
+impl ChangeKind {
+    /// The letter git's raw diff format and `git status` use for this kind.
+    pub fn letter(&self) -> char {
+        match self {
+            ChangeKind::Added => 'A',
+            ChangeKind::Deleted => 'D',
+            ChangeKind::Modified => 'M',
+            ChangeKind::TypeChanged => 'T',
+            ChangeKind::Unmerged => 'U',
+            ChangeKind::Renamed { .. } => 'R',
+        }
+    }
 }
 
 /// One changed path in the Staged or Unstaged list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileChange {
-    /// The path on the newer side: the destination of a rename or copy.
+    /// The path on the newer side: the destination of a rename.
     pub path: RepoPath,
     pub kind: ChangeKind,
 }

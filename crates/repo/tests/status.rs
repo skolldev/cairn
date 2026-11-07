@@ -29,7 +29,6 @@ fn render(change: &FileChange) -> String {
         ChangeKind::TypeChanged => ("T".to_owned(), None),
         ChangeKind::Unmerged => ("U".to_owned(), None),
         ChangeKind::Renamed { from, score } => (format!("R{score}"), Some(from)),
-        ChangeKind::Copied { from, score } => (format!("C{score}"), Some(from)),
     };
     match from {
         Some(from) => format!("{letter} {} <- {}", path(&change.path), path(from)),
