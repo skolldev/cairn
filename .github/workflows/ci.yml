@@ -37,6 +37,14 @@ jobs:
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      - name: Cache the small fixture
+        uses: actions/cache@v4
+        with:
+          path: ~/cairn-fixtures/ripgrep
+          key: fixture-ripgrep-91f5d22ef48bde459d90a8c7dbeab416e97d0f2b-${{ runner.os }}
+      - name: Small fixture
+        shell: bash
+        run: ./scripts/fixtures.sh small
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy
