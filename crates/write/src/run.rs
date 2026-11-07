@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
@@ -105,6 +105,18 @@ impl Git {
     /// Runs git once and waits for it. A non-zero exit is not an error here: it comes back in
     /// [`Output::status`], and [`Output::success`] turns it into one.
     pub fn run(&self, invocation: &Invocation) -> Result<Output, RunError> {
+        self.run_streaming(invocation, |_| {})
+    }
+
+    /// Like [`run`](Self::run), and also hands `on_stderr` each piece of stderr as git
+    /// writes it, so that hook output and progress can be shown while git runs. Hooks write
+    /// to git's stderr, their stdout included. The returned [`Output::stderr`] still holds
+    /// all of it.
+    pub fn run_streaming(
+        &self,
+        invocation: &Invocation,
+        mut on_stderr: impl FnMut(&[u8]),
+    ) -> Result<Output, RunError> {
         #[cfg(windows)]
         check_windows_repo_path(&invocation.repo)?;
 
@@ -130,9 +142,11 @@ impl Git {
         };
         let mut child = cmd.spawn().map_err(spawn_error)?;
         let pipe = child.stdin.take();
-        // Feed stdin from its own thread while this one drains stdout and stderr, so a large
-        // patch can't deadlock against a full output pipe.
-        let out = std::thread::scope(|scope| {
+        let mut stdout = child.stdout.take().expect("stdout is piped");
+        let mut stderr = child.stderr.take().expect("stderr is piped");
+        // Feed stdin and drain stdout from their own threads while this one reads stderr, so
+        // a large patch can't deadlock against a full output pipe.
+        let read = std::thread::scope(|scope| {
             if let (Some(mut pipe), Some(bytes)) = (pipe, invocation.stdin.as_deref()) {
                 scope.spawn(move || {
                     // git may exit before reading everything, for example on a bad option.
@@ -140,13 +154,33 @@ impl Git {
                     let _ = pipe.write_all(bytes);
                 });
             }
-            child.wait_with_output()
-        })
-        .map_err(spawn_error)?;
+            let stdout = scope.spawn(move || {
+                let mut bytes = Vec::new();
+                stdout.read_to_end(&mut bytes).map(|_| bytes)
+            });
+            let mut err = Vec::new();
+            let mut chunk = [0u8; 8192];
+            let stderr_read = loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) => break Ok(()),
+                    Ok(n) => {
+                        on_stderr(&chunk[..n]);
+                        err.extend_from_slice(&chunk[..n]);
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => break Err(e),
+                }
+            };
+            let out = stdout.join().expect("the stdout reader doesn't panic");
+            stderr_read.and(out).map(|out| (out, err))
+        });
+        // Always wait, even when reading failed: git is never left running unwatched.
+        let status = child.wait().map_err(spawn_error)?;
+        let (stdout, stderr) = read.map_err(spawn_error)?;
         Ok(Output {
-            status: out.status,
-            stdout: out.stdout,
-            stderr: out.stderr,
+            status,
+            stdout,
+            stderr,
         })
     }
 }

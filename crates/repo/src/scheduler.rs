@@ -1,8 +1,8 @@
 //! The Job scheduler, private to the Repo service.
 //!
-//! This is the smallest scheduler the Open path needs: one Interactive lane of worker
-//! threads that `repo` owns, Slots, and generation tokens. The Background lane, Network
-//! Jobs and Local write Jobs arrive with their own tickets.
+//! One Interactive lane of worker threads that `repo` owns, Slots and generation tokens
+//! for Read Jobs, and the Local write queue. The Background lane and Network Jobs arrive
+//! with their own tickets.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -202,6 +202,75 @@ impl Slot {
                 self.start(generation, span, job);
             }
             None => state.running = false,
+        }
+    }
+}
+
+/// The Local write queue: one thread that runs Local write Jobs one at a time, in the
+/// order they were queued. A Local write Job is never stopped or Superseded (ADR 0002),
+/// so dropping the queue waits for every queued Job to finish.
+pub(crate) struct WriteQueue {
+    shared: Arc<LaneShared>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl WriteQueue {
+    pub(crate) fn new() -> Self {
+        let shared = Arc::new(LaneShared {
+            queue: Mutex::new(VecDeque::new()),
+            ready: Condvar::new(),
+            closing: AtomicBool::new(false),
+        });
+        let worker = {
+            let shared = shared.clone();
+            std::thread::Builder::new()
+                .name("cairn-local-write".to_owned())
+                .spawn(move || shared.work_to_completion())
+                .expect("spawn the local write worker")
+        };
+        Self {
+            shared,
+            worker: Some(worker),
+        }
+    }
+
+    /// Queues a Local write Job behind every one queued before it.
+    pub(crate) fn push(&self, job: impl FnOnce() + Send + 'static) {
+        self.shared.queue.lock().unwrap().push_back(Box::new(job));
+        self.shared.ready.notify_one();
+    }
+}
+
+impl LaneShared {
+    /// Like [`work`](Self::work), but closing only stops it once the queue is empty.
+    fn work_to_completion(&self) {
+        loop {
+            let job = {
+                let mut queue = self.queue.lock().unwrap();
+                loop {
+                    if let Some(job) = queue.pop_front() {
+                        break job;
+                    }
+                    if self.closing.load(Ordering::Acquire) {
+                        return;
+                    }
+                    queue = self.ready.wait(queue).unwrap();
+                }
+            };
+            // A panicking Job must not take the queue down with it.
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+                tracing::error!("local write job panicked");
+            }
+        }
+    }
+}
+
+impl Drop for WriteQueue {
+    fn drop(&mut self) {
+        self.shared.closing.store(true, Ordering::Release);
+        self.shared.ready.notify_all();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
     }
 }

@@ -115,6 +115,8 @@ impl Bridge {
                         });
                     }
                 }
+                // The shell has no Job view yet, and nothing in it sends a Local write Intent.
+                Snapshot::Job(_) => {}
                 Snapshot::Untracked(untracked) => {
                     if newer(
                         &mut self.untracked_shown,
