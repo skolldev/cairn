@@ -41,6 +41,7 @@ Windows is a checklist for the human: [CHECKLIST.md](CHECKLIST.md).
 | Walks | `rev_walk(tips).sorting(TopoOrder)`, `use_commit_graph(true or false)` | `rev-list --topo-order`, with `-c core.commitGraph=false` for no graph |
 | All refs | HEAD plus every ref that peels to a commit (950 tags, 2 tag-to-tree skipped) | `--all` |
 | HEAD vs index | `tree_index_status`, renames as configured | `diff-index --cached -M` |
+| HEAD vs index, tree index held, recorded only | `index_from_tree` once per HEAD, untimed. Each check reads `.git/index` fresh and runs `gix::diff::index`, default renames | - |
 | Watcher-scoped | `status().into_index_worktree_iter(<10 paths>)`, no untracked | `diff-files -- <10 paths>` |
 | Full status | `status().untracked_files(Collapsed).into_iter()` | `status --porcelain=v2` |
 
@@ -174,8 +175,8 @@ The misses are 19% (HEAD vs index) and 11% (watcher) over their Floors on macOS.
 move and gix gets no fix window, so they're misses. Both causes are in gix's call path rather
 than in I/O, so a later gix may close them, but that's for the Budget rewrite, not this gate.
 
-Not run on macOS: cold runs (need `sudo purge`), and anything with Defender or NTFS, which is
-the Windows half.
+Not run on macOS: cold runs (need `sudo purge`), anything with Defender or NTFS, which is
+the Windows half, and the held tree index row, which was added after the macOS run.
 
 ## Windows results, 2026-11-07
 
@@ -226,11 +227,24 @@ Recorded only:
 | Full status without untracked files | 127.2 ms | 64.8 ms |
 | HEAD vs index, part: reading the index | 12.0 ms | - |
 | HEAD vs index, part: building an index from `HEAD^{tree}` | 58.6 ms | - |
+| HEAD vs index, HEAD tree index held (rerun) | 16.2 ms | - |
 | Watcher-scoped, index already in memory | 11.9 ms | - |
+
+The held tree index row comes from a later `status` rerun, logged in
+`results/windows-status-rerun.log`. The rerun moved no result. Most rows came within 2 ms of
+the first run, but gix's full status without untracked files took 116.2 ms (first run 127.2 ms),
+and `git diff-files` took 23.8 ms (first run 28.6 ms).
 
 - **HEAD vs index misses by more than on macOS,** 56% over the Floor against 19%. The
   tree-to-index build alone is 58.6 ms, already over the Floor. `git diff-index --cached` is
   18.6 ms including spawn, faster than on the Mac.
+- **Holding the HEAD tree index brings HEAD vs index to 16.2 ms,** under the 50 ms Floor. That
+  includes reading `.git/index` fresh and rename tracking, and it found the same 3 changes,
+  rename included. A long-running app only needs to rebuild that tree index when HEAD moves, which
+  costs the 58 ms once per commit or checkout, not once per check. gix's API doesn't do this
+  itself: `tree_index_status` rebuilds the tree index on every call, and nothing in gix reads the
+  index's cache-tree (TREE extension), which is how `git` skips unchanged folders. On this fixture
+  the cache-tree is fully valid and matches `HEAD^{tree}`.
 - **The watcher case passes on Windows,** with 18% headroom, where it missed on macOS. With the
   index in memory it's 11.9 ms, half the Mac's 22.8 ms. `git diff-files` passes with only 5%
   headroom, spawn included, so neither tool has much room here.
@@ -257,8 +271,10 @@ Recorded only:
 
 - **No-graph walks:** a miss on both OSes, so they go to `git rev-list` or Cairn makes sure a
   graph exists. That's still #13's call.
-- **HEAD vs index:** a miss on both OSes, worse on Windows. It goes to `git diff-index --cached`,
-  which is 18.6 ms on Windows with the spawn.
+- **HEAD vs index:** a miss on both OSes as measured, worse on Windows, so by the #8 rules it goes
+  to `git diff-index --cached`, which is 18.6 ms on Windows with the spawn. The held tree index
+  passes at 16.2 ms on Windows, though. Whether that design counts for the gate, and whether a
+  macOS run of that row is needed, is for #13.
 - **Watcher-scoped check:** passes on Windows, misses on macOS. If the gate is per path on both
   OSes, it still goes to `git diff-files`. A per-OS split is for #13. Either way, `git`'s 28.6 ms
   on Windows leaves 1.4 ms of headroom, so a CLI fallback on every watcher event is tight, and

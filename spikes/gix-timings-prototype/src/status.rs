@@ -71,6 +71,20 @@ fn timings(args: &Args, plan: &Mutation) -> Result<()> {
         let (git, _) = time_git(args, repo_path, &[nol, "diff-index", "--cached", "-M", "--name-status", "HEAD"])?;
         table_row("HEAD vs index", Some(Duration::from_millis(50)), &gix, Some(&git));
         counts.push(format!("{n} changes"));
+
+        // A long-running app builds the HEAD tree index once per HEAD and keeps it, so each
+        // check only reads `.git/index` and diffs. The build is paid when HEAD moves.
+        let repo = open(repo_path)?;
+        let tree_state: gix::index::State = repo.index_from_tree(&repo.head_tree_id()?)?.into();
+        let (held, held_n) = measure(args, || {
+            let start = Instant::now();
+            let n = head_vs_index_held(&repo, &tree_state)?;
+            Ok((start.elapsed(), n))
+        })?;
+        table_row("  HEAD vs index, HEAD tree index held", None, &held, None);
+        if held_n != n {
+            println!("note: held tree index found {held_n} changes, the fresh case {n}");
+        }
     }
     if wants(args, "watcher") {
         let (gix, n) = measure(args, || {
@@ -176,6 +190,33 @@ fn head_vs_index(repo: &gix::Repository) -> Result<usize> {
             n += 1;
             Ok(std::ops::ControlFlow::Continue(()))
         },
+    )?;
+    Ok(n)
+}
+
+/// HEAD vs index with the HEAD tree index already built: reads `.git/index` fresh (not gix's
+/// shared cached copy) and diffs. Renames use gix's defaults, which match `git diff -M`.
+fn head_vs_index_held(repo: &gix::Repository, tree_state: &gix::index::State) -> Result<usize> {
+    let index = repo.open_index()?;
+    let root = repo.workdir().context("workdir")?;
+    let mut search = gix::pathspec::Search::from_specs(None, None, root)?;
+    let mut cache = repo.diff_resource_cache_for_tree_diff()?;
+    let rewrites = gix::diff::index::RewriteOptions {
+        resource_cache: &mut cache,
+        find: repo,
+        rewrites: gix::diff::Rewrites::default(),
+    };
+    let mut n = 0;
+    gix::diff::index(
+        tree_state,
+        &index,
+        |_| {
+            n += 1;
+            Ok(std::ops::ControlFlow::Continue(()))
+        },
+        Some(rewrites),
+        &mut search,
+        &mut |_, _, _, _| false,
     )?;
     Ok(n)
 }
