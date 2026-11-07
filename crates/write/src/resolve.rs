@@ -3,6 +3,7 @@
 //! Both OSes put a shim on `PATH` that costs a few milliseconds a call (#12): Git for
 //! Windows' `Git\cmd\git.exe` and macOS's `/usr/bin/git`. Resolution looks past them to the
 //! real binary, then checks its version.
+//! See `docs/adr/0005-runner-runs-the-real-git-binary.md`.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
