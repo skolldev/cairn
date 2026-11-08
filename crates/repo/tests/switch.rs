@@ -5,7 +5,7 @@ mod common;
 use std::path::Path;
 use std::sync::Arc;
 
-use cairn_repo::{Head, Intent, JobSnapshot, JobState, Snapshot};
+use cairn_repo::{ChangesSnapshot, Head, Intent, JobSnapshot, JobState, RefsSnapshot, Snapshot};
 use common::{
     Harness, Release, Seen, git, git_output, git_read, install_blocking_hook, is_ended, job_of,
     open, small_fixture_clone,
@@ -62,7 +62,15 @@ fn a_switch_runs_git_switch_and_refreshes_refs_and_status() {
     let opened = open(&harness, &repo);
 
     harness.service.send(Intent::Switch("other".to_owned()));
-    // The refresh may publish before the Job's outcome, so drain for all of them at once.
+    // The refresh may publish before the Job's outcome, and the watcher may publish status
+    // read midway through the checkout. So drain until each Slot's newest Snapshot shows
+    // the switch: refs at the new HEAD, and status empty after a clean switch.
+    let on_other = |r: &RefsSnapshot| {
+        r.result.as_ref().is_ok_and(|refs| {
+            matches!(&refs.head, Head::Branch { name, .. } if name.as_str() == "refs/heads/other")
+        })
+    };
+    let clean = |s: &ChangesSnapshot| s.result == Ok(Vec::new());
     let (mut job, mut refs, mut staged, mut unstaged, mut untracked) =
         (None, None, None, None, None);
     harness.drain_until(|s| {
@@ -77,25 +85,16 @@ fn a_switch_runs_git_switch_and_refreshes_refs_and_status() {
             _ => {}
         }
         job.is_some()
-            && refs.is_some()
-            && staged.is_some()
-            && unstaged.is_some()
-            && untracked.is_some()
+            && refs.as_deref().is_some_and(on_other)
+            && staged.as_deref().is_some_and(clean)
+            && unstaged.as_deref().is_some_and(clean)
+            && untracked
+                .as_deref()
+                .is_some_and(|u| u.result == Ok(Vec::new()))
     });
     let job = job.unwrap();
     assert_eq!(job.state, JobState::Done(Ok(())), "{job:?}");
     assert_eq!(current_branch(&repo), "refs/heads/other");
-
-    // The refreshed refs show the new HEAD, and after a clean switch status is empty.
-    let refs = refs.unwrap();
-    let head = &refs.result.as_ref().expect("refs read").head;
-    assert!(
-        matches!(head, Head::Branch { name, .. } if name.as_str() == "refs/heads/other"),
-        "{head:?}"
-    );
-    assert_eq!(staged.unwrap().result, Ok(Vec::new()));
-    assert_eq!(unstaged.unwrap().result, Ok(Vec::new()));
-    assert_eq!(untracked.unwrap().result, Ok(Vec::new()));
 }
 
 #[test]
