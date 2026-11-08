@@ -7,28 +7,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use cairn_write::{Invocation, JobClass, RunError, Stop};
-use common::{Repo, git};
-
-/// An alias that runs a shell which announces itself on stderr and then waits for
-/// `release` to exist. The shell is a child of git, as `upload-pack` or a remote helper
-/// is during a fetch.
-fn blocking_alias(release: &Path) -> String {
-    // git runs aliases with its own sh, which takes forward slashes on Windows too.
-    let release = release.to_str().unwrap().replace('\\', "/");
-    format!(
-        "alias.block=!echo waiting >&2; while [ ! -f '{release}' ]; do sleep 0.05; done; \
-         echo released >&2"
-    )
-}
-
-/// Creates the release file when dropped, so a failing test never leaves a shell waiting.
-struct Release<'a>(&'a Path);
-
-impl Drop for Release<'_> {
-    fn drop(&mut self) {
-        let _ = std::fs::write(self.0, "");
-    }
-}
+use common::{Release, Repo, blocking_alias, git};
 
 #[test]
 fn stopping_a_network_invocation_kills_git_and_what_it_started() {

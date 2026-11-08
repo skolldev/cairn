@@ -48,3 +48,13 @@ Done 2026-11-07. Each `gpui-pre-*` crate in `Cargo.lock` (20 of them, all 0.3.11
 Ten manifests drop dev-dependencies, which never build for a dependent. Two crates omit one file each that Zed has; packaging excludes files, so that adds nothing. `gpui-pre-reqwest` (0.12.15) republishes Zed's reqwest fork rather than a crate from the Zed repo, so it is outside this diff. It is not in the macOS or Windows dependency graph.
 
 Repeat this diff for every `gpui-pre` upgrade until Cairn moves to Zed's own releases.
+
+## After a `gpui-pre` upgrade: the macOS terminate guard
+
+`crates/app/src/terminate.rs` adds `applicationShouldTerminate:` to GPUI's private `GPUIApplicationDelegate` class, and GPUI's test platform can't reach it. Check by hand that an app-level quit still takes the close flow: run `RUST_LOG=info target/debug/cairn <repo>`, then send it a quit as the Dock does:
+
+```bash
+osascript -l JavaScript -e "ObjC.import('AppKit'); \$.NSRunningApplication.runningApplicationWithProcessIdentifier(<pid>).terminate"
+```
+
+It passes if the trace shows `kind="quit"` before the app exits. An app that exits with no such line has lost the guard, and an error at launch means the class has gone.

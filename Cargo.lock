@@ -771,6 +771,7 @@ dependencies = [
  "gpui-component",
  "gpui-pre",
  "gpui-pre-platform",
+ "objc2 0.6.5",
  "tempfile",
  "tracing",
  "tracing-subscriber",

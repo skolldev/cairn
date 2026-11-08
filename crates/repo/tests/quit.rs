@@ -3,9 +3,10 @@
 mod common;
 
 use std::path::Path;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::time::{Duration, Instant};
 
-use cairn_repo::{Intent, JobKind, JobState, Snapshot};
+use cairn_repo::{Intent, JobKind, JobState, RepoService, Snapshot};
 use common::{
     Harness, Release, Seen, git, git_read, install_blocking_hook, install_slow_clean_filter,
     is_ended, lock_files, open, slash, slow_remote, small_fixture_clone, wait_for_file,
@@ -347,4 +348,82 @@ fn dropping_the_service_after_a_force_quit_doesnt_wait_for_a_blocked_hook() {
     wait.recv_timeout(Duration::from_secs(10))
         .expect("dropping the service waited for the blocked hook");
     assert!(!b.release.exists());
+}
+
+/// The race a queue can't see: the worker has taken the Job off the queue, and git hasn't
+/// started. Publishing Running wakes the service's waker on the Job's own thread, just before
+/// git, so a waker that blocks there holds the Job at that exact point.
+#[test]
+fn a_local_write_job_taken_off_the_queue_doesnt_start_git_after_a_force_quit() {
+    let b = blocking_repo();
+    let _release = Release(&b.release);
+    let service: Arc<OnceLock<RepoService>> = Arc::default();
+    let (reached_job, job_is_held) = mpsc::channel();
+    let (let_go, held) = mpsc::channel::<()>();
+    let held = Mutex::new(held);
+    let woken_service = service.clone();
+    // Leaks a cycle through `service`, so its threads idle until the test binary ends.
+    let started = RepoService::start(move || {
+        let on_the_job = std::thread::current().name() == Some("cairn-local-write");
+        if on_the_job {
+            let _ = reached_job.send(());
+            let _ = held.lock().unwrap().recv();
+        } else if let Some(service) = woken_service.get() {
+            // The Queued Snapshot wakes on this test's thread. Taking it leaves the outbox
+            // empty, which is what makes Running wake on the Job's thread.
+            service.drain();
+        }
+    });
+    let service = service.get_or_init(|| started);
+    service.send(Intent::Open(b.repo.clone()));
+    wait_for_reads_to_settle(service);
+
+    service.send(Intent::Switch("other".to_owned()));
+    job_is_held
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the Job reached the point before git");
+    service.send(Intent::ForceQuit);
+    assert!(
+        service.drain().iter().any(is_quit),
+        "a Force quit publishes before `send` returns"
+    );
+
+    let _ = let_go.send(());
+    drop(let_go);
+    // Seen red: if a Force quit doesn't close the gate, git runs, its hook blocks, and the
+    // Job never ends.
+    let job = wait_for_job_end(service);
+    assert!(
+        matches!(&job.state, JobState::Done(Err(e)) if e.contains("quitting")),
+        "{job:?}"
+    );
+    assert!(!b.log.exists(), "git started after the Force quit");
+    assert_ne!(current_branch(&b.repo), "other");
+}
+
+/// Drains until nothing has been published for a while, so that the outbox is empty and the
+/// watcher has gone quiet.
+fn wait_for_reads_to_settle(service: &RepoService) {
+    let mut quiet_since = Instant::now();
+    while quiet_since.elapsed() < SETTLE {
+        if !service.drain().is_empty() {
+            quiet_since = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_job_end(service: &RepoService) -> Arc<cairn_repo::JobSnapshot> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        for snapshot in service.drain() {
+            if let Snapshot::Job(job) = snapshot
+                && is_ended(&job)
+            {
+                return job;
+            }
+        }
+        assert!(Instant::now() < deadline, "the Job never ended");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

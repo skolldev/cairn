@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 pub use cairn_core::{ChangeKind, FileChange, Head, Oid, RefEntry, RefName, Refs, RepoPath, Stash};
 
-use cairn_write::Stop;
+use cairn_write::{StartGate, Stop};
 use scheduler::{JobContext, JobQueue, Lane, Running, Slot};
 
 /// Interactive lane workers. Enough for the Read Jobs one click starts to run side by side.
@@ -60,10 +60,10 @@ pub enum Intent {
     /// can't be opened and no Job can start from here on.
     Quit,
     /// Quit without waiting: the only way out while a Local write Job runs. Whatever a
-    /// Quit would do, plus: [`Snapshot::Quit`] follows at once, Local write Jobs still
-    /// queued never start, and dropping the service no longer waits. A running Local write
-    /// Job isn't killed, but exiting the process closes its pipes and can kill it mid-step,
-    /// so the caller confirms this first.
+    /// Quit would do, plus: [`Snapshot::Quit`] follows at once, no Local write Job's git
+    /// starts after that, and dropping the service no longer waits. A Local write Job whose
+    /// git is running isn't killed, but exiting the process closes its pipes and can kill it
+    /// mid-step, so the caller confirms this first.
     ForceQuit,
 }
 
@@ -179,6 +179,8 @@ pub struct RepoService {
     // Declared before the lane so they drop first: a finishing Job still submits its
     // refresh to the lane.
     writes: JobQueue,
+    /// Every Local write Job's git passes through this. A Force quit closes it.
+    write_gate: StartGate,
     network: JobQueue,
     /// Network Jobs that haven't ended, so a Stop Intent can reach them.
     network_jobs: Arc<Mutex<BTreeMap<JobId, Arc<NetworkJob>>>>,
@@ -210,6 +212,7 @@ impl RepoService {
         Self {
             watcher: Mutex::new(None),
             writes: JobQueue::new("local-write"),
+            write_gate: StartGate::new(),
             network: JobQueue::new("network"),
             network_jobs: Arc::default(),
             reads: Arc::new(Reads {
@@ -243,6 +246,9 @@ impl RepoService {
                 self.wind_down_once(&mut quitting);
                 self.writes.abandon();
                 self.network.abandon();
+                // After the queues, so that nothing is left to start, and before the Quit, so
+                // that a Job taken off the queue just now can't start git as the app exits.
+                self.write_gate.close();
                 self.reads.outbox.publish_quit();
             }
             Intent::Open(_) if *quitting => {
@@ -264,8 +270,8 @@ impl RepoService {
                 let kind = JobKind::Switch {
                     branch: branch.clone(),
                 };
-                self.local_write(kind, span, move |workdir, output| {
-                    switch::switch(workdir, &branch, output)
+                self.local_write(kind, span, move |workdir, gate, output| {
+                    switch::switch(workdir, &branch, gate, output)
                 });
             }
             Intent::Fetch => {
@@ -375,18 +381,21 @@ impl RepoService {
         &self,
         kind: JobKind,
         span: tracing::Span,
-        run: impl FnOnce(&Path, &mut dyn FnMut(&[u8])) -> Result<(), String> + Send + 'static,
+        run: impl FnOnce(&Path, &StartGate, &mut dyn FnMut(&[u8])) -> Result<(), String>
+        + Send
+        + 'static,
     ) {
         let Some((job, workdir)) = self.new_job(kind, span) else {
             return;
         };
         job.publish(JobState::Queued, "");
         let reads = self.reads.clone();
+        let gate = self.write_gate.clone();
         self.writes.push(move || {
             let _entered =
                 tracing::info_span!(parent: &job.span, "local_write_job", id = job.id.0).entered();
             job.publish(JobState::Running, "");
-            let (state, output) = job.run(|output| JobState::Done(run(&workdir, output)));
+            let (state, output) = job.run(|output| JobState::Done(run(&workdir, &gate, output)));
             reads.refresh_if_open(&workdir, Refresh::RefsAndStatus, &job.span);
             job.publish(state, &output);
         });

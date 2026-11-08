@@ -10,6 +10,8 @@ mod frame_overlay;
 mod quit;
 mod refs_view;
 mod status_view;
+#[cfg(target_os = "macos")]
+mod terminate;
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -177,6 +179,14 @@ fn init_tracing() {
         .init();
 }
 
+/// Ends the app. By now nothing is left to ask about: the Repo service has quit, or the window
+/// is gone and there is nowhere to ask.
+fn exit(cx: &mut App) {
+    #[cfg(target_os = "macos")]
+    terminate::allow_exit();
+    cx.quit();
+}
+
 fn main() {
     init_tracing();
     let path = std::env::args_os().nth(1).map(PathBuf::from);
@@ -191,10 +201,13 @@ fn main() {
             ..Default::default()
         };
         cx.open_window(options, move |window, cx| {
-            cx.new(|cx| Workspace::new(path, Rc::new(|cx| cx.quit()), window, cx))
+            let workspace = cx.new(|cx| Workspace::new(path, Rc::new(exit), window, cx));
+            #[cfg(target_os = "macos")]
+            terminate::route_to_close_flow(workspace.read(cx).quit.clone(), window, cx);
+            workspace
         })
         .expect("open the Cairn window");
-        cx.on_window_closed(|cx, _| cx.quit()).detach();
+        cx.on_window_closed(|cx, _| exit(cx)).detach();
         cx.activate(true);
     });
 }
