@@ -20,6 +20,22 @@ impl RefsView {
     pub fn set_snapshot(&mut self, snapshot: Arc<RefsSnapshot>) {
         self.snapshot = Some(snapshot);
     }
+
+    /// The generation shown, 0 before refs have answered, and the branch HEAD is on.
+    #[cfg(feature = "measure")]
+    pub fn measured(&self) -> (u64, Option<String>) {
+        let Some(snapshot) = &self.snapshot else {
+            return (0, None);
+        };
+        let head = match &snapshot.result {
+            Ok(refs) => match &refs.head {
+                Head::Branch { name, .. } => Some(name.short().to_owned()),
+                Head::Detached { .. } => None,
+            },
+            Err(_) => None,
+        };
+        (snapshot.generation.get(), head)
+    }
 }
 
 impl Render for RefsView {

@@ -1,15 +1,16 @@
 # Coding standards
 
-Judgement calls a reviewer applies to every change. Rules a script can check live in `scripts/` and run in CI instead: GPUI only in `cairn-app` (`check-gpui-free.sh`), and git spawned only by `cairn-write` (`check-single-git-spawn.sh`). Domain terms come from `CONTEXT.md`; decisions from `docs/adr/`.
+Judgement calls a reviewer applies to every change. Rules a script can check live in `scripts/` and run in CI instead: GPUI only in `cairn-app` (`check-gpui-free.sh`), and git spawned only by `cairn-write` (`check-single-git-spawn.sh`, which lets the Budget harness start `cairn` and PresentMon from one file that refuses git). Domain terms come from `CONTEXT.md`; decisions from `docs/adr/`.
 
 ## Tests
 
 From #14's testing decisions.
 
-- **Seams.** A test drives the system through a public seam and asserts what a caller could observe. There are three seams:
+- **Seams.** A test drives the system through a public seam and asserts what a caller could observe. There are four seams:
   - **`cairn-repo`'s interface** (Intents in, Snapshots out) is the main one. Assert Snapshot contents, the order and generation of Snapshots, Job outcomes, git's error text, and the repository on disk afterwards.
   - **`cairn-write`'s runner** (an `Invocation` in, `Output` or git's error out) is for rules awkward to reach through Intents.
   - **`cairn-app`'s window** (a close or click in; a prompt, an exit or the repository on disk out) is for what `app` decides. GPUI's `test-support` drives it, with the real Repo service and real git behind it, as `crates/app/src/quit/tests.rs` does. The test window draws only when resized, so the Bridge drains on its timer: advance the executor's clock.
+  - **`cairn-budget`'s public interface** (samples and traces in, verdicts and reports out, and the sandbox a fixture is cloned into) is for how the Budget harness judges numbers. Worked examples, never the same formula again. What it can't show is real presentation timing, because test windows present nothing: that takes a harness run (`docs/budget-harness.md`).
 - **Observable behaviour.** Tests stay out of the scheduler's queues, the runner's argument list and gix internals. When a runner rule needs proving, prove it through what git itself reports (`git config --get`, an `!env` alias, the index on disk).
 - **Real git.** Tests run real git against real repositories. Where timing matters, control it through git's own extension points (hooks, a wrapper around `upload-pack`), never by injecting fakes into private modules.
 - **Shared helpers.** Each library crate's `tests/common` holds the fixtures and harness its test files share (`Release`, `open`, `Seen`, the blocking hook). A new test file reuses them; a helper a second file needs moves there.
@@ -21,4 +22,4 @@ From #14's testing decisions.
 - **Controls.** A test that asserts something *didn't* happen pairs it with a control showing the setup would make it happen otherwise. `reads_never_take_the_index_lock` is the example.
 - **Seen red.** A test that passed on its first run has never shown it can fail. Break the code it guards, watch it go red, and name that break in a comment beside the assertion. A test that went red before its code existed has shown it already, and needs no comment. `scripts/seen-red.py` runs a break and restores the file. A diff can't show which is which, so the PR's Evidence lists the tests that passed first time. `quick_refreshes_of_one_slot_publish_only_newer_generations_and_never_a_stopped_read` passed with its guard removed until each read was slowed.
 - **Waiting for nothing.** Prove an absence through a later **marker**: an event that can only follow the unwanted one, such as the next Job in the same queue running (`network_jobs_run_one_at_a_time_and_a_queued_one_stops_without_starting`), or an outcome the unwanted event would have changed. Wait a fixed time only when nothing marks the absence, as with a refresh that must not be queued, and name that test's control in a comment beside the wait.
-- **Benchmarks are not tests.** A criterion regression threshold is a CI signal. Budget measurements come from a local harness run before a phase gate.
+- **Benchmarks are not tests.** A criterion regression threshold is a CI signal. Budget measurements come from a local harness run before a phase gate: `scripts/budget.sh`, described in `docs/budget-harness.md`.

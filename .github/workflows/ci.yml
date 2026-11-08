@@ -154,6 +154,11 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: test
         run: cargo test --workspace --locked --no-fail-fast
+      # The Budget harness's probe builds only with this feature, and never ships.
+      - name: clippy and test, with the Budget harness's probe
+        run: |
+          cargo clippy -p cairn-app --all-targets --features measure --locked -- -D warnings
+          cargo test -p cairn-app --features measure --locked --no-fail-fast measure::
       - name: No test hooks left running
         if: ${{ always() && runner.os != 'Windows' }}
         run: bash ./scripts/check-test-processes.sh
@@ -199,7 +204,7 @@ jobs:
           CAIRN_EXPECT_GIT_VERSION: ${{ env.GIT_VERSION }}
         run: |
           git --version
-          cargo test -p cairn-write -p cairn-repo --locked --no-fail-fast
+          cargo test -p cairn-write -p cairn-repo -p cairn-budget --locked --no-fail-fast
       - name: No test hooks left running
         if: ${{ always() }}
         run: bash ./scripts/check-test-processes.sh

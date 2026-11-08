@@ -30,6 +30,30 @@ impl StatusView {
     pub fn set_untracked(&mut self, snapshot: Arc<UntrackedSnapshot>) {
         self.untracked = Some(snapshot);
     }
+
+    /// Staged's, Unstaged's and Untracked's generations, 0 before each has answered, then the
+    /// Unstaged and Untracked paths.
+    #[cfg(feature = "measure")]
+    pub fn measured(&self) -> (u64, u64, u64, Vec<String>, Vec<String>) {
+        let generation = |g: Option<cairn_repo::Generation>| g.map_or(0, |g| g.get());
+        let unstaged = self.unstaged.as_ref().and_then(|s| s.result.as_ref().ok());
+        let untracked = self.untracked.as_ref().and_then(|s| s.result.as_ref().ok());
+        (
+            generation(self.staged.as_ref().map(|s| s.generation)),
+            generation(self.unstaged.as_ref().map(|s| s.generation)),
+            generation(self.untracked.as_ref().map(|s| s.generation)),
+            unstaged
+                .into_iter()
+                .flatten()
+                .map(|c| c.path.to_string())
+                .collect(),
+            untracked
+                .into_iter()
+                .flatten()
+                .map(ToString::to_string)
+                .collect(),
+        )
+    }
 }
 
 impl Render for StatusView {
