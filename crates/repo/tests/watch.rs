@@ -4,8 +4,9 @@
 
 mod common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use cairn_repo::{ChangesSnapshot, Generation, Head, Intent, Snapshot};
@@ -131,6 +132,63 @@ fn quick_refreshes_of_one_slot_publish_only_newer_generations_and_never_a_stoppe
     }
 }
 
+/// Stops its writer thread when dropped, so a failing test never leaves it running.
+struct Writer {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Appends a line to `path` every 10 ms until dropped, as a build or a log writer does.
+fn keep_writing(path: PathBuf) -> Writer {
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let mut bytes = std::fs::read(&path).unwrap();
+                bytes.extend_from_slice(b"more\n");
+                std::fs::write(&path, bytes).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        })
+    };
+    Writer {
+        stop,
+        thread: Some(thread),
+    }
+}
+
+#[test]
+fn status_keeps_publishing_while_external_changes_keep_arriving() {
+    let (dir, repo) = small_fixture_clone();
+    // Each Unstaged read takes far longer than the gap between two writes, so a new event
+    // always arrives while a read runs.
+    install_slow_clean_filter(&repo, dir.path(), "sleep 0.02\n");
+    let harness = Harness::start();
+    let opened = open(&harness, &repo);
+
+    let _writer = keep_writing(repo.join("FAQ.md"));
+    // If every event dropped the running read's result, nothing would publish until the
+    // writes stop, and this drain would time out with the writer still running.
+    let mut seen = Seen::default();
+    seen.until(&harness, |seen| {
+        unstaged_after(seen, opened.unstaged).iter().any(|u| {
+            u.result
+                .as_ref()
+                .is_ok_and(|c| c.iter().any(|f| f.path.as_bytes() == b"FAQ.md"))
+        })
+    });
+}
+
 /// Makes README.md stat-dirty and gives it a clean filter that runs `before` and then
 /// passes the content through. Each Unstaged read then runs the filter, through
 /// `hash-object`, inside the git it can stop.
@@ -168,8 +226,11 @@ fn unstaged_after(seen: &Seen, after: Generation) -> Vec<&Arc<ChangesSnapshot>> 
 }
 
 #[test]
-fn a_burst_of_writes_costs_at_most_two_status_refreshes() {
-    let (_dir, repo) = small_fixture_clone();
+fn a_burst_shorter_than_a_read_costs_at_most_two_status_refreshes() {
+    let (dir, repo) = small_fixture_clone();
+    // ADR 0004's bound holds for a burst that ends while the first read runs. A longer one
+    // is a stream, which publishes once per read. Slowing every read keeps this burst short.
+    install_slow_clean_filter(&repo, dir.path(), "sleep 0.02\n");
     // Regular files only: a symlink or submodule entry can't be appended to.
     let files: Vec<String> = git(&repo, &["ls-files", "-s"])
         .lines()

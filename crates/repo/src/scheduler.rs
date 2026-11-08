@@ -100,7 +100,6 @@ impl LaneHandle {
 /// What a running Read Job knows about itself.
 pub(crate) struct JobContext {
     generation: Generation,
-    slot: Arc<SlotShared>,
     stops: Stops,
 }
 
@@ -109,9 +108,10 @@ impl JobContext {
         self.generation
     }
 
-    /// False once a newer Read Job for the same Slot has Superseded this one.
+    /// False once a newer Read Job for the same Slot has Superseded this one. A Read Job
+    /// that a refresh followed is still wanted: its answer is newer than what was shown.
     pub(crate) fn is_current(&self) -> bool {
-        self.slot.state.lock().unwrap().latest == self.generation
+        !self.stops.gix.load(Ordering::Relaxed)
     }
 
     /// The handle that kills this Read Job's git once it is Superseded. Every CLI read
@@ -120,15 +120,16 @@ impl JobContext {
         &self.stops.cli
     }
 
-    /// Set once this Read Job is Superseded, for gix to stop on.
+    /// Set once this Read Job is Superseded, for gix to stop on. It is also what
+    /// [`is_current`](Self::is_current) reads.
     pub(crate) fn gix_interrupt(&self) -> &AtomicBool {
         &self.stops.gix
     }
 }
 
 /// The ways a running Read Job can be stopped cooperatively: a process kill for a CLI read
-/// and a flag for a gix one. A read that checks neither runs to its end, and its result is
-/// dropped.
+/// and a flag for a gix one. A Superseded read that checks neither runs to its end, and its
+/// result is dropped.
 #[derive(Clone, Default)]
 struct Stops {
     cli: Stop,
@@ -154,6 +155,19 @@ struct SlotShared {
     state: Mutex<SlotState>,
 }
 
+/// What a newly submitted Read Job does to the one already running in its Slot. Either way
+/// it replaces the pending one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Running {
+    /// Supersede it: the new Read Job answers a new question, such as another repository,
+    /// so the running one is stopped where it can be and its result dropped.
+    Supersede,
+    /// Let it finish and publish: the new Read Job asks the same question again after an
+    /// External change or a Job, and the running one's answer is newer than what is shown.
+    /// A stream of changes then still publishes one answer per read (ADR 0004).
+    Finish,
+}
+
 struct SlotState {
     latest: Generation,
     /// How to stop the running Read Job, if one is running.
@@ -175,16 +189,21 @@ impl Slot {
     }
 
     /// Submits a Read Job and returns the generation it answers. It Supersedes the pending
-    /// Read Job, if any, and the running one: that one is stopped where it can be, and its
-    /// result is dropped either way.
-    pub(crate) fn submit(&self, job: impl FnOnce(&JobContext) + Send + 'static) -> Generation {
+    /// Read Job, if any, and treats the running one as `running` says.
+    pub(crate) fn submit(
+        &self,
+        running: Running,
+        job: impl FnOnce(&JobContext) + Send + 'static,
+    ) -> Generation {
         let span = tracing::Span::current();
         let mut state = self.0.state.lock().unwrap();
         state.latest = Generation(state.latest.0 + 1);
         let generation = state.latest;
         match &state.running {
-            Some(running) => {
-                running.stop();
+            Some(stops) => {
+                if running == Running::Supersede {
+                    stops.stop();
+                }
                 if let Some((old, ..)) = state.pending.replace((generation, span, Box::new(job))) {
                     tracing::debug!(
                         slot = self.0.name,
@@ -208,7 +227,6 @@ impl Slot {
         self.0.lane.push(Box::new(move || {
             let context = JobContext {
                 generation,
-                slot: slot.0.clone(),
                 stops,
             };
             if context.is_current() {

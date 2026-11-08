@@ -5,4 +5,5 @@ The plan had the watcher wait for a 100–200 ms debounce before refreshing, usi
 ## Consequences
 
 - An atomic editor save (a temp file, then a rename) can briefly show the intermediate state. The pending refresh corrects it one read later. We accept that.
+- A refresh never Supersedes the running read, only the pending one: the running read's answer is newer than what is shown, so it still publishes. A stream of changes longer than one read, such as a build writing for minutes, then publishes once per read instead of nothing until it stops (#21). Only a new question, such as an Open, Supersedes and stops the running read.
 - There is no tunable quiet window. If Phase 1 finds refresh storms anyway, the fix belongs in the Slot or in how events map to Slots, not in a timer in front of them.

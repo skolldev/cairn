@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 pub use cairn_core::{ChangeKind, FileChange, Head, Oid, RefEntry, RefName, Refs, RepoPath, Stash};
 
 use cairn_write::Stop;
-use scheduler::{JobContext, JobQueue, Lane, Slot};
+use scheduler::{JobContext, JobQueue, Lane, Running, Slot};
 
 /// Interactive lane workers. Enough for the Read Jobs one click starts to run side by side.
 const INTERACTIVE_THREADS: usize = 2;
@@ -207,7 +207,7 @@ impl RepoService {
                 // no longer open, which `refresh_if_open` ignores.
                 let watcher = watch::start(&path, Arc::downgrade(&self.reads));
                 *self.watcher.lock().unwrap() = watcher;
-                self.reads.refresh(&path, &span);
+                self.reads.refresh(&path, Running::Supersede, &span);
             }
             Intent::Switch(branch) => {
                 let span = tracing::info_span!("intent", kind = "switch", branch = %branch);
@@ -470,13 +470,16 @@ impl Reads {
     /// repository since: that refresh would replace the newer repo's Snapshots in the
     /// shared Slots. Called before the Job publishes its outcome, so that by the time the
     /// UI sees the outcome, the Read Jobs that show its effect are already queued.
+    ///
+    /// It asks the same questions again, so a read already running finishes and publishes.
     fn refresh_if_open(&self, path: &Path, what: Refresh, span: &tracing::Span) {
         let open = self.open.lock().unwrap();
         if open.as_deref() == Some(path) {
+            let running = Running::Finish;
             match what {
-                Refresh::RefsAndStatus => self.refresh(path, span),
-                Refresh::Refs => self.refresh_refs(path, span),
-                Refresh::Status => self.refresh_status(path, span),
+                Refresh::RefsAndStatus => self.refresh(path, running, span),
+                Refresh::Refs => self.refresh_refs(path, running, span),
+                Refresh::Status => self.refresh_status(path, running, span),
             }
         } else {
             tracing::debug!(path = %path.display(), "repository no longer open; refresh skipped");
@@ -485,25 +488,37 @@ impl Reads {
 
     /// Reads refs and status again: everything a switch can change, and everything an
     /// Open shows. Later Intents that change less refresh less.
-    fn refresh(&self, path: &Path, span: &tracing::Span) {
-        self.refresh_refs(path, span);
-        self.refresh_status(path, span);
+    fn refresh(&self, path: &Path, running: Running, span: &tracing::Span) {
+        self.refresh_refs(path, running, span);
+        self.refresh_status(path, running, span);
     }
 
-    fn refresh_refs(&self, path: &Path, span: &tracing::Span) {
-        self.submit(&self.refs_slot, path, span, read_refs, |p| &mut p.refs);
+    fn refresh_refs(&self, path: &Path, running: Running, span: &tracing::Span) {
+        self.submit(&self.refs_slot, path, running, span, read_refs, |p| {
+            &mut p.refs
+        });
     }
 
-    fn refresh_status(&self, path: &Path, span: &tracing::Span) {
-        self.submit(&self.staged_slot, path, span, read_staged, |p| {
+    fn refresh_status(&self, path: &Path, running: Running, span: &tracing::Span) {
+        self.submit(&self.staged_slot, path, running, span, read_staged, |p| {
             &mut p.staged
         });
-        self.submit(&self.unstaged_slot, path, span, read_unstaged, |p| {
-            &mut p.unstaged
-        });
-        self.submit(&self.untracked_slot, path, span, read_untracked, |p| {
-            &mut p.untracked
-        });
+        self.submit(
+            &self.unstaged_slot,
+            path,
+            running,
+            span,
+            read_unstaged,
+            |p| &mut p.unstaged,
+        );
+        self.submit(
+            &self.untracked_slot,
+            path,
+            running,
+            span,
+            read_untracked,
+            |p| &mut p.untracked,
+        );
     }
 
     /// Submits a Read Job to `slot` that runs `read` on the repository at `path` and
@@ -512,6 +527,7 @@ impl Reads {
         &self,
         slot: &Slot,
         path: &Path,
+        running: Running,
         span: &tracing::Span,
         read: fn(&Path, &JobContext) -> Result<T, String>,
         cell: fn(&mut Pending) -> &mut Latest<T>,
@@ -519,7 +535,7 @@ impl Reads {
         let outbox = self.outbox.clone();
         let path = path.to_path_buf();
         let span = span.clone();
-        slot.submit(move |job| {
+        slot.submit(running, move |job| {
             let result = read(&path, job);
             if !job.is_current() {
                 tracing::debug!("superseded while running; result dropped");
