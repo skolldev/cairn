@@ -12,10 +12,13 @@
 //! - **Unix:** git runs in its own process group. Stopping sends the group `SIGTERM`, which
 //!   git answers by removing its lock files, and `SIGKILL` if anything is still there
 //!   after [`GRACE`].
-//! - **Windows:** `taskkill /T /F` ends git's process tree. Windows has no signal git
-//!   cleans up on, so a lock git held at that moment can remain, exactly as it would
+//! - **Windows:** git runs in its own Job Object, which every process it starts joins too.
+//!   Stopping terminates the job: one call, with no process tree to walk. (`taskkill /T`,
+//!   used before, walked parent ids and could hang for minutes on CI.) Windows has no signal
+//!   git cleans up on, so a lock git held at that moment can remain, exactly as it would
 //!   after ending git from Task Manager.
 
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(unix)]
@@ -39,10 +42,10 @@ struct Shared {
     /// Whether the stop reached a running git. A git that failed on its own before that
     /// reports its own error, not a stop.
     signalled: AtomicBool,
-    /// The running git's process id, from spawn until its pipes close. Cleared before the
+    /// How to reach the running git, from spawn until its pipes close. Cleared before the
     /// runner waits on git, so a reaped process id, which the OS may reuse, is never
     /// signalled.
-    running: Mutex<Option<u32>>,
+    running: Mutex<Option<Target>>,
 }
 
 impl Stop {
@@ -55,9 +58,9 @@ impl Stop {
     pub fn stop(&self) {
         self.0.requested.store(true, Ordering::SeqCst);
         let running = self.0.running.lock().unwrap();
-        if let Some(pid) = *running {
+        if let Some(target) = running.as_ref() {
             self.0.signalled.store(true, Ordering::SeqCst);
-            terminate(&self.0, pid);
+            terminate(&self.0, target);
         }
     }
 
@@ -74,18 +77,15 @@ impl Stop {
     /// Runs `spawn` unless a stop came first, and records the process it started so that a
     /// later stop can reach it. The check and the record happen under one lock, so a stop
     /// either prevents the spawn or sees the process.
-    pub(crate) fn spawn_unless_stopped<T>(
+    pub(crate) fn spawn_unless_stopped(
         &self,
-        spawn: impl FnOnce() -> std::io::Result<(T, u32)>,
-    ) -> Option<std::io::Result<T>> {
+        spawn: impl FnOnce() -> std::io::Result<Child>,
+    ) -> Option<std::io::Result<Child>> {
         let mut running = self.0.running.lock().unwrap();
         if self.is_stopped() {
             return None;
         }
-        Some(spawn().map(|(child, pid)| {
-            *running = Some(pid);
-            child
-        }))
+        Some(spawn().inspect(|child| *running = Some(Target::of(child))))
     }
 
     /// Forgets the process, before the runner waits on it.
@@ -94,11 +94,40 @@ impl Stop {
     }
 }
 
+/// What a stop acts on: git's process group on Unix, git's Job Object on Windows.
+#[derive(Debug)]
+struct Target {
+    pid: u32,
+    /// `None` if git couldn't be put in a job, in which case `taskkill` is the fallback.
+    #[cfg(windows)]
+    job: Option<job::Job>,
+}
+
+impl Target {
+    #[cfg(unix)]
+    fn of(child: &Child) -> Self {
+        Self { pid: child.id() }
+    }
+
+    /// Puts git in a new Job Object straight after it spawns, before git has started
+    /// anything of its own: it reads its config and arguments first, which takes far longer
+    /// than this.
+    #[cfg(windows)]
+    fn of(child: &Child) -> Self {
+        use std::os::windows::io::AsRawHandle;
+        Self {
+            pid: child.id(),
+            job: job::Job::containing(child.as_raw_handle()),
+        }
+    }
+}
+
 /// Asks git's process group to exit, and kills it if it hasn't after [`GRACE`]. The kill
 /// is sent only while git's pipes are open: a child that closed them and outlives git is
 /// left alone, because once git is reaped its group id may name someone else's processes.
 #[cfg(unix)]
-fn terminate(shared: &Arc<Shared>, pid: u32) {
+fn terminate(shared: &Arc<Shared>, target: &Target) {
+    let pid = target.pid;
     let group = -(pid as libc::pid_t);
     // SAFETY: `kill` has no memory-safety preconditions. The group is git's own: the
     // runner put git in a new group whose id is its pid, and the pid is still unreaped.
@@ -106,25 +135,78 @@ fn terminate(shared: &Arc<Shared>, pid: u32) {
     let shared = shared.clone();
     std::thread::spawn(move || {
         std::thread::sleep(GRACE);
-        if *shared.running.lock().unwrap() == Some(pid) {
+        if shared.running.lock().unwrap().as_ref().map(|t| t.pid) == Some(pid) {
             // SAFETY: as above; the lock is held, so the runner can't reap git meanwhile.
             unsafe { libc::kill(group, libc::SIGKILL) };
         }
     });
 }
 
-/// Ends git's process tree.
+/// Ends git and everything it started: its Job Object, or its process tree if git
+/// couldn't be put in one.
 #[cfg(windows)]
-fn terminate(_shared: &Arc<Shared>, pid: u32) {
+fn terminate(_shared: &Arc<Shared>, target: &Target) {
+    if target.job.as_ref().is_some_and(job::Job::terminate) {
+        return;
+    }
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     // taskkill walks the tree from git, so it must run while git is alive: the pid stays
     // git's until the runner drops its handle, which happens only after `finished`.
     let _ = std::process::Command::new("taskkill")
-        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .args(["/T", "/F", "/PID", &target.pid.to_string()])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
         .status();
+}
+
+#[cfg(windows)]
+mod job {
+    use std::os::windows::io::RawHandle;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject,
+    };
+
+    /// An owned Job Object handle, closed on drop. Closing it doesn't end the processes in
+    /// it: only [`terminate`](Self::terminate) does.
+    #[derive(Debug)]
+    pub(super) struct Job(HANDLE);
+
+    // SAFETY: a Job Object handle may be used and closed from any thread.
+    unsafe impl Send for Job {}
+    // SAFETY: as above; `terminate` takes `&self` and the OS synchronises it.
+    unsafe impl Sync for Job {}
+
+    impl Job {
+        /// A new, unnamed Job Object holding `process`, or `None` if Windows refused either.
+        pub(super) fn containing(process: RawHandle) -> Option<Self> {
+            // SAFETY: null attributes and a null name ask for a default, unnamed job.
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if handle.is_null() {
+                return None;
+            }
+            let job = Self(handle);
+            // SAFETY: both handles are valid: the job was just created, and `process` is the
+            // runner's own handle to a child it hasn't waited on yet.
+            let assigned = unsafe { AssignProcessToJobObject(job.0, process as HANDLE) };
+            (assigned != 0).then_some(job)
+        }
+
+        /// Ends every process in the job. False if Windows refused.
+        pub(super) fn terminate(&self) -> bool {
+            // SAFETY: the handle is valid until drop. Exit code 1, as a killed process has.
+            unsafe { TerminateJobObject(self.0, 1) != 0 }
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            // SAFETY: the handle is owned and closed once.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
 }

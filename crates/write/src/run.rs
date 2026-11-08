@@ -163,11 +163,7 @@ impl Git {
         };
         let mut child = match &invocation.stop {
             None => cmd.spawn(),
-            Some(stop) => match stop.spawn_unless_stopped(|| {
-                let child = cmd.spawn()?;
-                let pid = child.id();
-                Ok((child, pid))
-            }) {
+            Some(stop) => match stop.spawn_unless_stopped(|| cmd.spawn()) {
                 Some(spawned) => spawned,
                 None => return Err(RunError::Stopped { stderr: Vec::new() }),
             },
