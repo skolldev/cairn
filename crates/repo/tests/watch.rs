@@ -122,6 +122,8 @@ fn quick_refreshes_of_one_slot_publish_only_newer_generations_and_never_a_stoppe
         (generations.len() as u64) < OPENS,
         "superseded reads must not all publish: {generations:?}"
     );
+    // Seen red: with the `is_current` check in `Reads::submit` removed, a stopped read
+    // publishes its "stopped" error here.
     for u in published {
         assert_eq!(
             u.result,
