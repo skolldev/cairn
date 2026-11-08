@@ -44,10 +44,19 @@ pub struct Summary {
     pub samples_per_run: Vec<usize>,
 }
 
-/// The sample at `fraction` of the way up, by nearest rank. 0 for no samples.
-fn percentile(samples: &[f64], fraction: f64) -> f64 {
+fn sorted(samples: &[f64]) -> Vec<f64> {
     let mut sorted = samples.to_vec();
     sorted.sort_by(f64::total_cmp);
+    sorted
+}
+
+fn too_few_runs(runs: usize) -> Verdict {
+    Verdict::Invalid(format!("{runs} run(s), and the rules need {MIN_RUNS}"))
+}
+
+/// The sample at `fraction` of the way up, by nearest rank. 0 for no samples.
+fn percentile(samples: &[f64], fraction: f64) -> f64 {
+    let sorted = sorted(samples);
     let rank = (sorted.len() as f64 * fraction).ceil() as usize;
     rank.checked_sub(1)
         .and_then(|index| sorted.get(index))
@@ -61,8 +70,7 @@ pub fn p95(samples: &[f64]) -> f64 {
 }
 
 fn median(samples: &[f64]) -> f64 {
-    let mut sorted = samples.to_vec();
-    sorted.sort_by(f64::total_cmp);
+    let sorted = sorted(samples);
     match sorted.len() {
         0 => 0.0,
         n if n % 2 == 1 => sorted[n / 2],
@@ -87,10 +95,7 @@ pub fn judge(budget: &Budget, runs: &[Vec<f64>]) -> Summary {
         Budget::Launch { .. } => worst_of(median),
     };
     let verdict = if runs.len() < MIN_RUNS {
-        Verdict::Invalid(format!(
-            "{} run(s), and the rules need {MIN_RUNS}",
-            runs.len()
-        ))
+        too_few_runs(runs.len())
     } else if let Some(short) = samples_per_run.iter().find(|n| **n < MIN_SAMPLES) {
         Verdict::Invalid(format!(
             "a run has {short} sample(s), and the rules need {MIN_SAMPLES}"
@@ -145,10 +150,7 @@ pub fn judge_held_key(runs: &[HeldKeyRun]) -> Summary {
         .map(|r| r.largest_gap_ms)
         .fold(0.0_f64, f64::max);
     let verdict = if runs.len() < MIN_RUNS {
-        Verdict::Invalid(format!(
-            "{} run(s), and the rules need {MIN_RUNS}",
-            runs.len()
-        ))
+        too_few_runs(runs.len())
     } else if let Some(run) = runs.iter().find(|r| r.held_keys < MIN_HELD_KEYS) {
         Verdict::Invalid(format!(
             "a run saw {} repeated keys, and needs {MIN_HELD_KEYS} real ones",

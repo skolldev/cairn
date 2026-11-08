@@ -23,8 +23,9 @@ const WARM_UP_SAMPLES: usize = 3;
 /// late refreshes can't land in the next.
 const QUIET: Duration = Duration::from_millis(250);
 const SAMPLE_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long a launch stays up on Windows, where its first frame is found only afterwards.
-const LAUNCH_HOLD: Duration = Duration::from_millis(500);
+/// How long a launch stays up on Windows, where its first frame is found only afterwards. Well
+/// past the Budget's cap, so that a slow first frame reads as a miss rather than as missing.
+const LAUNCH_HOLD: Duration = Duration::from_secs(1);
 /// #8: zed#61469 was reported after 5 to 30 held keys, so longer holds add nothing.
 const HOLD: Duration = Duration::from_secs(10);
 /// How often the held-key test changes a file, for the watcher to notify about.
@@ -174,12 +175,23 @@ impl Cairn {
     }
 }
 
+/// Stops PresentMon if a run ends in an error, when nothing else would. Cairn needs no such thing:
+/// it quits when the harness closes its stdin.
+struct KillOnDrop(Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// Where a run's frame times come from.
 enum Recorder {
     Metal,
     PresentMon {
         exe: PathBuf,
-        child: Child,
+        child: KillOnDrop,
         csv: PathBuf,
         _dir: tempfile::TempDir,
     },
@@ -229,7 +241,7 @@ impl Recorder {
         sleep(Duration::from_secs(2));
         Ok(Recorder::PresentMon {
             exe,
-            child,
+            child: KillOnDrop(child),
             csv,
             _dir: dir,
         })
@@ -256,10 +268,8 @@ impl Recorder {
             .status()
             .map_err(|e| format!("couldn't stop PresentMon: {e}"))?;
         let deadline = Instant::now() + SAMPLE_TIMEOUT;
-        while child.try_wait().map_err(|e| e.to_string())?.is_none() {
+        while child.0.try_wait().map_err(|e| e.to_string())?.is_none() {
             if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
                 return Err("PresentMon didn't stop".to_owned());
             }
             sleep(Duration::from_millis(50));
@@ -627,6 +637,12 @@ pub fn measure_held_key(config: &Config) -> Result<Row, String> {
     Ok(row)
 }
 
+/// The toolchain's version. rustup finds its toolchain through the home directory, so this has to
+/// run before the harness replaces it for git.
+pub fn rust_version() -> Result<String, String> {
+    line_from("rustc", &["--version"])
+}
+
 /// One line of a program's output, or an error saying which program.
 fn line_from(program: &str, args: &[&str]) -> Result<String, String> {
     let out = spawn::tool(program)?
@@ -644,7 +660,11 @@ fn line_from(program: &str, args: &[&str]) -> Result<String, String> {
 
 /// What the numbers depend on. Any fact it can't find is an error, because a result that
 /// doesn't say where it came from can't be used.
-pub fn environment(config: &Config, repo: &Path) -> Result<Environment, String> {
+pub fn environment(
+    config: &Config,
+    repo: &Path,
+    rust_version: String,
+) -> Result<Environment, String> {
     let (machine, os) = if cfg!(target_os = "macos") {
         (
             line_from("sysctl", &["-n", "hw.model", "machdep.cpu.brand_string"])?,
@@ -676,7 +696,7 @@ pub fn environment(config: &Config, repo: &Path) -> Result<Environment, String> 
         os,
         git_version: git.version().to_string(),
         git_path: git.path().display().to_string(),
-        rust_version: line_from("rustc", &["--version"])?,
+        rust_version,
         cairn_commit: format!("{}{dirty}", crate::fixture::head_of(repo)?),
         frame_source: match &config.presentmon {
             Some(exe) if cfg!(windows) => format!("PresentMon at {}", exe.display()),

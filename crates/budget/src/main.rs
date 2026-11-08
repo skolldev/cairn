@@ -108,9 +108,10 @@ fn run() -> Result<i32, String> {
         return Err("this is a CI runner, and Budget numbers never count from one".to_owned());
     }
     let args = parse_args()?;
+    let rust_version = run::rust_version()?;
     let _home = hermetic()?;
     let repo = std::env::current_dir().map_err(|e| e.to_string())?;
-    let environment = run::environment(&args.config, &repo)?;
+    let environment = run::environment(&args.config, &repo, rust_version)?;
     let rows = measure(&args)?;
 
     let text = report::render(&environment, &rows);

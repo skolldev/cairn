@@ -106,19 +106,13 @@ impl Probe {
                 canvas(
                     |_, _, _| {},
                     move |_, _, _, cx: &mut App| {
-                        let (refs_generation, head) = refs.read(cx).measured();
-                        let (staged, unstaged, untracked, unstaged_paths, untracked_paths) =
-                            status.read(cx).measured();
-                        emit(Line::Frame(Frame {
+                        let mut frame = Frame {
                             paint_ns: clock::now_ns(),
-                            head,
-                            refs: refs_generation,
-                            staged,
-                            unstaged,
-                            untracked,
-                            unstaged_paths,
-                            untracked_paths,
-                        }));
+                            ..Frame::default()
+                        };
+                        refs.read(cx).report_to(&mut frame);
+                        status.read(cx).report_to(&mut frame);
+                        emit(Line::Frame(frame));
                     },
                 )
                 .absolute()

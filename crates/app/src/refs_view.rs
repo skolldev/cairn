@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "measure")]
+use cairn_repo::Refs;
 use cairn_repo::{Generation, Head, RefEntry, RefsSnapshot};
 use gpui::{
     AnyElement, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window, div,
@@ -21,20 +23,20 @@ impl RefsView {
         self.snapshot = Some(snapshot);
     }
 
-    /// The generation shown, 0 before refs have answered, and the branch HEAD is on.
+    /// Tells the Budget harness what this view shows.
     #[cfg(feature = "measure")]
-    pub fn measured(&self) -> (u64, Option<String>) {
+    pub fn report_to(&self, frame: &mut cairn_budget::probe::Frame) {
         let Some(snapshot) = &self.snapshot else {
-            return (0, None);
+            return;
         };
-        let head = match &snapshot.result {
-            Ok(refs) => match &refs.head {
-                Head::Branch { name, .. } => Some(name.short().to_owned()),
-                Head::Detached { .. } => None,
-            },
-            Err(_) => None,
-        };
-        (snapshot.generation.get(), head)
+        frame.refs = snapshot.generation.get();
+        if let Ok(Refs {
+            head: Head::Branch { name, .. },
+            ..
+        }) = &snapshot.result
+        {
+            frame.head = Some(name.short().to_owned());
+        }
     }
 }
 

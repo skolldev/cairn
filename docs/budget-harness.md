@@ -20,7 +20,7 @@ Keep the machine on mains power and idle, the screen unlocked and Cairn's window
 
 ## What each result records
 
-The machine, OS, git version and path, Rust version, Cairn's commit (and whether it had uncommitted changes), the frame source, the fixture and its HEAD, the Budget's statistic, the p95 of the worst run, the worst sample, and every sample. A fact the harness can't find stops the run.
+The machine, OS, git version and path, Rust version, Cairn's commit (and whether it had uncommitted changes), the frame source, the fixture and its HEAD, the Budget's statistic, the p95 of the worst run, the worst sample, and every sample. A fact the harness can't find stops the run. Cairn's commit and the Rust version are read when the harness runs, so they describe the binary only if it was just built, as `scripts/budget.sh` does.
 
 ## What is measured
 
@@ -68,7 +68,7 @@ scripts/budget.sh held-key
 
 This checks zed#61469: sustained input plus background notifies can stop frames being presented for seconds. The Phase 0 runs injected their keys, so this one needs you: Windows auto-repeats only a key really held down. For each of three runs, click the Cairn window, hold an arrow key when told, and let go when told.
 
-While you hold, the harness keeps changing a file, so real notifies come through the watcher and the Bridge at the rate Cairn really delivers them, and the window draws all the time. It passes on #8's Key input Floor, because the plan's table has no row for this: no gap over 50 ms between presented frames during a 10-second hold, worst of three runs. A frozen stretch at the end of the hold counts. A run with under 30 keys flagged as repeats by the OS, or with no notifies, comes out Invalid.
+While you hold, the harness keeps changing a file every 8 ms, so real notifies come through the watcher and the Bridge, which delivers one coalesced drain per frame. That's the rate that decides #8's Floor. The worst-case rate, which #8 records only, would have to bypass the Bridge, so this doesn't measure it. The window draws all the time. It passes on #8's Key input Floor, because the plan's table has no row for this: no gap over 50 ms between presented frames during a 10-second hold, worst of three runs. A frozen stretch at the end of the hold counts. Arrow keys type nothing, so the Floor's other half, no lost or duplicated characters, isn't checked here, and that needs the commit box. A run with under 30 keys flagged as repeats by the OS, or with no notifies, comes out Invalid.
 
 If it fails, run without changing anything first and record that, then see #13 on the watchdog.
 

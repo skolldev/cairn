@@ -19,7 +19,7 @@ const MARK: &str = "cairn-budget";
 const LIST: char = '\u{1f}';
 
 /// What one painted frame showed.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Frame {
     pub paint_ns: u64,
     /// The branch HEAD is on, as shown. `None` before refs have answered, or when detached.
