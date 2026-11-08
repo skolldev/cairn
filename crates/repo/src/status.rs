@@ -118,19 +118,10 @@ fn empty_tree(git: &Git, workdir: &Path, stop: &Stop) -> Result<String, String> 
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
-/// A Read invocation that `stop` kills once a newer Read Job Supersedes this one.
-///
-/// Not on Windows: there, a killed git can leave a process it started, such as a clean
-/// filter run through Git for Windows' `sh`, holding the runner's pipe, and the Slot then
-/// waits on it for minutes. A Superseded read runs to its end instead, and its result is
-/// dropped.
+/// A Read invocation that `stop` kills, with everything it started such as a clean
+/// filter, once a newer Read Job Supersedes this one.
 fn read(workdir: &Path, stop: &Stop) -> Invocation {
-    let invocation = Invocation::new(JobClass::Read, workdir);
-    if cfg!(windows) {
-        invocation
-    } else {
-        invocation.stop_on(stop)
-    }
+    Invocation::new(JobClass::Read, workdir).stop_on(stop)
 }
 
 fn text(e: RunError) -> String {

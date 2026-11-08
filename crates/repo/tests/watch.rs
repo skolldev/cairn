@@ -32,9 +32,6 @@ fn a_git_switch_run_outside_the_service_is_followed_by_a_refs_snapshot() {
     });
 }
 
-// Unix only: on Windows a CLI read isn't stopped (see `read` in `src/status.rs`), so the
-// newer read waits behind the blocked one.
-#[cfg(unix)]
 #[test]
 fn a_newer_status_read_stops_the_running_one_instead_of_waiting_for_it() {
     let (dir, repo) = small_fixture_clone();
