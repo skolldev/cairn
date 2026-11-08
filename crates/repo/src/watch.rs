@@ -8,6 +8,7 @@
 use std::path::Path;
 use std::sync::Weak;
 
+use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 
 use crate::{Reads, Refresh};
@@ -84,9 +85,17 @@ fn classify(event: &Event, root: &Path, git_dir: &Path) -> Option<Refresh> {
     if event.need_rescan() {
         return Some(Refresh::RefsAndStatus);
     }
+    // A directory's own changes, such as the timestamps Windows reports when a read walks
+    // it, mean nothing to git: a file added, removed or changed inside reports its own
+    // event. A removed directory no longer exists, so its event still counts.
+    let directory_only = matches!(
+        event.kind,
+        EventKind::Modify(ModifyKind::Any | ModifyKind::Metadata(_))
+    );
     event
         .paths
         .iter()
+        .filter(|path| !(directory_only && path.is_dir()))
         .filter_map(|path| classify_path(path, root, git_dir))
         .reduce(Refresh::union)
 }
