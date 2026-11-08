@@ -199,21 +199,24 @@ fn malformed_stash_reflog_retries_refs_with_git_and_latches_cli() {
 
     harness.service.send(Intent::Switch(original));
     let mut switched = false;
-    let mut later = None;
+    let mut error = None;
+    // Wait for the error, not the next Snapshot: the watcher's refresh after the reflog write
+    // can read through git before `log.date` is set, and succeed. Such a Snapshot says nothing
+    // about the latch. Only git reports this error, so its arrival shows git did this read.
+    // Seen red: removing the failure latch means gix reads Refs from here on, and this times out.
     harness.drain_until(|snapshot| {
         match snapshot {
             Snapshot::Job(job) if job.state == JobState::Done(Ok(())) => switched = true,
-            Snapshot::Refs(refs) if refs.generation > previous => later = Some(refs.clone()),
+            Snapshot::Refs(refs) if refs.generation > previous => {
+                if let Err(e) = &refs.result {
+                    error = Some(e.clone());
+                }
+            }
             _ => {}
         }
-        switched && later.is_some()
+        switched && error.is_some()
     });
-    // Seen red: removing the failure latch makes gix succeed here instead.
-    let later = later.unwrap();
-    let error = match &later.result {
-        Err(error) => error,
-        Ok(_) => panic!("later Refs Snapshot used gix; expected the latched Git error"),
-    };
+    let error = error.unwrap();
     assert!(error.contains("unknown date format bogus"), "{error}");
 }
 
