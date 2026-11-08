@@ -4,11 +4,10 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
-use cairn_repo::{Generation, Intent, JobId, JobKind, JobSnapshot, JobState, Snapshot};
-use common::{Harness, git, git_read};
+use cairn_repo::{Intent, JobKind, JobState, RefsSnapshot, Snapshot};
+use common::{Harness, Release, Seen, git, git_read, install_blocking_hook, is_ended, open, slash};
 
 /// A bare "remote" cloned from the small fixture, a clone of it whose origin is slowed by
 /// a wrapper around `upload-pack`, and a commit on the remote that the clone hasn't
@@ -75,8 +74,6 @@ fn fixture() -> Fixture {
 
     let release = dir.path().join("release");
     let log = dir.path().join("upload-pack.log");
-    // git runs `uploadpack` with its own sh, which takes forward slashes on Windows too.
-    let slash = |p: &Path| p.to_str().unwrap().replace('\\', "/");
     let wrapper = dir.path().join("slow-upload-pack.sh");
     std::fs::write(
         &wrapper,
@@ -109,95 +106,8 @@ fn fixture() -> Fixture {
     }
 }
 
-/// Creates the release file when dropped. Declared after the [`Harness`], so a failing
-/// assertion releases the wrapper before the service shuts down.
-struct Release<'a>(&'a Path);
-
-impl Drop for Release<'_> {
-    fn drop(&mut self) {
-        let _ = std::fs::write(self.0, "");
-    }
-}
-
-/// The generation each Slot answered an Open with.
-struct Opened {
-    refs: Generation,
-    staged: Generation,
-    unstaged: Generation,
-    untracked: Generation,
-}
-
-fn open(harness: &Harness, repo: &Path) -> Opened {
-    harness.service.send(Intent::Open(repo.to_path_buf()));
-    let (mut refs, mut staged, mut unstaged, mut untracked) = (None, None, None, None);
-    harness.drain_until(|s| {
-        match s {
-            Snapshot::Refs(r) => refs = Some(r.generation),
-            Snapshot::Staged(s) => staged = Some(s.generation),
-            Snapshot::Unstaged(s) => unstaged = Some(s.generation),
-            Snapshot::Untracked(s) => untracked = Some(s.generation),
-            Snapshot::Job(_) => {}
-        }
-        refs.is_some() && staged.is_some() && unstaged.is_some() && untracked.is_some()
-    });
-    Opened {
-        refs: refs.unwrap(),
-        staged: staged.unwrap(),
-        unstaged: unstaged.unwrap(),
-        untracked: untracked.unwrap(),
-    }
-}
-
-/// The newest Snapshot of every Job, and every Snapshot seen, kept across drains.
-#[derive(Default)]
-struct Seen {
-    jobs: std::collections::BTreeMap<JobId, Arc<JobSnapshot>>,
-    all: Vec<Snapshot>,
-}
-
-impl Seen {
-    fn until(&mut self, harness: &Harness, mut done: impl FnMut(&Self) -> bool) {
-        if done(self) {
-            return;
-        }
-        harness.drain_until(|s| {
-            if let Snapshot::Job(job) = s {
-                self.jobs.insert(job.id, job.clone());
-            }
-            self.all.push(s.clone());
-            done(self)
-        });
-    }
-
-    /// Records whatever has been published by now, without waiting.
-    fn drain_now(&mut self, harness: &Harness) {
-        for s in harness.service.drain() {
-            if let Snapshot::Job(job) = &s {
-                self.jobs.insert(job.id, job.clone());
-            }
-            self.all.push(s);
-        }
-    }
-
-    fn job(&self, kind: &JobKind) -> Option<&Arc<JobSnapshot>> {
-        self.jobs.values().find(|j| &j.kind == kind)
-    }
-
-    fn nth(&self, n: usize) -> Option<&Arc<JobSnapshot>> {
-        self.jobs.values().nth(n)
-    }
-
-    /// The newest refs Snapshot after the one `opened` names, if any.
-    fn refs_after(&self, opened: Generation) -> Option<&Arc<cairn_repo::RefsSnapshot>> {
-        self.all.iter().rev().find_map(|s| match s {
-            Snapshot::Refs(r) if r.generation > opened => Some(r),
-            _ => None,
-        })
-    }
-}
-
 /// Where the remote-tracking branch `origin/<branch>` points in a refs Snapshot.
-fn tracking_tip(refs: &cairn_repo::RefsSnapshot, branch: &str) -> String {
+fn tracking_tip(refs: &RefsSnapshot, branch: &str) -> String {
     let name = format!("refs/remotes/origin/{branch}");
     refs.result
         .as_ref()
@@ -218,10 +128,6 @@ fn wait_until_fetch_is_waiting(seen: &mut Seen, harness: &Harness) {
             j.state == JobState::Running && j.progress.as_deref() == Some("slow remote waiting")
         })
     });
-}
-
-fn is_ended(job: &JobSnapshot) -> bool {
-    matches!(job.state, JobState::Done(_) | JobState::Stopped)
 }
 
 #[test]
@@ -267,9 +173,9 @@ fn a_fetch_streams_progress_and_ends_with_a_refs_only_refresh() {
         );
     }
 
-    // A refresh is queued before the outcome is published, so a status refresh would
-    // publish within this window. The switch tests are the control: a switch refreshes
-    // status.
+    // Nothing marks a refresh that was never queued, so this waits. A refresh is queued
+    // before the outcome is published, so a status refresh would publish within this
+    // window. Control: `a_switch_runs_git_switch_and_refreshes_refs_and_status`.
     std::thread::sleep(Duration::from_millis(300));
     seen.drain_now(&harness);
     let status: Vec<_> = seen
@@ -283,6 +189,13 @@ fn a_fetch_streams_progress_and_ends_with_a_refs_only_refresh() {
         })
         .collect();
     assert!(status.is_empty(), "a fetch refreshed status: {status:?}");
+}
+
+fn current_branch(repo: &Path) -> String {
+    String::from_utf8(git_read(repo, &["symbolic-ref", "HEAD"]))
+        .unwrap()
+        .trim()
+        .to_owned()
 }
 
 fn version(major: u32, minor: u32) -> cairn_write::GitVersion {
@@ -374,8 +287,6 @@ fn stopping_a_running_fetch_kills_git_refreshes_refs_and_leaves_the_repo_intact(
     );
     assert!(!f.release.exists(), "the wrapper was released, not stopped");
 
-    // The wrapper, killed with git, never let upload-pack run, so nothing changes later.
-    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(std::fs::read_to_string(&f.log).unwrap(), "run\n");
     assert_eq!(
         git(&f.repo, &["rev-parse", &format!("origin/{}", f.branch)]).trim(),
@@ -423,9 +334,12 @@ fn network_jobs_run_one_at_a_time_and_a_queued_one_stops_without_starting() {
     std::fs::write(&f.release, "").unwrap();
     seen.until(&harness, |s| s.nth(0).is_some_and(|j| is_ended(j)));
     assert_eq!(seen.nth(0).unwrap().state, JobState::Done(Ok(())));
-    // Only the first fetch ever reached the remote.
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(std::fs::read_to_string(&f.log).unwrap(), "run\n");
+    // The queue runs in order, so the third fetch runs only after the queue has dealt
+    // with the stopped second one. Two runs means the second never reached the remote.
+    harness.service.send(Intent::Fetch);
+    seen.until(&harness, |s| s.nth(2).is_some_and(|j| is_ended(j)));
+    assert_eq!(seen.nth(2).unwrap().state, JobState::Done(Ok(())));
+    assert_eq!(std::fs::read_to_string(&f.log).unwrap(), "run\nrun\n");
     assert_eq!(seen.nth(1).unwrap().state, JobState::Stopped);
 }
 
@@ -434,18 +348,7 @@ fn a_stop_for_a_local_write_job_leaves_it_running_to_completion() {
     let f = fixture();
     git(&f.repo, &["branch", "other"]);
     let release = f.dir.path().join("hook-release");
-    let slash = release.to_str().unwrap().replace('\\', "/");
-    let hook = f.repo.join(".git/hooks/post-checkout");
-    std::fs::write(
-        &hook,
-        format!("#!/bin/sh\necho hook waiting\nwhile [ ! -f '{slash}' ]; do sleep 0.05; done\n"),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    install_blocking_hook(&f.repo, &f.dir.path().join("hook.log"), &release);
     let harness = Harness::start();
     let _release = Release(&release);
     open(&harness, &f.repo);
@@ -454,15 +357,14 @@ fn a_stop_for_a_local_write_job_leaves_it_running_to_completion() {
     let mut seen = Seen::default();
     seen.until(&harness, |s| {
         s.nth(0)
-            .is_some_and(|j| j.progress.as_deref() == Some("hook waiting"))
+            .is_some_and(|j| j.progress.as_deref() == Some("hook waiting on other"))
     });
+    // The Stop is handled before `send` returns, and the hook is still blocked then. A
+    // stop that reached git would end the Job Stopped or with git's error, not Done(Ok).
     harness.service.send(Intent::Stop(seen.nth(0).unwrap().id));
-    // A stop that reached git would end the Job well within this window.
-    std::thread::sleep(Duration::from_millis(300));
-    seen.drain_now(&harness);
-    assert_eq!(seen.nth(0).unwrap().state, JobState::Running);
 
     std::fs::write(&release, "").unwrap();
     seen.until(&harness, |s| s.nth(0).is_some_and(|j| is_ended(j)));
     assert_eq!(seen.nth(0).unwrap().state, JobState::Done(Ok(())));
+    assert_eq!(current_branch(&f.repo), "refs/heads/other");
 }
