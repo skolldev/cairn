@@ -9,6 +9,7 @@ mod fetch;
 mod scheduler;
 mod status;
 mod switch;
+mod watch;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -18,7 +19,7 @@ use std::sync::{Arc, Mutex};
 pub use cairn_core::{ChangeKind, FileChange, Head, Oid, RefEntry, RefName, Refs, RepoPath, Stash};
 
 use cairn_write::Stop;
-use scheduler::{JobQueue, Lane, Slot};
+use scheduler::{JobContext, JobQueue, Lane, Slot};
 
 /// Interactive lane workers. Enough for the Read Jobs one click starts to run side by side.
 const INTERACTIVE_THREADS: usize = 2;
@@ -143,8 +144,11 @@ pub type UntrackedSnapshot = SlotSnapshot<Vec<RepoPath>>;
 /// Dropping it stops every Network Job and waits for every queued Local write Job to
 /// finish, because those are never stopped.
 pub struct RepoService {
-    // Declared first so they drop first: a finishing Job still submits its refresh to the
-    // lane.
+    /// Watches the open repository. Declared first so it stops before anything it
+    /// refreshes is dropped.
+    watcher: Mutex<Option<watch::Watcher>>,
+    // Declared before the lane so they drop first: a finishing Job still submits its
+    // refresh to the lane.
     writes: JobQueue,
     network: JobQueue,
     /// Network Jobs that haven't ended, so a Stop Intent can reach them.
@@ -172,6 +176,7 @@ impl RepoService {
     pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Self {
         let interactive = Lane::new("interactive", INTERACTIVE_THREADS);
         Self {
+            watcher: Mutex::new(None),
             writes: JobQueue::new("local-write"),
             network: JobQueue::new("network"),
             network_jobs: Arc::default(),
@@ -197,6 +202,11 @@ impl RepoService {
                 let span = tracing::info_span!("intent", kind = "open", path = %path.display());
                 let _entered = span.enter();
                 *self.reads.open.lock().unwrap() = Some(path.clone());
+                // Watching starts before the first read, so no change falls between them.
+                // The old watcher stops here; its late events are for a repository that is
+                // no longer open, which `refresh_if_open` ignores.
+                let watcher = watch::start(&path, Arc::downgrade(&self.reads));
+                *self.watcher.lock().unwrap() = watcher;
                 self.reads.refresh(&path, &span);
             }
             Intent::Switch(branch) => {
@@ -435,11 +445,24 @@ fn last_line(output: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Which Slots a finished Job refreshes: only those it can change.
-#[derive(Clone, Copy)]
+/// Which Slots a finished Job or an External change refreshes: only those it can change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Refresh {
     Refs,
+    /// Staged, Unstaged and Untracked.
+    Status,
     RefsAndStatus,
+}
+
+impl Refresh {
+    /// Everything either refreshes.
+    fn union(self, other: Self) -> Self {
+        if self == other {
+            self
+        } else {
+            Refresh::RefsAndStatus
+        }
+    }
 }
 
 impl Reads {
@@ -453,6 +476,7 @@ impl Reads {
             match what {
                 Refresh::RefsAndStatus => self.refresh(path, span),
                 Refresh::Refs => self.refresh_refs(path, span),
+                Refresh::Status => self.refresh_status(path, span),
             }
         } else {
             tracing::debug!(path = %path.display(), "repository no longer open; refresh skipped");
@@ -463,19 +487,23 @@ impl Reads {
     /// Open shows. Later Intents that change less refresh less.
     fn refresh(&self, path: &Path, span: &tracing::Span) {
         self.refresh_refs(path, span);
-        self.submit(&self.staged_slot, path, span, status::staged, |p| {
+        self.refresh_status(path, span);
+    }
+
+    fn refresh_refs(&self, path: &Path, span: &tracing::Span) {
+        self.submit(&self.refs_slot, path, span, read_refs, |p| &mut p.refs);
+    }
+
+    fn refresh_status(&self, path: &Path, span: &tracing::Span) {
+        self.submit(&self.staged_slot, path, span, read_staged, |p| {
             &mut p.staged
         });
-        self.submit(&self.unstaged_slot, path, span, status::unstaged, |p| {
+        self.submit(&self.unstaged_slot, path, span, read_unstaged, |p| {
             &mut p.unstaged
         });
         self.submit(&self.untracked_slot, path, span, read_untracked, |p| {
             &mut p.untracked
         });
-    }
-
-    fn refresh_refs(&self, path: &Path, span: &tracing::Span) {
-        self.submit(&self.refs_slot, path, span, read_refs, |p| &mut p.refs);
     }
 
     /// Submits a Read Job to `slot` that runs `read` on the repository at `path` and
@@ -485,14 +513,14 @@ impl Reads {
         slot: &Slot,
         path: &Path,
         span: &tracing::Span,
-        read: fn(&Path) -> Result<T, String>,
+        read: fn(&Path, &JobContext) -> Result<T, String>,
         cell: fn(&mut Pending) -> &mut Latest<T>,
     ) {
         let outbox = self.outbox.clone();
         let path = path.to_path_buf();
         let span = span.clone();
         slot.submit(move |job| {
-            let result = read(&path);
+            let result = read(&path, job);
             if !job.is_current() {
                 tracing::debug!("superseded while running; result dropped");
                 return;
@@ -510,18 +538,27 @@ impl Reads {
     }
 }
 
-/// Opens the repository with gix and reads its refs.
-fn read_refs(path: &Path) -> Result<Refs, String> {
+/// Opens the repository with gix and reads its refs. Too quick to be worth stopping.
+fn read_refs(path: &Path, _job: &JobContext) -> Result<Refs, String> {
     cairn_read::Repo::open(path)
         .and_then(|repo| repo.refs())
         .map_err(|e| e.message().to_owned())
 }
 
-/// Opens the repository with gix and walks the worktree for untracked files.
-fn read_untracked(path: &Path) -> Result<Vec<RepoPath>, String> {
+/// Opens the repository with gix and walks the worktree for untracked files, stopping
+/// early once Superseded.
+fn read_untracked(path: &Path, job: &JobContext) -> Result<Vec<RepoPath>, String> {
     cairn_read::Repo::open(path)
-        .and_then(|repo| repo.untracked())
+        .and_then(|repo| repo.untracked(job.gix_interrupt()))
         .map_err(|e| e.message().to_owned())
+}
+
+fn read_staged(path: &Path, job: &JobContext) -> Result<Vec<FileChange>, String> {
+    status::staged(path, job.cli_stop())
+}
+
+fn read_unstaged(path: &Path, job: &JobContext) -> Result<Vec<FileChange>, String> {
+    status::unstaged(path, job.cli_stop())
 }
 
 /// Snapshots waiting for the UI, coalesced to the newest per Slot.

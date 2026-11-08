@@ -144,8 +144,12 @@ fn a_fetch_streams_progress_and_ends_with_a_refs_only_refresh() {
     wait_until_fetch_is_waiting(&mut seen, &harness);
 
     std::fs::write(&f.release, "").unwrap();
+    // The watcher may publish refs read mid-fetch, such as after FETCH_HEAD is written, so
+    // wait for the Snapshot that shows the fetched tip.
     seen.until(&harness, |s| {
-        s.job(&JobKind::Fetch).is_some_and(|j| is_ended(j)) && s.refs_after(opened.refs).is_some()
+        s.job(&JobKind::Fetch).is_some_and(|j| is_ended(j))
+            && s.refs_after(opened.refs)
+                .is_some_and(|r| tracking_tip(r, &f.branch) == f.new)
     });
     let job = seen.job(&JobKind::Fetch).unwrap().clone();
     assert_eq!(job.state, JobState::Done(Ok(())), "{job:?}");
@@ -155,10 +159,6 @@ fn a_fetch_streams_progress_and_ends_with_a_refs_only_refresh() {
     if installed >= version(2, 37) {
         assert!(job.output.contains("Counting objects"), "{}", job.output);
     }
-    assert_eq!(
-        tracking_tip(seen.refs_after(opened.refs).unwrap(), &f.branch),
-        f.new
-    );
     assert_eq!(
         git(&f.repo, &["rev-parse", &format!("origin/{}", f.branch)]).trim(),
         f.new

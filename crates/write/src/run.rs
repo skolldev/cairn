@@ -66,8 +66,8 @@ impl Invocation {
         self
     }
 
-    /// Lets `stop` end this run. Only a [`JobClass::Network`] invocation can be stopped:
-    /// any other is refused with [`RunError::NotStoppable`] before git starts.
+    /// Lets `stop` end this run. A [`JobClass::LocalWrite`] invocation can't be stopped
+    /// (ADR 0002): it is refused with [`RunError::NotStoppable`] before git starts.
     pub fn stop_on(mut self, stop: &Stop) -> Self {
         self.stop = Some(stop.clone());
         self
@@ -128,7 +128,7 @@ impl Git {
     ) -> Result<Output, RunError> {
         #[cfg(windows)]
         check_windows_repo_path(&invocation.repo)?;
-        if invocation.stop.is_some() && invocation.class != JobClass::Network {
+        if invocation.stop.is_some() && invocation.class == JobClass::LocalWrite {
             return Err(RunError::NotStoppable {
                 class: invocation.class,
             });

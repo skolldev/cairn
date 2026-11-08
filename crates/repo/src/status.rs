@@ -3,19 +3,19 @@
 use std::path::Path;
 
 use cairn_core::{ChangeKind, FileChange, RepoPath};
-use cairn_write::{Git, Invocation, JobClass, Output, RunError};
+use cairn_write::{Git, Invocation, JobClass, Output, RunError, Stop};
 
 /// HEAD vs index: `git diff-index --cached`, with renames found as `git status` finds them.
-pub(crate) fn staged(workdir: &Path) -> Result<Vec<FileChange>, String> {
+pub(crate) fn staged(workdir: &Path, stop: &Stop) -> Result<Vec<FileChange>, String> {
     let git = Git::shared().map_err(|e| e.to_string())?;
-    let against_head = diff_index(git, workdir, "HEAD")?;
+    let against_head = diff_index(git, workdir, stop, "HEAD")?;
     let out = match against_head.status.success() {
         true => against_head,
         // An unborn branch has no HEAD to compare with, so everything staged is Added,
         // as `git status` shows it. Any other failure is git's to report.
-        false if head_is_unborn(git, workdir)? => {
-            let empty_tree = empty_tree(git, workdir)?;
-            diff_index(git, workdir, &empty_tree)?
+        false if head_is_unborn(git, workdir, stop)? => {
+            let empty_tree = empty_tree(git, workdir, stop)?;
+            diff_index(git, workdir, stop, &empty_tree)?
         }
         false => against_head,
     };
@@ -31,10 +31,10 @@ pub(crate) fn staged(workdir: &Path) -> Result<Vec<FileChange>, String> {
 /// content didn't (touched, copied, checked out by another tool) is listed as modified.
 /// `git status` checks such files' content, so this does too, with one `git hash-object`
 /// for every candidate. It applies the same clean filters and line-ending conversion.
-pub(crate) fn unstaged(workdir: &Path) -> Result<Vec<FileChange>, String> {
+pub(crate) fn unstaged(workdir: &Path, stop: &Stop) -> Result<Vec<FileChange>, String> {
     let git = Git::shared().map_err(|e| e.to_string())?;
     let out = git
-        .run(&Invocation::new(JobClass::Read, workdir).args(["diff-files", "-z"]))
+        .run(&read(workdir, stop).args(["diff-files", "-z"]))
         .map_err(text)?
         .success()
         .map_err(text)?;
@@ -57,7 +57,7 @@ pub(crate) fn unstaged(workdir: &Path) -> Result<Vec<FileChange>, String> {
         }
         let hashed = git
             .run(
-                &Invocation::new(JobClass::Read, workdir)
+                &read(workdir, stop)
                     .args(["hash-object", "--stdin-paths"])
                     .stdin(stdin),
             )
@@ -90,36 +90,25 @@ pub(crate) fn unstaged(workdir: &Path) -> Result<Vec<FileChange>, String> {
     Ok(changes)
 }
 
-fn diff_index(git: &Git, workdir: &Path, tree: &str) -> Result<Output, String> {
-    git.run(&Invocation::new(JobClass::Read, workdir).args([
-        "diff-index",
-        "--cached",
-        "-z",
-        "-M",
-        tree,
-    ]))
-    .map_err(text)
+fn diff_index(git: &Git, workdir: &Path, stop: &Stop, tree: &str) -> Result<Output, String> {
+    git.run(&read(workdir, stop).args(["diff-index", "--cached", "-z", "-M", tree]))
+        .map_err(text)
 }
 
 /// True if HEAD names no commit yet. `rev-parse -q --verify` exits 1 for that, and 128
 /// when it can't read the repository at all.
-fn head_is_unborn(git: &Git, workdir: &Path) -> Result<bool, String> {
+fn head_is_unborn(git: &Git, workdir: &Path, stop: &Stop) -> Result<bool, String> {
     let out = git
-        .run(&Invocation::new(JobClass::Read, workdir).args([
-            "rev-parse",
-            "-q",
-            "--verify",
-            "HEAD",
-        ]))
+        .run(&read(workdir, stop).args(["rev-parse", "-q", "--verify", "HEAD"]))
         .map_err(text)?;
     Ok(out.status.code() == Some(1))
 }
 
 /// The empty tree's id in this repository's hash.
-fn empty_tree(git: &Git, workdir: &Path) -> Result<String, String> {
+fn empty_tree(git: &Git, workdir: &Path, stop: &Stop) -> Result<String, String> {
     let out = git
         .run(
-            &Invocation::new(JobClass::Read, workdir)
+            &read(workdir, stop)
                 .args(["hash-object", "-t", "tree", "--stdin"])
                 .stdin(Vec::new()),
         )
@@ -127,6 +116,11 @@ fn empty_tree(git: &Git, workdir: &Path) -> Result<String, String> {
         .success()
         .map_err(text)?;
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// A Read invocation that `stop` kills once a newer Read Job Supersedes this one.
+fn read(workdir: &Path, stop: &Stop) -> Invocation {
+    Invocation::new(JobClass::Read, workdir).stop_on(stop)
 }
 
 fn text(e: RunError) -> String {

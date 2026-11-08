@@ -9,7 +9,7 @@
 //! <args>` with `LC_ALL=C` and `GIT_TERMINAL_PROMPT=0`, so output parses the same everywhere
 //! and git never waits on a prompt. Maintenance stays at git's default (#14).
 //!
-//! A Network invocation can carry a [`Stop`], which kills git and what it started.
+//! A Network or Read invocation can carry a [`Stop`], which kills git and what it started.
 
 mod resolve;
 mod run;
@@ -75,8 +75,8 @@ pub enum RunError {
     /// The invocation's [`Stop`] was used. `stderr` is what git wrote before it was killed,
     /// empty if it never started.
     Stopped { stderr: Vec<u8> },
-    /// A [`Stop`] was attached to an invocation that isn't a Network Job. Only Network Jobs
-    /// can be stopped (ADR 0002), so git wasn't started.
+    /// A [`Stop`] was attached to a Local write invocation, which always runs to completion
+    /// (ADR 0002), so git wasn't started.
     NotStoppable { class: JobClass },
 }
 
@@ -95,7 +95,10 @@ impl fmt::Display for RunError {
             }
             RunError::Stopped { .. } => f.write_str("stopped"),
             RunError::NotStoppable { class } => {
-                write!(f, "only a Network Job can be stopped, not a {class:?} Job")
+                write!(
+                    f,
+                    "a {class:?} Job always runs to completion and can't be stopped"
+                )
             }
         }
     }

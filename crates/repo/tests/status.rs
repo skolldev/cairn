@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use cairn_repo::{ChangeKind, ChangesSnapshot, FileChange, Intent, RepoPath, Snapshot};
-use common::{Harness, git, git_read, small_fixture_clone};
+use common::{Harness, git, git_read, small_fixture_clone, touch};
 
 /// The three status lists, rendered as comparable lines.
 #[derive(Debug, PartialEq, Eq)]
@@ -136,13 +136,6 @@ fn staged_changes_match_git_status() {
         "the setup stages four changes: {expected:?}"
     );
     assert_eq!(status.staged, expected.staged);
-}
-
-/// Changes the file's mtime without changing its content, so its index entry is stat-dirty.
-fn touch(path: &Path) {
-    let file = std::fs::File::options().write(true).open(path).unwrap();
-    let when = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
-    file.set_modified(when).unwrap();
 }
 
 /// The paths `git diff-files` lists: stat-dirty entries included, because it never refreshes.

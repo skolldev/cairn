@@ -13,7 +13,10 @@ use gix::status::UntrackedFiles;
 
 use crate::{ReadError, err};
 
-pub(crate) fn read(repo: &gix::Repository) -> Result<Vec<RepoPath>, ReadError> {
+pub(crate) fn read(
+    repo: &gix::Repository,
+    interrupt: &AtomicBool,
+) -> Result<Vec<RepoPath>, ReadError> {
     let mode = match show_untracked_files(repo)? {
         UntrackedFiles::None => return Ok(Vec::new()),
         UntrackedFiles::Collapsed => EmissionMode::CollapseDirectory,
@@ -30,14 +33,8 @@ pub(crate) fn read(repo: &gix::Repository) -> Result<Vec<RepoPath>, ReadError> {
         .emit_empty_directories(false)
         .recurse_repositories(false);
     let mut collect = Collect::default();
-    repo.dirwalk(
-        &index,
-        None::<&str>,
-        &AtomicBool::new(false),
-        options,
-        &mut collect,
-    )
-    .map_err(err)?;
+    repo.dirwalk(&index, None::<&str>, interrupt, options, &mut collect)
+        .map_err(err)?;
 
     let mut paths: Vec<RepoPath> = collect
         .into_entries_by_path()

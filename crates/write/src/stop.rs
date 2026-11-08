@@ -1,7 +1,9 @@
-//! Stopping a Network Job: the user's stop button, made of a process kill.
+//! Stopping a Network Job or a Read Job, made of a process kill.
 //!
-//! Only Network Jobs can be stopped (ADR 0002). A Local write Job is never killed, because
-//! killing git skips its cleanup; a Read Job's runner call is short and takes no lock.
+//! A Network Job stops when the user asks. A Read Job stops when a newer one Supersedes it,
+//! and since it takes no lock, killing it leaves the repository as it was (a clean filter
+//! the user configured may have side effects of its own). A Local write Job is never killed
+//! (ADR 0002), because killing git skips its cleanup.
 //!
 //! Stopping kills git together with what it started, such as `upload-pack` for a local
 //! remote or a remote helper. Those share git's stderr, so killing git alone would leave
@@ -23,7 +25,7 @@ use std::time::Duration;
 #[cfg(unix)]
 const GRACE: Duration = Duration::from_secs(2);
 
-/// A stop button for one Network invocation: hand it to
+/// A stop button for one Network or Read invocation: hand it to
 /// [`Invocation::stop_on`](crate::Invocation::stop_on), keep a clone, and call
 /// [`stop`](Self::stop) from any thread. Once stopped it stays stopped, and any run that
 /// uses it afterwards returns [`RunError::Stopped`](crate::RunError::Stopped) without
