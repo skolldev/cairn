@@ -92,34 +92,38 @@ fn quick_refreshes_of_one_slot_publish_only_newer_generations_and_never_a_stoppe
     // newer reads arrive while one is running and stop it.
     install_slow_clean_filter(&repo, dir.path(), "sleep 0.02\n");
     let harness = Harness::start();
-    // A fresh service numbers the Unstaged Slot's reads 1, 2, 3, ... one per Open.
+    // A fresh service numbers the Unstaged Slot's reads 1, 2, 3, ... one per Open. The
+    // watcher may add refreshes of its own, so later generations can be larger.
     const OPENS: u64 = 20;
     for _ in 0..OPENS {
         harness.service.send(Intent::Open(repo.clone()));
     }
     let mut seen = Seen::default();
     seen.until(&harness, |seen| {
-        unstaged(seen).iter().any(|u| u.generation.get() == OPENS)
+        unstaged(seen).iter().any(|u| u.generation.get() >= OPENS)
     });
 
-    // Marker: one more Open. Its Snapshot can only follow the ones before it, so anything
-    // older than OPENS would have arrived by the time it does.
-    harness.service.send(Intent::Open(repo.clone()));
+    // Marker: open another path. Its Snapshot takes a later generation than every read of
+    // `repo`, and the watcher no longer refreshes `repo`, so anything older would have
+    // arrived by the time it does.
+    let elsewhere = tempfile::tempdir().unwrap();
+    harness
+        .service
+        .send(Intent::Open(elsewhere.path().to_path_buf()));
     seen.until(&harness, |seen| {
-        unstaged(seen)
-            .iter()
-            .any(|u| u.generation.get() == OPENS + 1)
+        unstaged(seen).iter().any(|u| u.workdir == elsewhere.path())
     });
 
-    let published = unstaged(&seen);
+    let mut published = unstaged(&seen);
+    published.retain(|u| u.workdir == repo);
     let generations: Vec<u64> = published.iter().map(|u| u.generation.get()).collect();
     assert!(
         generations.windows(2).all(|w| w[0] < w[1]),
         "generations must only increase: {generations:?}"
     );
-    assert_eq!(generations.last(), Some(&(OPENS + 1)));
+    let newest = *generations.last().unwrap();
     assert!(
-        (generations.len() as u64) < OPENS,
+        (generations.len() as u64) < newest,
         "superseded reads must not all publish: {generations:?}"
     );
     // Seen red: with the `is_current` check in `Reads::submit` removed, a stopped read
