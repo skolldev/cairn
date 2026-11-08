@@ -127,10 +127,15 @@ async fn a_frame_reports_what_the_views_hold_after_an_external_change(cx: &mut T
     let (_dir, sandbox) = sandbox();
     let mut app = open(cx, sandbox.repo());
 
+    // Every Slot, because each answers the Open on its own schedule.
     let opened = app.wait_for_frame(|f| {
-        f.head.as_deref() == Some(BRANCH_A) && f.untracked_paths.iter().any(|p| p == KEEP)
+        f.head.as_deref() == Some(BRANCH_A)
+            && f.untracked_paths.iter().any(|p| p == KEEP)
+            && f.refs > 0
+            && f.staged > 0
+            && f.unstaged > 0
+            && f.untracked > 0
     });
-    assert!(opened.refs > 0 && opened.staged > 0 && opened.unstaged > 0 && opened.untracked > 0);
     assert!(opened.unstaged_paths.is_empty());
 
     sandbox.save(true).unwrap();
