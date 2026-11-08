@@ -6,7 +6,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use cairn_repo::{ChangeKind, ChangesSnapshot, FileChange, Intent, RepoPath, Snapshot};
-use common::{Harness, git, git_output, git_read, small_fixture_clone, touch};
+use cairn_write::{Git, GitVersion};
+use common::{Harness, git, git_read, small_fixture_clone, touch};
 
 /// The three status lists, rendered as comparable lines.
 #[derive(Debug, PartialEq, Eq)]
@@ -119,6 +120,15 @@ fn snapshot_status(repo: &Path) -> Status {
     }
 }
 
+fn git_at_least(major: u32, minor: u32) -> bool {
+    Git::shared().unwrap().version()
+        >= GitVersion {
+            major,
+            minor,
+            patch: 0,
+        }
+}
+
 #[test]
 fn cli_fallback_configurations_match_git_porcelain_status() {
     for (key, value) in [
@@ -128,16 +138,23 @@ fn cli_fallback_configurations_match_git_porcelain_status() {
     ] {
         let (_dir, repo) = small_fixture_clone();
         if key == "index.sparse" {
-            // Sparse-index support was added after our minimum Git 2.23. Use a real
-            // sparse index when the installed Git supports it; retain the config
-            // trigger on 2.23 so the same Snapshot path is still covered there.
-            let initialized = git_output(&repo, &["sparse-checkout", "init", "--cone"]);
-            if initialized.status.success() {
-                let set = git_output(&repo, &["sparse-checkout", "set", "--sparse-index", "src"]);
-                if !set.status.success() {
-                    git(&repo, &["config", key, value]);
-                }
+            if git_at_least(2, 35) {
+                git(&repo, &["sparse-checkout", "init", "--cone"]);
+                git(&repo, &["sparse-checkout", "set", "--sparse-index", "src"]);
+                // Seen red: omitting --sparse-index leaves no sparse directory entries.
+                assert_eq!(
+                    git(&repo, &["config", "--get", "index.sparse"]).trim(),
+                    "true"
+                );
+                assert!(
+                    git(&repo, &["ls-files", "--sparse", "--stage"])
+                        .lines()
+                        .any(|line| line.starts_with("040000 ")),
+                    "the fixture must contain sparse directory entries"
+                );
             } else {
+                // Git 2.23 cannot create a sparse index. It still covers the
+                // configuration trigger on the oldest-git CI job.
                 git(&repo, &["config", key, value]);
             }
         } else {
@@ -174,11 +191,16 @@ fn cli_fallback_configurations_match_git_porcelain_status() {
 #[test]
 fn partial_clone_status_matches_git_porcelain() {
     let (_source_dir, source) = small_fixture_clone();
+    if !git_at_least(2, 35) {
+        // Git 2.23's local filtered clone cannot check out this fixture. On older
+        // Git, the config-trigger case above still covers the CLI Snapshot path.
+        return;
+    }
     git(&source, &["config", "uploadpack.allowFilter", "true"]);
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("partial");
     let url = format!("file://{}", source.display());
-    let clone = git_output(
+    git(
         dir.path(),
         &[
             "clone",
@@ -188,15 +210,19 @@ fn partial_clone_status_matches_git_porcelain() {
             repo.to_str().unwrap(),
         ],
     );
-    if !clone.status.success() {
-        // Git 2.23 is the minimum supported version and may not support this
-        // local transport's filter negotiation. The config-trigger test above
-        // still exercises the CLI Snapshot path on that version.
-        return;
-    }
     assert_eq!(
         git(&repo, &["config", "--get", "remote.origin.promisor"]).trim(),
         "true"
+    );
+    // Seen red: a filter that downloads every blob leaves no promised objects.
+    assert!(
+        git(
+            &repo,
+            &["rev-list", "--objects", "--all", "--missing=print"]
+        )
+        .lines()
+        .any(|line| line.starts_with('?')),
+        "the partial clone must actually have missing promised objects"
     );
     std::fs::write(repo.join("partial-untracked"), b"new\n").unwrap();
     std::fs::write(repo.join("README.md"), b"staged change\n").unwrap();

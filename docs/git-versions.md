@@ -19,6 +19,7 @@ Release notes live at `Documentation/RelNotes/<version>.adoc`. To find the first
 | `git switch` and `git restore` exist | 2.23 | why 2.23 is the minimum | `GitVersion::MINIMUM` |
 | `--pathspec-from-file` | 2.25 | can't be used, in product code or tests | `builtin/reset.c` |
 | `git init -b` / `--initial-branch` | 2.28 | tests set the branch another way | `builtin/init-db.c` |
+| `git sparse-checkout set --sparse-index` | 2.35 | sparse-index status fixture runs only on newer git | `builtin/sparse-checkout.c` at 2.34 and 2.35 |
 | `fetch.writeCommitGraph` | 2.24 | older git ignores the `-c`, so a test asserting a commit-graph is version-gated | `builtin/fetch.c`, `repo-settings.c` |
 | `fetch --all` with one remote fetches it directly | 2.37 | before 2.37 even a lone remote goes through a sub-fetch | `builtin/fetch.c`: "do not do fetch_multiple() of one" |
 

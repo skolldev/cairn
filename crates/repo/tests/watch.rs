@@ -15,6 +15,7 @@ use common::{Harness, Seen, git, open, slash, small_fixture_clone};
 #[test]
 fn a_git_switch_run_outside_the_service_is_followed_by_a_refs_snapshot() {
     let (_dir, repo) = small_fixture_clone();
+    common::assert_filesystem_events_available(&repo);
     git(&repo, &["branch", "elsewhere"]);
     let harness = Harness::start();
     let opened = open(&harness, &repo);
@@ -169,6 +170,7 @@ fn keep_writing(path: PathBuf) -> Writer {
 #[test]
 fn status_keeps_publishing_while_external_changes_keep_arriving() {
     let (dir, repo) = small_fixture_clone();
+    common::assert_filesystem_events_available(&repo);
     // Each Unstaged read takes far longer than the gap between two writes, so a new event
     // always arrives while a read runs.
     common::install_slow_clean_filter(&repo, dir.path(), "sleep 0.02\n");
@@ -209,6 +211,7 @@ fn unstaged_after(seen: &Seen, after: Generation) -> Vec<&Arc<ChangesSnapshot>> 
 #[test]
 fn a_burst_shorter_than_a_read_costs_at_most_two_status_refreshes() {
     let (dir, repo) = small_fixture_clone();
+    common::assert_filesystem_events_available(&repo);
     // ADR 0004's bound holds for a burst that ends while the first read runs. A longer one
     // is a stream, which publishes once per read.
     // Regular files only: a symlink or submodule entry can't be appended to.

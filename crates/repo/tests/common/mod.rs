@@ -9,6 +9,46 @@ use std::time::{Duration, Instant};
 
 use cairn_repo::{RepoService, Snapshot};
 use cairn_write::{Git, Invocation, JobClass, Output};
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher as _};
+
+/// Fail promptly when this host cannot deliver filesystem events to the watcher tests.
+/// This probes the same temp filesystem as their repositories, without replacing their
+/// end-to-end assertions about External changes and Snapshots.
+pub fn assert_filesystem_events_available(repo: &Path) {
+    let root = repo.canonicalize().expect("canonical repository directory");
+    let marker = root.join("watcher-probe");
+    let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
+    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |event| {
+        let _ = tx.send(event);
+    })
+    .unwrap_or_else(|error| panic!("filesystem watcher cannot start: {error}"));
+    watcher
+        .watch(&root, RecursiveMode::Recursive)
+        .unwrap_or_else(|error| {
+            panic!(
+                "filesystem watcher cannot watch {}: {error}",
+                root.display()
+            )
+        });
+    std::fs::write(&marker, b"probe").expect("write watcher probe marker");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(Ok(event)) if event.paths.iter().any(|path| path == &marker) => {
+                std::fs::remove_file(&marker).expect("remove watcher probe marker");
+                return;
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => panic!("filesystem watcher reported an error: {error}"),
+            Err(_) => panic!(
+                "filesystem watcher delivered no event for {} within 2 seconds; \
+                 this host cannot run event-driven Repo service tests",
+                marker.display()
+            ),
+        }
+    }
+}
 
 /// The small fixture: ripgrep at the #5 commit. `scripts/fixtures.sh small` creates it.
 /// `CAIRN_FIXTURES` overrides the fixture root, which defaults to `~/cairn-fixtures`.
