@@ -88,13 +88,19 @@ impl Repo {
 }
 
 /// An alias that runs a shell which announces itself on stderr and then waits for
-/// `release` to exist. The shell is a child of git, as `upload-pack` or a remote helper
+/// `release` to exist, or its directory to go. The shell is a child of git, as `upload-pack` or a remote helper
 /// is during a fetch.
 pub fn blocking_alias(release: &Path) -> String {
     // git runs aliases with its own sh, which takes forward slashes on Windows too.
+    let dir = release
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .replace('\\', "/");
     let release = release.to_str().unwrap().replace('\\', "/");
     format!(
-        "alias.block=!echo waiting >&2; while [ ! -f '{release}' ]; do sleep 0.05; done; \
+        "alias.block=!echo waiting >&2; while [ ! -f '{release}' ] && [ -d '{dir}' ]; do sleep 0.05; done; \
          echo released >&2"
     )
 }

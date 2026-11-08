@@ -45,10 +45,10 @@ fn a_newer_status_read_stops_the_running_one_instead_of_waiting_for_it() {
         &format!(
             "if [ ! -f '{started}' ]; then\n\
              touch '{started}'\n\
-             while [ ! -f '{release}' ]; do sleep 0.05; done\n\
+             {wait}\
              fi\n",
             started = slash(&started),
-            release = slash(&release),
+            wait = common::wait_for_release(&release),
         ),
     );
 

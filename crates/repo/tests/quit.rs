@@ -172,10 +172,10 @@ fn a_quit_drops_the_running_and_the_pending_read_job() {
         &format!(
             "if [ ! -f '{started}' ]; then\n\
              touch '{started}'\n\
-             while [ ! -f '{release}' ]; do sleep 0.05; done\n\
+             {wait}\
              fi\n",
             started = slash(&started),
-            release = slash(&release),
+            wait = common::wait_for_release(&release),
         ),
     );
     let harness = Harness::start();
@@ -194,9 +194,15 @@ fn a_quit_drops_the_running_and_the_pending_read_job() {
     assert!(!release.exists());
 
     // Seen red: without the stop, the running read publishes once released. With the
-    // pending read kept, it runs once the stopped one ends. Control for the wait:
-    // `a_newer_status_read_stops_the_running_one_instead_of_waiting_for_it`.
+    // pending read kept, it runs once the stopped one ends. Either has at most one read's
+    // work left, so the window is two reads' work, done here through the same filter. A fixed
+    // wait passed with both broken on a loaded machine, where a read takes over a second.
+    // Control: `a_newer_status_read_stops_the_running_one_instead_of_waiting_for_it`.
     std::fs::write(&release, "").unwrap();
+    for _ in 0..2 {
+        git_read(&repo, &["diff-files", "-z"]);
+        git_read(&repo, &["hash-object", "README.md"]);
+    }
     std::thread::sleep(SETTLE);
     seen.drain_now(&harness);
     let unstaged: Vec<_> = seen

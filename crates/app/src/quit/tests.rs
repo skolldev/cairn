@@ -73,14 +73,16 @@ impl Drop for Release {
 }
 
 /// A repository with a branch `other` and a commit to push. A `post-checkout` hook and a
-/// wrapper around git on the remote each block until the release file exists.
+/// wrapper around git on the remote each block until the release file exists or the temp dir
+/// is gone: a Force quit leaves its hook running after the test has ended.
 struct Fixture {
-    _dir: tempfile::TempDir,
     repo: PathBuf,
     remote: PathBuf,
     release: Release,
     /// Created by the hook and the wrapper once they are blocked.
     blocked: PathBuf,
+    // Last, so that it drops after `release`.
+    _dir: tempfile::TempDir,
 }
 
 fn fixture() -> Fixture {
@@ -100,9 +102,10 @@ fn fixture() -> Fixture {
 
     let block = format!(
         "touch '{blocked}'\n\
-         while [ ! -f '{release}' ]; do sleep 0.05; done\n",
+         while [ ! -f '{release}' ] && [ -d '{dir}' ]; do sleep 0.05; done\n",
         blocked = slash(&blocked),
         release = slash(&release),
+        dir = slash(dir.path()),
     );
     let hook = repo.join(".git/hooks/post-checkout");
     std::fs::write(&hook, format!("#!/bin/sh\n{block}")).unwrap();
@@ -127,11 +130,11 @@ fn fixture() -> Fixture {
         );
     }
     Fixture {
-        _dir: dir,
         repo,
         remote,
         release: Release(release),
         blocked,
+        _dir: dir,
     }
 }
 

@@ -203,6 +203,17 @@ pub fn slash(path: &Path) -> String {
     path.to_str().unwrap().replace('\\', "/")
 }
 
+/// sh that waits until `release` exists, or until its directory is gone. A Force quit leaves
+/// its Job's hook running after the test has ended, so without that second condition a release
+/// file deleted with the temp dir would leave the hook looping forever.
+pub fn wait_for_release(release: &Path) -> String {
+    format!(
+        "while [ ! -f '{release}' ] && [ -d '{dir}' ]; do sleep 0.05; done\n",
+        release = slash(release),
+        dir = slash(release.parent().expect("a release file has a directory")),
+    )
+}
+
 /// Creates a release file when dropped, so a failing test never leaves a hook or wrapper
 /// waiting on it. Declare it after the [`Harness`]: it then drops first, releasing the
 /// wait before the service waits for its Local write Jobs.
@@ -222,10 +233,10 @@ pub fn install_blocking_hook(repo: &Path, log: &Path, release: &Path) {
          branch=$(git symbolic-ref --short HEAD)\n\
          echo \"start $branch\" >> '{log}'\n\
          echo \"hook waiting on $branch\"\n\
-         while [ ! -f '{release}' ]; do sleep 0.05; done\n\
+         {wait}\
          echo \"end $branch\" >> '{log}'\n",
         log = slash(log),
-        release = slash(release),
+        wait = wait_for_release(release),
     );
     let hook = repo.join(".git/hooks/post-checkout");
     std::fs::write(&hook, script).unwrap();
@@ -402,10 +413,10 @@ pub fn slow_remote() -> SlowRemote {
         format!(
             "echo run >> '{log}'\n\
              echo 'slow remote waiting' >&2\n\
-             while [ ! -f '{release}' ]; do sleep 0.05; done\n\
+             {wait}\
              exec git \"$@\"\n",
             log = slash(&log),
-            release = slash(&release),
+            wait = wait_for_release(&release),
         ),
     )
     .unwrap();
