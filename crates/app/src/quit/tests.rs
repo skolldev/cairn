@@ -252,6 +252,7 @@ impl App<'_> {
 #[gpui::test]
 fn closing_with_nothing_running_exits_without_asking(cx: &mut TestAppContext) {
     let mut app = open(cx, None);
+    // Seen red: a window that closes by itself fails `close`.
     app.close();
     assert_eq!(app.prompt(), None);
     app.until("the app exits", |app| app.exited.get());
@@ -298,6 +299,7 @@ fn the_banners_force_quit_button_asks_first(cx: &mut TestAppContext) {
 
     // The test window draws only when resized. This one also proves the banner renders.
     app.cx.simulate_resize(size(px(901.), px(701.)));
+    // Seen red: without the button's click handler, no question comes up.
     let button = app
         .cx
         .debug_bounds("force-quit")
@@ -369,6 +371,7 @@ fn stopping_the_push_when_asked_exits_and_nothing_reaches_the_remote(cx: &mut Te
     let mut app = open(cx, Some(&f.repo));
     app.start_blocked(Intent::Push, &f);
 
+    // Seen red: a Quit sent without asking leaves no prompt to answer.
     app.close();
     app.answer("Stop push and quit");
     app.until("the app exits", |app| app.exited.get());
@@ -401,6 +404,7 @@ fn closing_after_a_push_ended_doesnt_ask(cx: &mut TestAppContext) {
         })
     });
 
+    // Seen red: a view that keeps ended Jobs never gets here.
     app.close();
     assert_eq!(app.prompt(), None);
     app.until("the app exits", |app| app.exited.get());
