@@ -12,6 +12,7 @@ mod refs_view;
 mod status_view;
 
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use cairn_repo::{Intent, RepoService};
@@ -36,7 +37,12 @@ struct Workspace {
 }
 
 impl Workspace {
-    fn new(path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        path: Option<PathBuf>,
+        exit: Rc<dyn Fn(&mut App)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // A bounded channel of one: wakes that arrive before the bridge runs coalesce.
         let (wake, woken) = async_channel::bounded(1);
         let service = Arc::new(RepoService::start(move || {
@@ -44,7 +50,7 @@ impl Workspace {
         }));
         let refs = cx.new(|_| RefsView::default());
         let status = cx.new(|_| StatusView::default());
-        let quit = cx.new(|_| QuitView::new(service.clone()));
+        let quit = cx.new(|_| QuitView::new(service.clone(), exit));
         // The window stays open until the Repo service says it has quit, and the bridge then
         // exits the app. Deferred, so that a question isn't asked inside the platform's callback.
         window.on_window_should_close(cx, {
@@ -185,7 +191,7 @@ fn main() {
             ..Default::default()
         };
         cx.open_window(options, move |window, cx| {
-            cx.new(|cx| Workspace::new(path, window, cx))
+            cx.new(|cx| Workspace::new(path, Rc::new(|cx| cx.quit()), window, cx))
         })
         .expect("open the Cairn window");
         cx.on_window_closed(|cx, _| cx.quit()).detach();

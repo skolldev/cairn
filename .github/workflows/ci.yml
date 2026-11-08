@@ -102,7 +102,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libz-dev
           ./scripts/oldest-git.sh "$GIT_VERSION" "$HOME/git-$GIT_VERSION" >> "$GITHUB_PATH"
-      # Every crate whose tests run git: the runner itself, and the Repo service's reads.
+      # The runner itself, and the Repo service's reads. cairn-app's tests run git too, but
+      # building GPUI here isn't worth it: run those on 2.23 locally (CODING_STANDARDS.md).
       - name: runner and Repo service tests
         env:
           CAIRN_EXPECT_GIT_VERSION: ${{ env.GIT_VERSION }}

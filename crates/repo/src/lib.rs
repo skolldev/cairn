@@ -91,11 +91,6 @@ pub enum Snapshot {
 pub struct JobId(u64);
 
 impl JobId {
-    /// An id as a [`JobSnapshot`] would carry it, for tests of what `app` does with one.
-    pub fn new(id: u64) -> Self {
-        Self(id)
-    }
-
     pub fn get(self) -> u64 {
         self.0
     }

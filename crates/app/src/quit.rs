@@ -2,15 +2,16 @@
 //! and shows what a Quit is waiting for.
 //!
 //! The Repo service does the quitting. [`QuitFlow`] decides from Job Snapshots what a close
-//! request means, with no GPUI in it. [`QuitView`] puts the questions to the user.
+//! request means. [`QuitView`] puts the questions to the user.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use cairn_repo::{Intent, JobId, JobKind, JobSnapshot, JobState, RepoService};
 use gpui::{
-    Context, IntoElement, ParentElement, PromptButton, PromptLevel, Render, SharedString, Styled,
-    Window, div, prelude::*, rgb,
+    App, Context, IntoElement, ParentElement, PromptButton, PromptLevel, Render, SharedString,
+    Styled, Window, div, prelude::*, rgb,
 };
 
 /// What a request to close the window leads to.
@@ -93,15 +94,18 @@ const FORCE_QUIT: Question = Question {
 /// hook has no stop button (ADR 0002): its output is here, and Force quit is the way out.
 pub struct QuitView {
     service: Arc<RepoService>,
+    /// What ends the app once the Repo service has quit.
+    exit: Rc<dyn Fn(&mut App)>,
     flow: QuitFlow,
     /// A question is on screen. A second close request mustn't stack another.
     asking: bool,
 }
 
 impl QuitView {
-    pub fn new(service: Arc<RepoService>) -> Self {
+    pub fn new(service: Arc<RepoService>, exit: Rc<dyn Fn(&mut App)>) -> Self {
         Self {
             service,
+            exit,
             flow: QuitFlow::default(),
             asking: false,
         }
@@ -112,6 +116,11 @@ impl QuitView {
         if self.flow.quit_sent {
             cx.notify();
         }
+    }
+
+    /// The Repo service has quit: nothing is left to wait for.
+    pub fn exit(&mut self, cx: &mut Context<Self>) {
+        (self.exit)(cx);
     }
 
     pub fn close_requested(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -199,6 +208,7 @@ impl Render for QuitView {
             .child(
                 div()
                     .id("force-quit")
+                    .debug_selector(|| "force-quit".to_owned())
                     .px_2()
                     .py_1()
                     .rounded_sm()
@@ -213,75 +223,4 @@ impl Render for QuitView {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn job(id: u64, kind: JobKind, state: JobState) -> Arc<JobSnapshot> {
-        Arc::new(JobSnapshot {
-            id: JobId::new(id),
-            kind,
-            workdir: "/repo".into(),
-            state,
-            output: String::new(),
-            progress: None,
-            span: tracing::Span::none(),
-        })
-    }
-
-    fn switch() -> JobKind {
-        JobKind::Switch {
-            branch: "other".to_owned(),
-        }
-    }
-
-    #[test]
-    fn closing_with_nothing_running_quits_without_asking() {
-        assert_eq!(QuitFlow::default().on_close(), CloseStep::Quit);
-    }
-
-    #[test]
-    fn closing_asks_first_while_a_push_is_queued_or_running() {
-        for state in [JobState::Queued, JobState::Running] {
-            let mut flow = QuitFlow::default();
-            flow.record(job(1, JobKind::Push, state));
-            assert_eq!(flow.on_close(), CloseStep::ConfirmStopPush);
-        }
-    }
-
-    #[test]
-    fn closing_doesnt_ask_about_a_push_that_ended_or_a_fetch() {
-        let mut flow = QuitFlow::default();
-        flow.record(job(1, JobKind::Push, JobState::Running));
-        flow.record(job(1, JobKind::Push, JobState::Done(Ok(()))));
-        flow.record(job(2, JobKind::Fetch, JobState::Running));
-        assert_eq!(flow.on_close(), CloseStep::Quit);
-    }
-
-    #[test]
-    fn closing_doesnt_ask_about_a_local_write_job_until_a_quit_is_waiting_on_it() {
-        let mut flow = QuitFlow::default();
-        flow.record(job(1, switch(), JobState::Running));
-        assert_eq!(flow.on_close(), CloseStep::Quit);
-        assert!(flow.waiting_on().is_none());
-
-        flow.quit_sent = true;
-        assert_eq!(flow.on_close(), CloseStep::ConfirmForceQuit);
-        assert_eq!(flow.waiting_on().unwrap().id, JobId::new(1));
-    }
-
-    #[test]
-    fn a_quit_waits_on_local_write_jobs_in_order_and_never_on_a_network_job() {
-        let mut flow = QuitFlow {
-            quit_sent: true,
-            ..Default::default()
-        };
-        flow.record(job(1, JobKind::Fetch, JobState::Running));
-        assert!(flow.waiting_on().is_none());
-
-        flow.record(job(2, switch(), JobState::Running));
-        flow.record(job(3, switch(), JobState::Queued));
-        assert_eq!(flow.waiting_on().unwrap().id, JobId::new(2));
-        flow.record(job(2, switch(), JobState::Done(Ok(()))));
-        assert_eq!(flow.waiting_on().unwrap().id, JobId::new(3));
-    }
-}
+mod tests;
