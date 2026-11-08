@@ -7,10 +7,10 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cairn_repo::{ChangesSnapshot, Generation, Head, Intent, Snapshot};
-use common::{Harness, Release, Seen, git, open, slash, small_fixture_clone, touch};
+use common::{Harness, Seen, git, open, slash, small_fixture_clone, touch};
 
 #[test]
 fn a_git_switch_run_outside_the_service_is_followed_by_a_refs_snapshot() {
@@ -32,6 +32,9 @@ fn a_git_switch_run_outside_the_service_is_followed_by_a_refs_snapshot() {
     });
 }
 
+// Unix only: on Windows a CLI read isn't stopped (see `read` in `src/status.rs`), so the
+// newer read waits behind the blocked one.
+#[cfg(unix)]
 #[test]
 fn a_newer_status_read_stops_the_running_one_instead_of_waiting_for_it() {
     let (dir, repo) = small_fixture_clone();
@@ -53,12 +56,12 @@ fn a_newer_status_read_stops_the_running_one_instead_of_waiting_for_it() {
     );
 
     let harness = Harness::start();
-    let _release = Release(&release);
+    let _release = common::Release(&release);
     harness.service.send(Intent::Open(repo.clone()));
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while !started.exists() {
         assert!(
-            Instant::now() < deadline,
+            std::time::Instant::now() < deadline,
             "the first status read never ran the filter"
         );
         std::thread::sleep(Duration::from_millis(20));
