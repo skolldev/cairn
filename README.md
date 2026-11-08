@@ -12,3 +12,7 @@ cargo run -p cairn-app -- ~/cairn-fixtures/ripgrep
 ```
 
 `RUST_LOG=info,cairn_repo=debug` shows each Read Job and when its Snapshot is shown.
+
+## Developing
+
+`scripts/install-hooks.sh` runs fmt and clippy before each commit, in this clone and its worktrees.

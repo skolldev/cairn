@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues live in GitHub Issues for skolldev/cairn, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Before any `gh` call or a ticket's first commit, read `docs/agents/issue-tracker.md`: issues live in GitHub Issues for skolldev/cairn, with a branch per ticket.
 
 ### Triage labels
 
