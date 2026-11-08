@@ -13,12 +13,14 @@ use std::time::Duration;
 use cairn_repo::{Head, Intent, Oid, RefsSnapshot, Snapshot};
 use common::{
     Harness, Release, Seen, SlowRemote, git, install_slow_clean_filter, open, rev_list_order,
-    slow_remote, wait_for_file, wait_for_release, write_commit,
+    slow_remote, wait_for_file, wait_for_release,
 };
 
 /// A repository whose next walk blocks in the slow remote until `release` exists. The ref
-/// `lazy` points at a local commit whose parent only the remote has, and the repository is a
-/// partial clone, so `git rev-list --all` fetches the parent when it gets there.
+/// `refs/held/walk` points at a local tag of a commit only the remote has, and the repository
+/// is a partial clone, so `git rev-list --all` fetches the commit to peel the tag. Refs reads
+/// list only branches and tags, so they never touch it. A tag and not a commit's missing parent,
+/// because newer git no longer fetches a parent during a walk (`docs/git-versions.md`).
 fn held_walk() -> SlowRemote {
     let f = slow_remote();
     git(
@@ -26,16 +28,17 @@ fn held_walk() -> SlowRemote {
         &["config", "uploadpack.allowAnySHA1InWant", "true"],
     );
     git(&f.remote, &["config", "uploadpack.allowFilter", "true"]);
-    let tree = git(&f.repo, &["rev-parse", "HEAD^{tree}"]);
-    let child = write_commit(
-        &f.repo,
-        f.dir.path(),
-        tree.trim(),
-        &[&f.new],
-        1_700_000_000,
-        "needs the remote",
+    let tag = format!(
+        "object {}\ntype commit\ntag held\ntagger Cairn Test <test@cairn.invalid> 1700000000 +0000\n\nneeds the remote\n",
+        f.new
     );
-    git(&f.repo, &["update-ref", "refs/heads/lazy", &child]);
+    let file = f.dir.path().join("tag-object");
+    std::fs::write(&file, tag).unwrap();
+    let tag = git(
+        &f.repo,
+        &["hash-object", "-t", "tag", "-w", file.to_str().unwrap()],
+    );
+    git(&f.repo, &["update-ref", "refs/held/walk", tag.trim()]);
     git(&f.repo, &["config", "core.repositoryFormatVersion", "1"]);
     git(&f.repo, &["config", "extensions.partialClone", "origin"]);
     git(&f.repo, &["config", "remote.origin.promisor", "true"]);
@@ -97,12 +100,14 @@ fn a_long_walk_doesnt_delay_an_interactive_read_even_with_a_worker_already_busy(
     let walk = harness.service.walk_history();
     wait_for_wrapper_runs(&f.log, 1);
 
-    // Only the first read to run the filter blocks: status and Unstaged both can.
+    // Only the first read to run the filter blocks. Status and Unstaged can both run it at once,
+    // so the first is decided by `mkdir`, which only one of them can win: a test-and-touch let
+    // both through, and that held both Interactive workers with the walk nowhere near them.
     install_slow_clean_filter(
         &f.repo,
         f.dir.path(),
         &format!(
-            "if [ ! -f '{started}' ]; then\ntouch '{started}'\n{wait}fi\n",
+            "if mkdir '{started}' 2>/dev/null; then\n{wait}fi\n",
             started = common::slash(&filter_started),
             wait = wait_for_release(&filter_release),
         ),
