@@ -58,6 +58,9 @@ fn a_save_makes_the_file_unstaged_and_restoring_it_clears_it() {
 fn the_sandbox_is_a_copy_and_leaves_the_fixture_alone() {
     let fixture = small_fixture();
     let before = git_read(&fixture, &["rev-parse", "HEAD"]);
+    // What the fixture's own diff holds already. A checkout made under another config can read as
+    // modified under this one: a Windows clone with `core.autocrlf`, on CI.
+    let diff_before = git_read(&fixture, &["diff", "--name-only"]);
     let sandbox = Sandbox::clone_of(&fixture).unwrap();
     assert_eq!(sandbox.fixture_head(), before.trim());
     sandbox.save(true).unwrap();
@@ -65,5 +68,5 @@ fn the_sandbox_is_a_copy_and_leaves_the_fixture_alone() {
         !git_read(&fixture, &["branch", "--list", BRANCH_A]).contains(BRANCH_A),
         "the branches are the copy's"
     );
-    assert!(git_read(&fixture, &["diff", "--name-only"]).is_empty());
+    assert_eq!(git_read(&fixture, &["diff", "--name-only"]), diff_before);
 }
