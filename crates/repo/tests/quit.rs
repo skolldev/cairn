@@ -151,13 +151,17 @@ fn nothing_new_starts_after_a_quit() {
     );
     assert_eq!(current_branch(&b.repo), "other");
 
-    let settled = seen.all.len();
     harness.service.send(Intent::Open(b.repo.clone()));
-    // Seen red: an Open that isn't ignored publishes refs within this window, as the `open`
-    // helper relies on.
-    std::thread::sleep(SETTLE);
-    seen.drain_now(&harness);
-    assert!(seen.all[settled..].is_empty(), "{:?}", &seen.all[settled..]);
+    // Marker: a later Switch would run if Open had restored the repository after Quit.
+    // Seen red: removing the quitting guard from Open makes this Job succeed.
+    harness.service.send(Intent::Switch("third".to_owned()));
+    seen.until(&harness, |s| s.nth(2).is_some_and(|j| is_ended(j)));
+    let refused = seen.nth(2).unwrap();
+    assert!(
+        matches!(&refused.state, JobState::Done(Err(error)) if error == "no repository is open"),
+        "{refused:?}"
+    );
+    assert_eq!(current_branch(&b.repo), "other");
 }
 
 #[test]
@@ -291,9 +295,16 @@ fn a_force_quit_completes_under_a_blocked_hook_and_leaves_the_queued_job_unstart
     let finished = seen.job(&switch_to("other")).unwrap();
     assert_eq!(finished.state, JobState::Done(Ok(())), "{finished:?}");
     // A queued Job starts as soon as the one before it ends, as
-    // `local_write_jobs_run_one_at_a_time_in_order_and_both_finish` shows. So it would have
-    // started within this window. Seen red: this fails if the queue isn't cleared.
-    std::thread::sleep(SETTLE);
+    // `local_write_jobs_run_one_at_a_time_in_order_and_both_finish` shows. Two reads give
+    // the worker more time than that Job would need to pass the closed StartGate.
+    // Seen red: without the queue clear, the third Job advances past Queued here.
+    for _ in 0..2 {
+        git_read(&b.repo, &["diff-files", "-z"]);
+        git_read(&b.repo, &["hash-object", "README.md"]);
+    }
+    seen.drain_now(&harness);
+    let queued = seen.job(&switch_to("third")).unwrap();
+    assert_eq!(queued.state, JobState::Queued, "{queued:?}");
     assert_eq!(
         std::fs::read_to_string(&b.log).unwrap(),
         "start other\nend other\n"
@@ -354,6 +365,71 @@ fn dropping_the_service_after_a_force_quit_doesnt_wait_for_a_blocked_hook() {
     wait.recv_timeout(Duration::from_secs(10))
         .expect("dropping the service waited for the blocked hook");
     assert!(!b.release.exists());
+}
+
+#[test]
+fn dropping_the_service_doesnt_wait_for_a_blocked_fetch() {
+    let f = slow_remote();
+    let harness = Harness::start();
+    let _release = Release(&f.release);
+    open(&harness, &f.repo);
+    harness.service.send(Intent::Fetch);
+    let mut seen = Seen::default();
+    wait_until_network_job_is_waiting(&mut seen, &harness, &JobKind::Fetch);
+
+    let (dropped, wait) = mpsc::channel();
+    std::thread::spawn(move || {
+        drop(harness);
+        let _ = dropped.send(());
+    });
+    // Seen red: without RepoService's drop-time Network stop, the blocked fetch keeps
+    // the Network queue's worker alive and this times out.
+    wait.recv_timeout(Duration::from_secs(10))
+        .expect("dropping the service waited for the blocked remote");
+    assert!(!f.release.exists(), "the remote wrapper was released");
+    assert_eq!(
+        git(&f.repo, &["rev-parse", &format!("origin/{}", f.branch)]).trim(),
+        f.old
+    );
+}
+
+#[test]
+fn dropping_the_service_waits_for_running_and_queued_local_write_jobs() {
+    let b = blocking_repo();
+    let harness = Harness::start();
+    let _release = Release(&b.release);
+    open(&harness, &b.repo);
+    let mut seen = Seen::default();
+    block_a_switch(&harness, &mut seen);
+    harness.service.send(Intent::Switch("third".to_owned()));
+    seen.until(&harness, |s| s.job(&switch_to("third")).is_some());
+
+    let (started, dropping) = mpsc::channel();
+    let (dropped, wait) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = started.send(());
+        drop(harness);
+        let _ = dropped.send(());
+    });
+    dropping.recv_timeout(Duration::from_secs(10)).unwrap();
+    // The hook is still blocked, so a normal drop must wait for both Jobs. Control:
+    // `dropping_the_service_after_a_force_quit_doesnt_wait_for_a_blocked_hook` returns.
+    // Seen red: abandoning the Local write queue lets this drop within the window.
+    assert!(
+        wait.recv_timeout(SETTLE).is_err(),
+        "the service returned while its Local write Job was blocked"
+    );
+    assert!(!b.release.exists());
+
+    std::fs::write(&b.release, "").unwrap();
+    wait.recv_timeout(Duration::from_secs(10))
+        .expect("the service did not finish dropping after the hook was released");
+    assert_eq!(current_branch(&b.repo), "third");
+    assert_eq!(
+        std::fs::read_to_string(&b.log).unwrap(),
+        "start other\nend other\nstart third\nend third\n"
+    );
+    assert!(!b.repo.join(".git/index.lock").exists());
 }
 
 /// The race a queue can't see: the worker has taken the Job off the queue, and git hasn't

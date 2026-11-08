@@ -101,6 +101,7 @@ fn section(title: &'static str, rows: Option<Result<Vec<AnyElement>, String>>) -
 
 fn row(letter: char, path: String) -> AnyElement {
     div()
+        .debug_selector(|| format!("status:{letter}:{path}"))
         .flex()
         .gap(px(8.))
         .child(

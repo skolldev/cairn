@@ -1,5 +1,5 @@
-//! The close flow, driven as a user drives it: a close request on the real window, the
-//! real Repo service behind it, real git in a temp repository, and answers to the prompts.
+//! The real window, Repo service and git in a temp repository: opening a repo, closing the
+//! window, and answering its prompts.
 //! The test platform's `quit` does nothing, so each test watches the exit hook instead.
 
 use std::cell::Cell;
@@ -189,9 +189,16 @@ impl App<'_> {
         }
     }
 
-    /// Runs the app for [`SETTLE`], for when nothing marks what must not happen.
-    fn settle(&mut self) {
+    /// Runs the app while two reads of the repository finish, and for at least [`SETTLE`].
+    /// A wrong Quit still needs the Network queue and Bridge to publish and show its exit.
+    fn settle(&mut self, repo: &Path) {
         let end = Instant::now() + SETTLE;
+        for _ in 0..2 {
+            git(repo, &["diff-files", "-z"]);
+            git(repo, &["hash-object", ".git/HEAD"]);
+            self.cx.executor().advance_clock(Duration::from_millis(100));
+            self.cx.run_until_parked();
+        }
         self.until("the wait ends", |_| Instant::now() >= end);
     }
 
@@ -245,9 +252,9 @@ impl App<'_> {
         self.until("the banner is up", |app| app.banner_shown());
     }
 
-    /// Fails if the app exits within [`SETTLE`].
-    fn assert_stays_open(&mut self, why: &str) {
-        self.settle();
+    /// Fails if the app exits during the work-sized window.
+    fn assert_stays_open(&mut self, repo: &Path, why: &str) {
+        self.settle(repo);
         assert!(!self.exited.get(), "{why}");
     }
 }
@@ -262,6 +269,26 @@ fn closing_with_nothing_running_exits_without_asking(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn opening_a_repo_shows_its_refs_and_status_in_the_window(cx: &mut TestAppContext) {
+    let f = fixture();
+    std::fs::write(f.repo.join("untracked-marker.txt"), "new\n").unwrap();
+    let mut app = open(cx, Some(&f.repo));
+
+    app.until("the branch and untracked file are rendered", |app| {
+        // The test window draws only on resize. These selectors belong to rendered rows,
+        // so seeing both proves that the Bridge delivered both kinds of Snapshot. Seen
+        // red: dropping either Refs or Untracked in Bridge::apply times out here.
+        app.cx.simulate_resize(size(px(901.), px(701.)));
+        app.cx.run_until_parked();
+        app.cx.debug_bounds("refs:other").is_some()
+            && app
+                .cx
+                .debug_bounds("status:?:untracked-marker.txt")
+                .is_some()
+    });
+}
+
+#[gpui::test]
 fn closing_under_a_blocked_hook_waits_with_the_banner_and_asks_nothing(cx: &mut TestAppContext) {
     let f = fixture();
     let mut app = open(cx, Some(&f.repo));
@@ -269,7 +296,7 @@ fn closing_under_a_blocked_hook_waits_with_the_banner_and_asks_nothing(cx: &mut 
     app.quit_under_a_blocked_hook(&f);
     assert_eq!(app.prompt(), None);
     // Seen red: a window that closes without the Quit waiting sets the flag in this window.
-    app.assert_stays_open("exited under a blocked hook");
+    app.assert_stays_open(&f.repo, "exited under a blocked hook");
 
     f.release();
     app.until("the app exits", |app| app.exited.get());
@@ -287,7 +314,7 @@ fn a_second_close_under_a_blocked_hook_asks_before_force_quit(cx: &mut TestAppCo
         Some("Force quit while git is running?")
     );
     // Seen red: a Force quit sent before the answer exits within this window.
-    app.assert_stays_open("force quit without an answer");
+    app.assert_stays_open(&f.repo, "force quit without an answer");
 
     app.answer("Force quit");
     app.until("the app exits", |app| app.exited.get());
@@ -328,7 +355,7 @@ fn keep_waiting_leaves_the_quit_waiting_for_the_hook(cx: &mut TestAppContext) {
     app.answer("Keep waiting");
     assert_eq!(app.prompt(), None);
     // Seen red: taking any answer as a yes exits within this window.
-    app.assert_stays_open("force quit after Keep waiting");
+    app.assert_stays_open(&f.repo, "force quit after Keep waiting");
 
     // The question can be asked again, and the Quit still finishes on its own.
     app.close();
@@ -362,7 +389,7 @@ fn closing_during_a_push_asks_first_and_keep_pushing_leaves_it_running(cx: &mut 
     assert_eq!(app.prompt().as_deref(), Some("A push is running"));
     app.answer("Keep pushing");
     // Seen red: a Quit sent regardless stops the push and exits within this window.
-    app.assert_stays_open("exited after Keep pushing");
+    app.assert_stays_open(&f.repo, "exited after Keep pushing");
 
     f.release();
     app.until("the push reaches the remote", |_| f.remote_has_the_push());

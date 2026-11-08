@@ -103,6 +103,7 @@ fn section(title: &'static str, rows: Vec<AnyElement>) -> impl IntoElement {
 
 fn row(name: String, detail: String) -> AnyElement {
     div()
+        .debug_selector(|| format!("refs:{name}"))
         .flex()
         .gap(px(12.))
         .child(div().child(name))

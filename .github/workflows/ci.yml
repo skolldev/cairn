@@ -67,6 +67,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: test
         run: cargo test --workspace --locked --no-fail-fast
+      - name: No test hooks left running
+        if: ${{ always() && runner.os != 'Windows' }}
+        run: bash ./scripts/check-test-processes.sh
 
   # The oldest supported git is a tested claim: every test that runs git runs against
   # git 2.23 itself. Linux, because building an old git from source is quickest there; the
@@ -110,3 +113,6 @@ jobs:
         run: |
           git --version
           cargo test -p cairn-write -p cairn-repo --locked --no-fail-fast
+      - name: No test hooks left running
+        if: ${{ always() }}
+        run: bash ./scripts/check-test-processes.sh
