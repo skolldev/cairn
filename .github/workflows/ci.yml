@@ -37,6 +37,93 @@ jobs:
       - name: Only cairn-write starts processes
         run: ./scripts/check-single-git-spawn.sh
 
+  # Rules and tools for the tests themselves, which need nothing of Cairn's built. Each script's
+  # self-test shows it fails when it should.
+  test-tooling:
+    name: test gates and tooling
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Guard self-test (deliberate violations must fail)
+        run: ./scripts/test-check-test-gates.sh
+      - name: No check-then-create gates in tests
+        run: ./scripts/check-test-gates.sh
+      - name: seen-red.py self-test
+        run: ./scripts/test-seen-red.sh
+      - name: Cache the small fixture
+        uses: actions/cache@v4
+        with:
+          path: ~/cairn-fixtures/ripgrep
+          key: fixture-ripgrep-91f5d22ef48bde459d90a8c7dbeab416e97d0f2b-${{ runner.os }}
+      - name: Fixtures
+        run: |
+          ./scripts/fixtures.sh small
+          ./scripts/fixtures.sh filters
+      - name: Fixture check self-test
+        run: ./scripts/test-fixtures-check.sh
+      - name: Fixtures are what their names claim
+        run: ./scripts/fixtures.sh check
+
+  # A slowdown shows up against this commit's base, benched by the same runner in the same job,
+  # because numbers from different runners can't be compared. It's a signal that a change got
+  # slower, and never evidence for a Budget (CODING_STANDARDS.md). The kernel fixture isn't
+  # here, so those benches skip and say so.
+  benches:
+    name: bench regressions (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      BENCHES: -p cairn-write -p cairn-repo --bench runner --bench reads --locked
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache the small fixture
+        uses: actions/cache@v4
+        with:
+          path: ~/cairn-fixtures/ripgrep
+          key: fixture-ripgrep-91f5d22ef48bde459d90a8c7dbeab416e97d0f2b-${{ runner.os }}
+      - name: Small fixture
+        shell: bash
+        run: ./scripts/fixtures.sh small
+      - name: Self-test (deliberate regressions must fail)
+        shell: bash
+        run: ./scripts/test-check-bench-regressions.sh
+      # main compares with what it was before this push, and a branch with where it left
+      # main, or its own parent if it hasn't left.
+      - name: Bench the base
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$GITHUB_REF_NAME" = main ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            base="$BEFORE"
+          else
+            base="$(git merge-base origin/main HEAD)"
+            [ "$base" != "$(git rev-parse HEAD)" ] || base="$(git rev-parse HEAD~1)"
+          fi
+          git worktree add --quiet --detach ../cairn-base "$base"
+          if [ -f ../cairn-base/crates/repo/benches/reads.rs ]; then
+            (cd ../cairn-base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
+              cargo bench $BENCHES -- --save-baseline base)
+            echo "COMPARE=true" >> "$GITHUB_ENV"
+          else
+            echo "$base has no benches yet, so there is nothing to compare with"
+          fi
+      - name: Bench this commit
+        shell: bash
+        run: cargo bench $BENCHES -- --save-baseline head
+      - name: Compare
+        if: ${{ env.COMPARE == 'true' }}
+        shell: bash
+        run: ./scripts/check-bench-regressions.sh target/criterion
+
   check:
     name: fmt, clippy, test (${{ matrix.os }})
     strategy:

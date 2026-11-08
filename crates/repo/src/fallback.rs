@@ -102,6 +102,20 @@ fn run(path: &Path, stop: &Stop, args: &[&str]) -> Result<Output, String> {
         .map_err(|e| e.to_string())
 }
 
+/// History from all refs and HEAD. With no commit-graph this is the walk's engine rather
+/// than a fallback (#13). `--date-order` overrides `--topo-order` and implies it.
+pub(super) fn walk(path: &Path, stop: &Stop) -> Result<Vec<Oid>, String> {
+    let output = run(
+        path,
+        stop,
+        &["rev-list", "--topo-order", "--date-order", "--all"],
+    )?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(Oid::from_hex)
+        .collect())
+}
+
 pub(super) fn untracked(path: &Path, stop: &Stop) -> Result<Vec<RepoPath>, String> {
     let output = run(path, stop, &["status", "--porcelain=v2", "-z"])?;
     Ok(output

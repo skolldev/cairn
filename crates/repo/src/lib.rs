@@ -15,15 +15,17 @@ mod watch;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 pub use cairn_core::{ChangeKind, FileChange, Head, Oid, RefEntry, RefName, Refs, RepoPath, Stash};
 
 use cairn_write::{StartGate, Stop};
-use scheduler::{JobContext, JobQueue, Lane, Running, Slot};
+use scheduler::{JobContext, JobQueue, Lane, Qos, Running, Slot};
 
 /// Interactive lane workers. Enough for the Read Jobs one click starts to run side by side.
 const INTERACTIVE_THREADS: usize = 2;
+/// Background lane workers. One history walk at a time is all it has to run so far.
+const BACKGROUND_THREADS: usize = 1;
 
 /// Which submission of a Slot a Snapshot answers. Within a Slot, a larger generation is
 /// always the newer answer, so a smaller one is stale. Generations of different Slots are
@@ -186,8 +188,9 @@ pub struct RepoService {
     /// Network Jobs that haven't ended, so a Stop Intent can reach them.
     network_jobs: Arc<Mutex<BTreeMap<JobId, Arc<NetworkJob>>>>,
     reads: Arc<Reads>,
-    // Dropping the lane joins its threads. Kept as a field for that, not read.
+    // Dropping a lane joins its threads. Kept as fields for that, not read.
     _interactive: Lane,
+    _background: Lane,
     next_job: AtomicU64,
     /// Whether a Quit or a Force quit has begun. Held for the whole of each Intent, so no
     /// Job can be queued behind the markers a Quit waits for.
@@ -200,6 +203,8 @@ struct Reads {
     staged_slot: Slot,
     unstaged_slot: Slot,
     untracked_slot: Slot,
+    /// In the Background lane, unlike every other Slot.
+    history_slot: Slot,
     outbox: Arc<Outbox>,
     /// The repository the last Open named.
     open: Mutex<Option<PathBuf>>,
@@ -210,7 +215,8 @@ impl RepoService {
     /// Starts the service. `wake` is called from a service thread when Snapshots become
     /// ready to drain, at most once until the next [`drain`](Self::drain).
     pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Self {
-        let interactive = Lane::new("interactive", INTERACTIVE_THREADS);
+        let interactive = Lane::new("interactive", INTERACTIVE_THREADS, Qos::UserInitiated);
+        let background = Lane::new("background", BACKGROUND_THREADS, Qos::Utility);
         Self {
             watcher: Mutex::new(None),
             writes: JobQueue::new("local-write"),
@@ -222,6 +228,7 @@ impl RepoService {
                 staged_slot: Slot::new("staged", &interactive),
                 unstaged_slot: Slot::new("unstaged", &interactive),
                 untracked_slot: Slot::new("untracked", &interactive),
+                history_slot: Slot::new("history", &background),
                 outbox: Arc::new(Outbox {
                     pending: Mutex::new(Pending::default()),
                     wake: Box::new(wake),
@@ -230,6 +237,7 @@ impl RepoService {
                 read_mode: Mutex::new(Arc::new(fallback::ReadMode::default())),
             }),
             _interactive: interactive,
+            _background: background,
             next_job: AtomicU64::new(1),
             quitting: Mutex::new(false),
         }
@@ -267,6 +275,9 @@ impl RepoService {
                 // no longer open, which `refresh_if_open` ignores.
                 let watcher = watch::start(&path, Arc::downgrade(&self.reads));
                 *self.watcher.lock().unwrap() = watcher;
+                // A walk of the repository that was open is no longer wanted. Nothing
+                // starts a new one: nothing shows history yet.
+                self.reads.history_slot.drop_jobs();
                 self.reads.refresh(&path, Running::Supersede, &span);
             }
             Intent::Switch(branch) => {
@@ -336,6 +347,39 @@ impl RepoService {
         for job in jobs {
             job.stop(&self.network_jobs);
         }
+    }
+
+    /// Walks the open repository's history from all refs and HEAD, in the order of `git
+    /// rev-list --topo-order --date-order --all`, as a Read Job in the Background lane: through
+    /// gix when the repository has a commit-graph and `git rev-list` when it doesn't. gix may
+    /// order commits of equal date differently from git.
+    ///
+    /// The answer comes back on the returned channel rather than as a Snapshot, until the
+    /// graph Snapshot replaces this in Phase 2 (ADR 0006). Nothing starts a walk yet. The
+    /// channel closes without an answer if the walk is Superseded by another walk or an
+    /// Open, or dropped by a Quit.
+    pub fn walk_history(&self) -> mpsc::Receiver<Result<Vec<Oid>, String>> {
+        let (answer, answered) = mpsc::channel();
+        // Held across the submit, as `Reads::close` requires.
+        let open = self.reads.open.lock().unwrap();
+        let Some(path) = open.clone() else {
+            let _ = answer.send(Err("no repository is open".to_owned()));
+            return answered;
+        };
+        let mode = self.reads.read_mode.lock().unwrap().clone();
+        let span = tracing::info_span!("walk_history", path = %path.display());
+        let _entered = span.enter();
+        self.reads
+            .history_slot
+            .submit(Running::Supersede, move |job| {
+                let walked = read_history(&path, job, &mode);
+                if job.is_current() {
+                    let _ = answer.send(walked);
+                } else {
+                    tracing::debug!("superseded while running; result dropped");
+                }
+            });
+        answered
     }
 
     /// Takes the Snapshots published since the last drain: the newest one per Slot, then
@@ -457,6 +501,8 @@ impl Drop for RepoService {
     /// network. The fields then drop in order.
     fn drop(&mut self) {
         self.stop_network_jobs();
+        // A walk can take seconds, and dropping the Background lane waits for it.
+        self.reads.history_slot.drop_jobs();
     }
 }
 
@@ -577,6 +623,7 @@ impl Reads {
             &self.staged_slot,
             &self.unstaged_slot,
             &self.untracked_slot,
+            &self.history_slot,
         ] {
             slot.drop_jobs();
         }
@@ -683,6 +730,26 @@ fn read_refs(path: &Path, job: &JobContext, mode: &fallback::ReadMode) -> Result
         cairn_read::Repo::open(path)
             .and_then(|repo| repo.refs())
             .map_err(|e| e.message().to_owned())
+    })
+}
+
+/// Walks history with the engine that passed for this repository (#13). No commit-graph
+/// means `git rev-list`, which is not a gix failure. A gix error, a broken commit-graph's
+/// included, retries through git like any other read.
+fn read_history(
+    path: &Path,
+    job: &JobContext,
+    mode: &fallback::ReadMode,
+) -> Result<Vec<Oid>, String> {
+    let message = |e: cairn_read::ReadError| e.message().to_owned();
+    let opened = cairn_read::Repo::open(path)
+        .and_then(|repo| repo.has_commit_graph().map(|graph| (repo, graph)))
+        .map_err(message);
+    if let Ok((_, false)) = opened {
+        return fallback::walk(path, job.cli_stop());
+    }
+    mode.read(path, job, fallback::walk, || {
+        opened?.0.walk(job.gix_interrupt()).map_err(message)
     })
 }
 

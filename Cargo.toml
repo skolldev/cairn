@@ -32,6 +32,8 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features =
 gpui-component = { version = "=0.9.0", default-features = false }
 
 async-channel = "2.5.0"
+# No plots: CI reads the estimates (scripts/check-bench-regressions.sh).
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 # cairn-app's macOS terminate guard: the version gpui-pre-macos uses.
 objc2 = "=0.6.5"
 keyring = "4.2.0"
