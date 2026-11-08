@@ -10,6 +10,7 @@ use std::sync::Arc;
 use cairn_repo::{Generation, RepoService, Snapshot};
 use gpui::{Context, Entity, Window};
 
+use crate::quit::QuitView;
 use crate::refs_view::RefsView;
 use crate::status_view::StatusView;
 
@@ -17,6 +18,7 @@ pub struct Bridge {
     service: Arc<RepoService>,
     refs: Entity<RefsView>,
     status: Entity<StatusView>,
+    quit: Entity<QuitView>,
     /// The newest generation shown, per Slot. Generations of different Slots are unrelated.
     refs_shown: Option<Generation>,
     staged_shown: Option<Generation>,
@@ -32,6 +34,7 @@ impl Bridge {
         woken: async_channel::Receiver<()>,
         refs: Entity<RefsView>,
         status: Entity<StatusView>,
+        quit: Entity<QuitView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -50,6 +53,7 @@ impl Bridge {
             service,
             refs,
             status,
+            quit,
             refs_shown: None,
             staged_shown: None,
             unstaged_shown: None,
@@ -115,8 +119,11 @@ impl Bridge {
                         });
                     }
                 }
-                // The shell has no Job view yet, and nothing in it sends a Local write Intent.
-                Snapshot::Job(_) => {}
+                // The shell shows Jobs only while a Quit waits on them.
+                Snapshot::Job(job) => {
+                    self.quit.update(cx, |view, cx| view.record_job(job, cx));
+                }
+                Snapshot::Quit => cx.quit(),
                 Snapshot::Untracked(untracked) => {
                     if newer(
                         &mut self.untracked_shown,

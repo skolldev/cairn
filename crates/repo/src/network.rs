@@ -1,4 +1,4 @@
-//! The fetch Network Job.
+//! The Network Jobs: fetch and push.
 
 use std::path::Path;
 
@@ -17,19 +17,34 @@ use crate::JobState;
 /// is 2.37 or newer. So a repo with several remotes, or any repo on older git, shows no
 /// progress reports, though it still shows everything else git and the remote write.
 pub(crate) fn fetch(workdir: &Path, stop: &Stop, output: &mut dyn FnMut(&[u8])) -> JobState {
-    let git = match Git::shared() {
-        Ok(git) => git,
-        Err(e) => return JobState::Done(Err(e.to_string())),
-    };
-    let invocation = Invocation::new(JobClass::Network, workdir)
-        .args([
+    run(
+        workdir,
+        &[
             "-c",
             "fetch.writeCommitGraph=true",
             "fetch",
             "--all",
             "--prune",
             "--progress",
-        ])
+        ],
+        stop,
+        output,
+    )
+}
+
+/// `git push --progress`, which pushes as the user's own `git push` would. `output` sees
+/// what git and the remote write as they write it, and `stop` kills git.
+pub(crate) fn push(workdir: &Path, stop: &Stop, output: &mut dyn FnMut(&[u8])) -> JobState {
+    run(workdir, &["push", "--progress"], stop, output)
+}
+
+fn run(workdir: &Path, args: &[&str], stop: &Stop, output: &mut dyn FnMut(&[u8])) -> JobState {
+    let git = match Git::shared() {
+        Ok(git) => git,
+        Err(e) => return JobState::Done(Err(e.to_string())),
+    };
+    let invocation = Invocation::new(JobClass::Network, workdir)
+        .args(args.iter().copied())
         .stop_on(stop);
     match git
         .run_streaming(&invocation, output)

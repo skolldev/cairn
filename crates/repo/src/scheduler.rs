@@ -222,6 +222,15 @@ impl Slot {
         generation
     }
 
+    /// Drops the pending Read Job and stops the running one, whose result is then dropped.
+    pub(crate) fn drop_jobs(&self) {
+        let mut state = self.0.state.lock().unwrap();
+        state.pending = None;
+        if let Some(stops) = &state.running {
+            stops.stop();
+        }
+    }
+
     fn start(&self, generation: Generation, stops: Stops, parent: tracing::Span, job: ReadJob) {
         let slot = self.clone();
         self.0.lane.push(Box::new(move || {
@@ -268,9 +277,11 @@ impl Slot {
 /// The Local write queue and the Network queue are one each, so they overlap each other
 /// but never themselves. Nothing here stops or Supersedes a Job (ADR 0002): dropping the
 /// queue waits for every queued Job to finish, so a Network Job must be stopped first.
+/// Only a Force quit gets out of that wait, through [`abandon`](Self::abandon).
 pub(crate) struct JobQueue {
     shared: Arc<LaneShared>,
     worker: Option<JoinHandle<()>>,
+    abandoned: AtomicBool,
 }
 
 impl JobQueue {
@@ -290,6 +301,7 @@ impl JobQueue {
         Self {
             shared,
             worker: Some(worker),
+            abandoned: AtomicBool::new(false),
         }
     }
 
@@ -297,6 +309,13 @@ impl JobQueue {
     pub(crate) fn push(&self, job: impl FnOnce() + Send + 'static) {
         self.shared.queue.lock().unwrap().push_back(Box::new(job));
         self.shared.ready.notify_one();
+    }
+
+    /// Forgets the queued Jobs, which never start, and stops waiting for the running one:
+    /// it isn't killed, but dropping the queue no longer joins its thread.
+    pub(crate) fn abandon(&self) {
+        self.abandoned.store(true, Ordering::Release);
+        self.shared.queue.lock().unwrap().clear();
     }
 }
 
@@ -328,7 +347,9 @@ impl Drop for JobQueue {
     fn drop(&mut self) {
         self.shared.closing.store(true, Ordering::Release);
         self.shared.ready.notify_all();
-        if let Some(worker) = self.worker.take() {
+        if let Some(worker) = self.worker.take()
+            && !self.abandoned.load(Ordering::Acquire)
+        {
             let _ = worker.join();
         }
     }

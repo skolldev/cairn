@@ -329,3 +329,186 @@ impl Seen {
         })
     }
 }
+
+/// A bare "remote" cloned from the small fixture, whose `upload-pack` and `receive-pack` are
+/// slowed by a wrapper, a clone of it, and a commit on the remote that the clone hasn't
+/// fetched yet.
+pub struct SlowRemote {
+    pub dir: tempfile::TempDir,
+    pub remote: PathBuf,
+    pub repo: PathBuf,
+    pub branch: String,
+    /// The remote's branch tip before and after its new commit.
+    pub old: String,
+    pub new: String,
+    /// The wrapper waits for this file before it lets git on the remote run.
+    pub release: PathBuf,
+    /// One line per wrapper run.
+    pub log: PathBuf,
+}
+
+pub fn slow_remote() -> SlowRemote {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = dir.path().join("remote.git");
+    let repo = dir.path().join("copy");
+    let fixture = small_fixture();
+    let path = |p: &Path| p.to_str().unwrap().to_owned();
+    git(
+        dir.path(),
+        &[
+            "clone",
+            "--quiet",
+            "--bare",
+            &path(&fixture),
+            &path(&remote),
+        ],
+    );
+    git(
+        dir.path(),
+        &["clone", "--quiet", &path(&remote), &path(&repo)],
+    );
+    // A local clone copies the fixture's commit-graph. Remove it, so that one after the
+    // fetch is the fetch's.
+    let info = repo.join(".git/objects/info");
+    let _ = std::fs::remove_file(info.join("commit-graph"));
+    let _ = std::fs::remove_dir_all(info.join("commit-graphs"));
+    let branch = git(&repo, &["symbolic-ref", "--short", "HEAD"])
+        .trim()
+        .to_owned();
+    let old = git(&remote, &["rev-parse", &branch]).trim().to_owned();
+    let new = git(
+        &remote,
+        &[
+            "commit-tree",
+            &format!("{old}^{{tree}}"),
+            "-p",
+            &old,
+            "-m",
+            "on the remote",
+        ],
+    )
+    .trim()
+    .to_owned();
+    git(
+        &remote,
+        &["update-ref", &format!("refs/heads/{branch}"), &new],
+    );
+
+    let release = dir.path().join("release");
+    let log = dir.path().join("remote.log");
+    let wrapper = dir.path().join("slow-remote.sh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "echo run >> '{log}'\n\
+             echo 'slow remote waiting' >&2\n\
+             while [ ! -f '{release}' ]; do sleep 0.05; done\n\
+             exec git \"$@\"\n",
+            log = slash(&log),
+            release = slash(&release),
+        ),
+    )
+    .unwrap();
+    for (key, command) in [
+        ("remote.origin.uploadpack", "upload-pack"),
+        ("remote.origin.receivepack", "receive-pack"),
+    ] {
+        git(
+            &repo,
+            &[
+                "config",
+                key,
+                &format!("sh '{}' {command}", slash(&wrapper)),
+            ],
+        );
+    }
+    SlowRemote {
+        dir,
+        remote,
+        repo,
+        branch,
+        old,
+        new,
+        release,
+        log,
+    }
+}
+
+/// Waits until a Network Job of this kind is blocked in the slow remote, with its line
+/// already published.
+pub fn wait_until_network_job_is_waiting(seen: &mut Seen, harness: &Harness, kind: &JobKind) {
+    seen.until(harness, |s| {
+        s.job(kind).is_some_and(|j| {
+            j.state == JobState::Running && j.progress.as_deref() == Some("slow remote waiting")
+        })
+    });
+}
+
+/// Lock files git left anywhere under `.git`.
+pub fn lock_files(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            found.extend(lock_files(&path));
+        } else if path.extension().is_some_and(|e| e == "lock") {
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// Makes README.md stat-dirty and gives it a clean filter that runs `before` and then
+/// passes the content through. Each Unstaged read then runs the filter, through
+/// `hash-object`, inside the git it can stop.
+pub fn install_slow_clean_filter(repo: &Path, scratch: &Path, before: &str) {
+    let script = scratch.join("slow-clean.sh");
+    std::fs::write(&script, format!("{before}cat\n")).unwrap();
+    git(
+        repo,
+        &[
+            "config",
+            "filter.slow.clean",
+            &format!("sh '{}'", slash(&script)),
+        ],
+    );
+    std::fs::write(repo.join(".git/info/attributes"), "README.md filter=slow\n").unwrap();
+    touch(&repo.join("README.md"));
+}
+
+/// Waits until `path` exists, such as a file a hook or filter creates once it runs.
+pub fn wait_for_file(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "{} never appeared",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+impl SlowRemote {
+    /// Commits to a new branch `pushed`, which a plain `git push` then sends to a branch
+    /// the remote doesn't have. Returns git's line for the commit.
+    pub fn commit_to_push(&self) -> String {
+        git(&self.repo, &["config", "push.default", "current"]);
+        git(&self.repo, &["switch", "--quiet", "-c", "pushed"]);
+        git(
+            &self.repo,
+            &["commit", "--quiet", "--allow-empty", "-m", "to push"],
+        );
+        git(&self.repo, &["rev-parse", "HEAD"])
+    }
+
+    /// Whether the remote has the branch [`commit_to_push`](Self::commit_to_push) made.
+    pub fn remote_has_pushed(&self) -> bool {
+        !git_output(
+            &self.remote,
+            &["rev-parse", "--verify", "-q", "refs/heads/pushed"],
+        )
+        .stdout
+        .is_empty()
+    }
+}

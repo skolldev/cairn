@@ -4,13 +4,13 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use cairn_repo::{ChangesSnapshot, Generation, Head, Intent, Snapshot};
-use common::{Harness, Seen, git, open, slash, small_fixture_clone, touch};
+use common::{Harness, Seen, git, open, slash, small_fixture_clone};
 
 #[test]
 fn a_git_switch_run_outside_the_service_is_followed_by_a_refs_snapshot() {
@@ -39,7 +39,7 @@ fn a_newer_status_read_stops_the_running_one_instead_of_waiting_for_it() {
     let release = dir.path().join("release");
     // A clean filter that blocks the first time it runs, until `release` exists. The
     // Unstaged read runs it through `hash-object` for a stat-dirty file.
-    install_slow_clean_filter(
+    common::install_slow_clean_filter(
         &repo,
         dir.path(),
         &format!(
@@ -55,14 +55,7 @@ fn a_newer_status_read_stops_the_running_one_instead_of_waiting_for_it() {
     let harness = Harness::start();
     let _release = common::Release(&release);
     harness.service.send(Intent::Open(repo.clone()));
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while !started.exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the first status read never ran the filter"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    common::wait_for_file(&started);
 
     // The first read is blocked in its filter. A newer one must not wait for it: without
     // the stop, nothing publishes until `release` exists, and this drain times out.
@@ -90,7 +83,7 @@ fn quick_refreshes_of_one_slot_publish_only_newer_generations_and_never_a_stoppe
     let (dir, repo) = small_fixture_clone();
     // Every Unstaged read takes a while (git runs the filter many times per read), so most
     // newer reads arrive while one is running and stop it.
-    install_slow_clean_filter(&repo, dir.path(), "sleep 0.02\n");
+    common::install_slow_clean_filter(&repo, dir.path(), "sleep 0.02\n");
     let harness = Harness::start();
     // A fresh service numbers the Unstaged Slot's reads 1, 2, 3, ... one per Open. The
     // watcher may add refreshes of its own, so later generations can be larger.
@@ -178,7 +171,7 @@ fn status_keeps_publishing_while_external_changes_keep_arriving() {
     let (dir, repo) = small_fixture_clone();
     // Each Unstaged read takes far longer than the gap between two writes, so a new event
     // always arrives while a read runs.
-    install_slow_clean_filter(&repo, dir.path(), "sleep 0.02\n");
+    common::install_slow_clean_filter(&repo, dir.path(), "sleep 0.02\n");
     let harness = Harness::start();
     let opened = open(&harness, &repo);
 
@@ -193,24 +186,6 @@ fn status_keeps_publishing_while_external_changes_keep_arriving() {
                 .is_ok_and(|c| c.iter().any(|f| f.path.as_bytes() == b"FAQ.md"))
         })
     });
-}
-
-/// Makes README.md stat-dirty and gives it a clean filter that runs `before` and then
-/// passes the content through. Each Unstaged read then runs the filter, through
-/// `hash-object`, inside the git it can stop.
-fn install_slow_clean_filter(repo: &Path, scratch: &Path, before: &str) {
-    let script = scratch.join("slow-clean.sh");
-    std::fs::write(&script, format!("{before}cat\n")).unwrap();
-    git(
-        repo,
-        &[
-            "config",
-            "filter.slow.clean",
-            &format!("sh '{}'", slash(&script)),
-        ],
-    );
-    std::fs::write(repo.join(".git/info/attributes"), "README.md filter=slow\n").unwrap();
-    touch(&repo.join("README.md"));
 }
 
 /// The Unstaged Snapshots in `seen`, oldest first.
@@ -236,7 +211,7 @@ fn a_burst_shorter_than_a_read_costs_at_most_two_status_refreshes() {
     let (dir, repo) = small_fixture_clone();
     // ADR 0004's bound holds for a burst that ends while the first read runs. A longer one
     // is a stream, which publishes once per read. Slowing every read keeps this burst short.
-    install_slow_clean_filter(&repo, dir.path(), "sleep 0.05\n");
+    common::install_slow_clean_filter(&repo, dir.path(), "sleep 0.05\n");
     // Regular files only: a symlink or submodule entry can't be appended to.
     let files: Vec<String> = git(&repo, &["ls-files", "-s"])
         .lines()

@@ -7,6 +7,7 @@
 mod bridge;
 #[cfg(debug_assertions)]
 mod frame_overlay;
+mod quit;
 mod refs_view;
 mod status_view;
 
@@ -20,6 +21,7 @@ use gpui::{
 };
 
 use bridge::Bridge;
+use quit::QuitView;
 use refs_view::RefsView;
 use status_view::StatusView;
 
@@ -27,6 +29,7 @@ struct Workspace {
     service: Arc<RepoService>,
     refs: Entity<RefsView>,
     status: Entity<StatusView>,
+    quit: Entity<QuitView>,
     _bridge: Entity<Bridge>,
     #[cfg(debug_assertions)]
     frame_clock: Option<std::rc::Rc<frame_overlay::FrameClock>>,
@@ -41,12 +44,26 @@ impl Workspace {
         }));
         let refs = cx.new(|_| RefsView::default());
         let status = cx.new(|_| StatusView::default());
+        let quit = cx.new(|_| QuitView::new(service.clone()));
+        // The window stays open until the Repo service says it has quit, and the bridge then
+        // exits the app. Deferred, so that a question isn't asked inside the platform's callback.
+        window.on_window_should_close(cx, {
+            let quit = quit.clone();
+            move |window, cx| {
+                let quit = quit.clone();
+                window.defer(cx, move |window, cx| {
+                    quit.update(cx, |view, cx| view.close_requested(window, cx));
+                });
+                false
+            }
+        });
         let bridge = cx.new(|cx| {
             Bridge::new(
                 service.clone(),
                 woken,
                 refs.clone(),
                 status.clone(),
+                quit.clone(),
                 window,
                 cx,
             )
@@ -58,6 +75,7 @@ impl Workspace {
             service,
             refs,
             status,
+            quit,
             _bridge: bridge,
             #[cfg(debug_assertions)]
             frame_clock: frame_overlay::FrameClock::enabled().then(Default::default),
@@ -118,6 +136,7 @@ impl Render for Workspace {
             .text_color(rgb(0xe6edf3))
             .text_size(px(13.))
             .child(header)
+            .child(self.quit.clone())
             .child(
                 div()
                     .flex_1()

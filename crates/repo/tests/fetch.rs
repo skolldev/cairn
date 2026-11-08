@@ -7,104 +7,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use cairn_repo::{Intent, JobKind, JobState, RefsSnapshot, Snapshot};
-use common::{Harness, Release, Seen, git, git_read, install_blocking_hook, is_ended, open, slash};
-
-/// A bare "remote" cloned from the small fixture, a clone of it whose origin is slowed by
-/// a wrapper around `upload-pack`, and a commit on the remote that the clone hasn't
-/// fetched yet.
-struct Fixture {
-    dir: tempfile::TempDir,
-    repo: PathBuf,
-    branch: String,
-    /// The remote's branch tip before and after its new commit.
-    old: String,
-    new: String,
-    /// The wrapper waits for this file before it lets `upload-pack` run.
-    release: PathBuf,
-    /// One line per wrapper run.
-    log: PathBuf,
-}
-
-fn fixture() -> Fixture {
-    let dir = tempfile::tempdir().unwrap();
-    let remote = dir.path().join("remote.git");
-    let repo = dir.path().join("copy");
-    let fixture = common::small_fixture();
-    let path = |p: &Path| p.to_str().unwrap().to_owned();
-    git(
-        dir.path(),
-        &[
-            "clone",
-            "--quiet",
-            "--bare",
-            &path(&fixture),
-            &path(&remote),
-        ],
-    );
-    git(
-        dir.path(),
-        &["clone", "--quiet", &path(&remote), &path(&repo)],
-    );
-    // A local clone copies the fixture's commit-graph. Remove it, so that one after the
-    // fetch is the fetch's.
-    let info = repo.join(".git/objects/info");
-    let _ = std::fs::remove_file(info.join("commit-graph"));
-    let _ = std::fs::remove_dir_all(info.join("commit-graphs"));
-    let branch = git(&repo, &["symbolic-ref", "--short", "HEAD"])
-        .trim()
-        .to_owned();
-    let old = git(&remote, &["rev-parse", &branch]).trim().to_owned();
-    let new = git(
-        &remote,
-        &[
-            "commit-tree",
-            &format!("{old}^{{tree}}"),
-            "-p",
-            &old,
-            "-m",
-            "on the remote",
-        ],
-    )
-    .trim()
-    .to_owned();
-    git(
-        &remote,
-        &["update-ref", &format!("refs/heads/{branch}"), &new],
-    );
-
-    let release = dir.path().join("release");
-    let log = dir.path().join("upload-pack.log");
-    let wrapper = dir.path().join("slow-upload-pack.sh");
-    std::fs::write(
-        &wrapper,
-        format!(
-            "echo run >> '{log}'\n\
-             echo 'slow remote waiting' >&2\n\
-             while [ ! -f '{release}' ]; do sleep 0.05; done\n\
-             exec git upload-pack \"$@\"\n",
-            log = slash(&log),
-            release = slash(&release),
-        ),
-    )
-    .unwrap();
-    git(
-        &repo,
-        &[
-            "config",
-            "remote.origin.uploadpack",
-            &format!("sh '{}'", slash(&wrapper)),
-        ],
-    );
-    Fixture {
-        dir,
-        repo,
-        branch,
-        old,
-        new,
-        release,
-        log,
-    }
-}
+use common::{
+    Harness, Release, Seen, git, git_read, install_blocking_hook, is_ended, lock_files, open,
+    slow_remote, wait_until_network_job_is_waiting,
+};
 
 /// Where the remote-tracking branch `origin/<branch>` points in a refs Snapshot.
 fn tracking_tip(refs: &RefsSnapshot, branch: &str) -> String {
@@ -121,18 +27,9 @@ fn tracking_tip(refs: &RefsSnapshot, branch: &str) -> String {
         .to_owned()
 }
 
-/// Waits until the fetch is blocked in the slow remote, with its line already published.
-fn wait_until_fetch_is_waiting(seen: &mut Seen, harness: &Harness) {
-    seen.until(harness, |s| {
-        s.job(&JobKind::Fetch).is_some_and(|j| {
-            j.state == JobState::Running && j.progress.as_deref() == Some("slow remote waiting")
-        })
-    });
-}
-
 #[test]
 fn a_fetch_streams_progress_and_ends_with_a_refs_only_refresh() {
-    let f = fixture();
+    let f = slow_remote();
     let harness = Harness::start();
     let _release = Release(&f.release);
     let opened = open(&harness, &f.repo);
@@ -141,7 +38,7 @@ fn a_fetch_streams_progress_and_ends_with_a_refs_only_refresh() {
     harness.service.send(Intent::Fetch);
     let mut seen = Seen::default();
     // What the remote side writes is published while git is still running.
-    wait_until_fetch_is_waiting(&mut seen, &harness);
+    wait_until_network_job_is_waiting(&mut seen, &harness, &JobKind::Fetch);
 
     std::fs::write(&f.release, "").unwrap();
     // The watcher may publish refs read mid-fetch, such as after FETCH_HEAD is written, so
@@ -213,7 +110,7 @@ fn commit_graph_exists(repo: &Path) -> bool {
 
 #[test]
 fn a_local_write_job_completes_while_a_fetch_is_still_running() {
-    let f = fixture();
+    let f = slow_remote();
     git(&f.repo, &["branch", "other"]);
     let harness = Harness::start();
     let _release = Release(&f.release);
@@ -221,7 +118,7 @@ fn a_local_write_job_completes_while_a_fetch_is_still_running() {
 
     harness.service.send(Intent::Fetch);
     let mut seen = Seen::default();
-    wait_until_fetch_is_waiting(&mut seen, &harness);
+    wait_until_network_job_is_waiting(&mut seen, &harness, &JobKind::Fetch);
 
     harness.service.send(Intent::Switch("other".to_owned()));
     let switch = JobKind::Switch {
@@ -247,30 +144,16 @@ fn a_local_write_job_completes_while_a_fetch_is_still_running() {
     );
 }
 
-/// Lock files git left anywhere under `.git`.
-fn lock_files(dir: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            found.extend(lock_files(&path));
-        } else if path.extension().is_some_and(|e| e == "lock") {
-            found.push(path);
-        }
-    }
-    found
-}
-
 #[test]
 fn stopping_a_running_fetch_kills_git_refreshes_refs_and_leaves_the_repo_intact() {
-    let f = fixture();
+    let f = slow_remote();
     let harness = Harness::start();
     let _release = Release(&f.release);
     let opened = open(&harness, &f.repo);
 
     harness.service.send(Intent::Fetch);
     let mut seen = Seen::default();
-    wait_until_fetch_is_waiting(&mut seen, &harness);
+    wait_until_network_job_is_waiting(&mut seen, &harness, &JobKind::Fetch);
     let id = seen.job(&JobKind::Fetch).unwrap().id;
 
     harness.service.send(Intent::Stop(id));
@@ -312,14 +195,14 @@ fn stopping_a_running_fetch_kills_git_refreshes_refs_and_leaves_the_repo_intact(
 
 #[test]
 fn network_jobs_run_one_at_a_time_and_a_queued_one_stops_without_starting() {
-    let f = fixture();
+    let f = slow_remote();
     let harness = Harness::start();
     let _release = Release(&f.release);
     open(&harness, &f.repo);
 
     harness.service.send(Intent::Fetch);
     let mut seen = Seen::default();
-    wait_until_fetch_is_waiting(&mut seen, &harness);
+    wait_until_network_job_is_waiting(&mut seen, &harness, &JobKind::Fetch);
     harness.service.send(Intent::Fetch);
     seen.until(&harness, |s| s.nth(1).is_some());
     let second = seen.nth(1).unwrap().clone();
@@ -345,7 +228,7 @@ fn network_jobs_run_one_at_a_time_and_a_queued_one_stops_without_starting() {
 
 #[test]
 fn a_stop_for_a_local_write_job_leaves_it_running_to_completion() {
-    let f = fixture();
+    let f = slow_remote();
     git(&f.repo, &["branch", "other"]);
     let release = f.dir.path().join("hook-release");
     install_blocking_hook(&f.repo, &f.dir.path().join("hook.log"), &release);

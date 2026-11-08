@@ -5,7 +5,7 @@
 //! [`RepoService::drain`]. Jobs run on threads this crate owns, with no async runtime and
 //! no UI executor, so the whole service runs headless in tests.
 
-mod fetch;
+mod network;
 mod scheduler;
 mod status;
 mod switch;
@@ -13,7 +13,7 @@ mod watch;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub use cairn_core::{ChangeKind, FileChange, Head, Oid, RefEntry, RefName, Refs, RepoPath, Stash};
@@ -47,10 +47,24 @@ pub enum Intent {
     /// Fetch every remote, pruning what they deleted: `git fetch --all --prune`, run as a
     /// Network Job beside any Local write Job.
     Fetch,
+    /// Push as the user's own `git push` would: run as a Network Job beside any Local
+    /// write Job.
+    Push,
     /// Stop this Network Job. A queued one ends at once and never starts. A running one's
     /// git is killed, and refs are refreshed before it ends. Anything else, including a Local write Job or a Job that already ended, is
     /// left alone.
     Stop(JobId),
+    /// Quit: drop Read Jobs, stop Network Jobs and wait for every Local write Job, queued
+    /// ones included (ADR 0002). [`Snapshot::Quit`] follows once they have ended. A push
+    /// is stopped like any Network Job, so the caller confirms that first. A repository
+    /// can't be opened and no Job can start from here on.
+    Quit,
+    /// Quit without waiting: the only way out while a Local write Job runs. Whatever a
+    /// Quit would do, plus: [`Snapshot::Quit`] follows at once, Local write Jobs still
+    /// queued never start, and dropping the service no longer waits. A running Local write
+    /// Job isn't killed, but exiting the process closes its pipes and can kill it mid-step,
+    /// so the caller confirms this first.
+    ForceQuit,
 }
 
 /// An immutable view of repository state, shared by `Arc`. Each variant comes from its
@@ -66,6 +80,9 @@ pub enum Snapshot {
     Untracked(Arc<UntrackedSnapshot>),
     /// Where one Job stands: queued, running with its output so far, or done.
     Job(Arc<JobSnapshot>),
+    /// A Quit or a Force quit has finished: exit the process. Published once, and after the
+    /// final Snapshot of every Job the Quit waited for.
+    Quit,
 }
 
 /// Which Job a [`JobSnapshot`] is about. Jobs are numbered in the order they were asked
@@ -74,6 +91,11 @@ pub enum Snapshot {
 pub struct JobId(u64);
 
 impl JobId {
+    /// An id as a [`JobSnapshot`] would carry it, for tests of what `app` does with one.
+    pub fn new(id: u64) -> Self {
+        Self(id)
+    }
+
     pub fn get(self) -> u64 {
         self.0
     }
@@ -86,6 +108,18 @@ pub enum JobKind {
     Switch { branch: String },
     /// `git fetch --all --prune`.
     Fetch,
+    /// `git push`. Stopping one can leave the user's work unpublished, so `app` asks first.
+    Push,
+}
+
+impl JobKind {
+    /// Whether this is a Local write Job: one a Quit waits for, and that nothing stops.
+    pub fn is_local_write(&self) -> bool {
+        match self {
+            JobKind::Switch { .. } => true,
+            JobKind::Fetch | JobKind::Push => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,7 +176,7 @@ pub type UntrackedSnapshot = SlotSnapshot<Vec<RepoPath>>;
 /// The Repo service for one window. Dropping it stops its threads and drops queued Read Jobs.
 ///
 /// Dropping it stops every Network Job and waits for every queued Local write Job to
-/// finish, because those are never stopped.
+/// finish, because those are never stopped, unless a Force quit has given up on them.
 pub struct RepoService {
     /// Watches the open repository. Declared first so it stops before anything it
     /// refreshes is dropped.
@@ -157,6 +191,9 @@ pub struct RepoService {
     // Dropping the lane joins its threads. Kept as a field for that, not read.
     _interactive: Lane,
     next_job: AtomicU64,
+    /// Whether a Quit or a Force quit has begun. Held for the whole of each Intent, so no
+    /// Job can be queued behind the markers a Quit waits for.
+    quitting: Mutex<bool>,
 }
 
 /// The Read Job Slots and the outbox, shared with Local write Jobs so they can refresh.
@@ -193,11 +230,29 @@ impl RepoService {
             }),
             _interactive: interactive,
             next_job: AtomicU64::new(1),
+            quitting: Mutex::new(false),
         }
     }
 
     pub fn send(&self, intent: Intent) {
+        let mut quitting = self.quitting.lock().unwrap();
         match intent {
+            Intent::Quit => {
+                let _span = tracing::info_span!("intent", kind = "quit").entered();
+                if self.wind_down_once(&mut quitting) {
+                    self.publish_quit_once_queues_drain();
+                }
+            }
+            Intent::ForceQuit => {
+                let _span = tracing::info_span!("intent", kind = "force_quit").entered();
+                self.wind_down_once(&mut quitting);
+                self.writes.abandon();
+                self.network.abandon();
+                self.reads.outbox.publish_quit();
+            }
+            Intent::Open(_) if *quitting => {
+                tracing::debug!("quitting; open ignored");
+            }
             Intent::Open(path) => {
                 let span = tracing::info_span!("intent", kind = "open", path = %path.display());
                 let _entered = span.enter();
@@ -220,7 +275,11 @@ impl RepoService {
             }
             Intent::Fetch => {
                 let span = tracing::info_span!("intent", kind = "fetch");
-                self.network_job(JobKind::Fetch, span, fetch::fetch);
+                self.network_job(JobKind::Fetch, span, network::fetch);
+            }
+            Intent::Push => {
+                let span = tracing::info_span!("intent", kind = "push");
+                self.network_job(JobKind::Push, span, network::push);
             }
             Intent::Stop(id) => {
                 let _span = tracing::info_span!("intent", kind = "stop", job = id.0).entered();
@@ -233,8 +292,49 @@ impl RepoService {
         }
     }
 
+    /// What the first Quit or Force quit does: nothing new reads, refreshes or starts from
+    /// here on, and only Local write Jobs keep running. Returns whether this was the first.
+    fn wind_down_once(&self, quitting: &mut bool) -> bool {
+        if std::mem::replace(quitting, true) {
+            return false;
+        }
+        *self.watcher.lock().unwrap() = None;
+        self.reads.close();
+        self.stop_network_jobs();
+        true
+    }
+
+    /// Queues a marker behind the last Job of each queue. New Jobs can't follow them, so
+    /// the second marker to run means both queues have drained. Waiting for the Network
+    /// queue too gives a stopped git its time to remove its lock files.
+    fn publish_quit_once_queues_drain(&self) {
+        let remaining = Arc::new(AtomicUsize::new(2));
+        for queue in [&self.writes, &self.network] {
+            let remaining = remaining.clone();
+            let outbox = self.reads.outbox.clone();
+            queue.push(move || {
+                if remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    outbox.publish_quit();
+                }
+            });
+        }
+    }
+
+    fn stop_network_jobs(&self) {
+        let jobs: Vec<_> = self
+            .network_jobs
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        for job in jobs {
+            job.stop(&self.network_jobs);
+        }
+    }
+
     /// Takes the Snapshots published since the last drain: the newest one per Slot, then
-    /// the newest one per Job, in Job order.
+    /// the newest one per Job, in Job order, then the Quit, which follows every Job.
     pub fn drain(&self) -> Vec<Snapshot> {
         let mut pending = self.reads.outbox.pending.lock().unwrap();
         let reads = [
@@ -244,10 +344,12 @@ impl RepoService {
             pending.untracked.take().map(Snapshot::Untracked),
         ];
         let jobs = std::mem::take(&mut pending.jobs);
+        let quit = std::mem::take(&mut pending.quit).then_some(Snapshot::Quit);
         reads
             .into_iter()
             .flatten()
             .chain(jobs.into_values().map(Snapshot::Job))
+            .chain(quit)
             .collect()
     }
 
@@ -346,16 +448,7 @@ impl Drop for RepoService {
     /// Stops every Network Job, so that dropping the Network queue doesn't wait on the
     /// network. The fields then drop in order.
     fn drop(&mut self) {
-        let jobs: Vec<_> = self
-            .network_jobs
-            .lock()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect();
-        for job in jobs {
-            job.stop(&self.network_jobs);
-        }
+        self.stop_network_jobs();
     }
 }
 
@@ -466,6 +559,21 @@ impl Refresh {
 }
 
 impl Reads {
+    /// Drops every Read Job and keeps new ones from starting: with no repository open,
+    /// a finishing Job's refresh and a late watcher event are both skipped. New submissions
+    /// check `open` under its lock, so none can slip in after the Slots are emptied.
+    fn close(&self) {
+        *self.open.lock().unwrap() = None;
+        for slot in [
+            &self.refs_slot,
+            &self.staged_slot,
+            &self.unstaged_slot,
+            &self.untracked_slot,
+        ] {
+            slot.drop_jobs();
+        }
+    }
+
     /// Refreshes what a finished Job can change, unless an Open has named another
     /// repository since: that refresh would replace the newer repo's Snapshots in the
     /// shared Slots. Called before the Job publishes its outcome, so that by the time the
@@ -591,6 +699,10 @@ struct Pending {
     untracked: Latest<Vec<RepoPath>>,
     /// The newest Snapshot of each Job, by id.
     jobs: BTreeMap<JobId, Arc<JobSnapshot>>,
+    /// A Quit has finished and the UI hasn't drained that yet.
+    quit: bool,
+    /// A Quit has finished: a Force quit and the Quit it overtook publish it only once.
+    quit_published: bool,
 }
 
 impl Pending {
@@ -600,6 +712,7 @@ impl Pending {
             && self.unstaged.pending.is_none()
             && self.untracked.pending.is_none()
             && self.jobs.is_empty()
+            && !self.quit
     }
 }
 
@@ -632,6 +745,22 @@ impl Outbox {
             let mut pending = self.pending.lock().unwrap();
             let was_empty = pending.is_empty();
             pending.jobs.insert(snapshot.id, snapshot);
+            was_empty
+        };
+        if was_empty {
+            (self.wake)();
+        }
+    }
+
+    /// Publishes that a Quit has finished, unless that has been published already.
+    fn publish_quit(&self) {
+        let was_empty = {
+            let mut pending = self.pending.lock().unwrap();
+            if std::mem::replace(&mut pending.quit_published, true) {
+                return;
+            }
+            let was_empty = pending.is_empty();
+            pending.quit = true;
             was_empty
         };
         if was_empty {
