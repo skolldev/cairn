@@ -15,6 +15,7 @@ mod untracked;
 
 use std::fmt;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
 pub use cairn_core::{Refs, RepoPath};
 
@@ -62,7 +63,8 @@ impl Repo {
 
     /// Untracked, unignored paths, sorted, as `git status` lists them. An all-untracked
     /// directory is one entry ending in `/` unless `status.showUntrackedFiles=all`.
-    pub fn untracked(&self) -> Result<Vec<RepoPath>, ReadError> {
-        untracked::read(&self.0.to_thread_local())
+    /// Setting `interrupt` ends the walk early with an error.
+    pub fn untracked(&self, interrupt: &AtomicBool) -> Result<Vec<RepoPath>, ReadError> {
+        untracked::read(&self.0.to_thread_local(), interrupt)
     }
 }

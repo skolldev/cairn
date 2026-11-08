@@ -1,5 +1,5 @@
-//! Stopping a Network Job through the runner: only Network invocations can be stopped, and
-//! stopping kills git together with everything it started.
+//! Stopping a Network Job or a Read Job through the runner: a Local write invocation can't
+//! be stopped (ADR 0002), and stopping kills git together with everything it started.
 
 mod common;
 
@@ -32,11 +32,22 @@ impl Drop for Release<'_> {
 
 #[test]
 fn stopping_a_network_invocation_kills_git_and_what_it_started() {
+    stopping_kills_git_and_what_it_started(JobClass::Network);
+}
+
+/// A Read Job is stopped when a newer one Supersedes it. It takes no lock, so killing it
+/// leaves nothing behind.
+#[test]
+fn stopping_a_read_invocation_kills_git_and_what_it_started() {
+    stopping_kills_git_and_what_it_started(JobClass::Read);
+}
+
+fn stopping_kills_git_and_what_it_started(class: JobClass) {
     let repo = Repo::new();
     let release = repo.path.join("release");
     let _release = Release(&release);
     let stop = Stop::new();
-    let invocation = Invocation::new(JobClass::Network, &repo.path)
+    let invocation = Invocation::new(class, &repo.path)
         .args(["-c", &blocking_alias(&release), "block"])
         .stop_on(&stop);
 
@@ -125,19 +136,22 @@ fn a_network_invocation_that_finishes_before_the_stop_reports_its_own_outcome() 
 }
 
 #[test]
-fn the_runner_refuses_to_make_a_local_write_or_read_stoppable() {
+fn the_runner_refuses_to_make_a_local_write_stoppable() {
     let repo = Repo::new();
     let marker = repo.path.join("ran");
-    for class in [JobClass::LocalWrite, JobClass::Read] {
-        let result = git().run(
-            &Invocation::new(class, &repo.path)
-                .args(["-c", &marking_alias(&marker), "mark"])
-                .stop_on(&Stop::new()),
-        );
-        assert!(
-            matches!(result, Err(RunError::NotStoppable { class: c }) if c == class),
-            "{class:?}: {result:?}"
-        );
-        assert!(!marker.exists(), "{class:?}: git ran");
-    }
+    let result = git().run(
+        &Invocation::new(JobClass::LocalWrite, &repo.path)
+            .args(["-c", &marking_alias(&marker), "mark"])
+            .stop_on(&Stop::new()),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(RunError::NotStoppable {
+                class: JobClass::LocalWrite
+            })
+        ),
+        "{result:?}"
+    );
+    assert!(!marker.exists(), "git ran");
 }

@@ -46,7 +46,7 @@ _Avoid_: Write (alone, because a push also writes)
 One user action made of two Jobs: a Network Job that fetches the upstream, then a Local write Job that integrates it. The second starts only if the first succeeds.
 
 **External change**:
-A change to the repository made outside Cairn, such as a file saved in an editor or a `git` command run in a terminal. Cairn learns of it through the watcher, never from a Job of its own.
+A change to the repository made outside Cairn, such as a file saved in an editor or a `git` command run in a terminal. Cairn learns of it through the watcher, never from a Job of its own. Cairn's own Jobs wake the watcher too, and the extra refresh coalesces in the Slot.
 
 **Supersede**:
 To drop a Read Job because a newer Read Job for the same purpose has made its result unwanted.

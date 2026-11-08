@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
+use cairn_write::Stop;
+
 use crate::Generation;
 
 type Work = Box<dyn FnOnce() + Send>;
@@ -98,7 +100,7 @@ impl LaneHandle {
 /// What a running Read Job knows about itself.
 pub(crate) struct JobContext {
     generation: Generation,
-    slot: Arc<SlotShared>,
+    stops: Stops,
 }
 
 impl JobContext {
@@ -106,9 +108,38 @@ impl JobContext {
         self.generation
     }
 
-    /// False once a newer Read Job for the same Slot has Superseded this one.
+    /// False once a newer Read Job for the same Slot has Superseded this one. A Read Job
+    /// that a refresh followed is still wanted: its answer is newer than what was shown.
     pub(crate) fn is_current(&self) -> bool {
-        self.slot.state.lock().unwrap().latest == self.generation
+        !self.stops.gix.load(Ordering::Relaxed)
+    }
+
+    /// The handle that kills this Read Job's git once it is Superseded. Every CLI read
+    /// attaches it.
+    pub(crate) fn cli_stop(&self) -> &Stop {
+        &self.stops.cli
+    }
+
+    /// Set once this Read Job is Superseded, for gix to stop on. It is also what
+    /// [`is_current`](Self::is_current) reads.
+    pub(crate) fn gix_interrupt(&self) -> &AtomicBool {
+        &self.stops.gix
+    }
+}
+
+/// The ways a running Read Job can be stopped cooperatively: a process kill for a CLI read
+/// and a flag for a gix one. A Superseded read that checks neither runs to its end, and its
+/// result is dropped.
+#[derive(Clone, Default)]
+struct Stops {
+    cli: Stop,
+    gix: Arc<AtomicBool>,
+}
+
+impl Stops {
+    fn stop(&self) {
+        self.gix.store(true, Ordering::Relaxed);
+        self.cli.stop();
     }
 }
 
@@ -124,9 +155,23 @@ struct SlotShared {
     state: Mutex<SlotState>,
 }
 
+/// What a newly submitted Read Job does to the one already running in its Slot. Either way
+/// it replaces the pending one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Running {
+    /// Supersede it: the new Read Job answers a new question, such as another repository,
+    /// so the running one is stopped where it can be and its result dropped.
+    Supersede,
+    /// Let it finish and publish: the new Read Job asks the same question again after an
+    /// External change or a Job, and the running one's answer is newer than what is shown.
+    /// A stream of changes then still publishes one answer per read (ADR 0004).
+    Finish,
+}
+
 struct SlotState {
     latest: Generation,
-    running: bool,
+    /// How to stop the running Read Job, if one is running.
+    running: Option<Stops>,
     pending: Option<(Generation, tracing::Span, ReadJob)>,
 }
 
@@ -137,41 +182,52 @@ impl Slot {
             lane: lane.handle(),
             state: Mutex::new(SlotState {
                 latest: Generation(0),
-                running: false,
+                running: None,
                 pending: None,
             }),
         }))
     }
 
     /// Submits a Read Job and returns the generation it answers. It Supersedes the pending
-    /// Read Job, if any, and makes the running one's result unwanted.
-    pub(crate) fn submit(&self, job: impl FnOnce(&JobContext) + Send + 'static) -> Generation {
+    /// Read Job, if any, and treats the running one as `running` says.
+    pub(crate) fn submit(
+        &self,
+        running: Running,
+        job: impl FnOnce(&JobContext) + Send + 'static,
+    ) -> Generation {
         let span = tracing::Span::current();
         let mut state = self.0.state.lock().unwrap();
         state.latest = Generation(state.latest.0 + 1);
         let generation = state.latest;
-        if state.running {
-            if let Some((old, ..)) = state.pending.replace((generation, span, Box::new(job))) {
-                tracing::debug!(
-                    slot = self.0.name,
-                    generation = old.0,
-                    "superseded pending read job"
-                );
+        match &state.running {
+            Some(stops) => {
+                if running == Running::Supersede {
+                    stops.stop();
+                }
+                if let Some((old, ..)) = state.pending.replace((generation, span, Box::new(job))) {
+                    tracing::debug!(
+                        slot = self.0.name,
+                        generation = old.0,
+                        "superseded pending read job"
+                    );
+                }
             }
-        } else {
-            state.running = true;
-            drop(state);
-            self.start(generation, span, Box::new(job));
+            None => {
+                let stops = Stops::default();
+                state.running = Some(stops.clone());
+                drop(state);
+                self.start(generation, stops, span, Box::new(job));
+            }
         }
         generation
     }
 
-    fn start(&self, generation: Generation, parent: tracing::Span, job: ReadJob) {
+    fn start(&self, generation: Generation, stops: Stops, parent: tracing::Span, job: ReadJob) {
         let slot = self.clone();
         self.0.lane.push(Box::new(move || {
             let context = JobContext {
                 generation,
-                slot: slot.0.clone(),
+                stops,
             };
             if context.is_current() {
                 let span = tracing::info_span!(
@@ -198,10 +254,12 @@ impl Slot {
         let mut state = self.0.state.lock().unwrap();
         match state.pending.take() {
             Some((generation, span, job)) => {
+                let stops = Stops::default();
+                state.running = Some(stops.clone());
                 drop(state);
-                self.start(generation, span, job);
+                self.start(generation, stops, span, job);
             }
-            None => state.running = false,
+            None => state.running = None,
         }
     }
 }

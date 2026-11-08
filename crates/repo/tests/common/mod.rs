@@ -131,6 +131,13 @@ pub fn git_read(repo: &Path, args: &[&str]) -> Vec<u8> {
     out.stdout
 }
 
+/// Changes the file's mtime without changing its content, so its index entry is stat-dirty.
+pub fn touch(path: &Path) {
+    let file = std::fs::File::options().write(true).open(path).unwrap();
+    let when = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    file.set_modified(when).unwrap();
+}
+
 /// A fresh clone of the small fixture in a temp dir, safe to change.
 pub fn small_fixture_clone() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
