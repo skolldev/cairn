@@ -239,23 +239,26 @@ fn a_burst_shorter_than_a_read_costs_at_most_two_status_refreshes() {
     let (dir, repo) = small_fixture_clone();
     // ADR 0004's bound holds for a burst that ends while the first read runs. A longer one
     // is a stream, which publishes once per read. Slowing every read keeps this burst short.
-    install_slow_clean_filter(&repo, dir.path(), "sleep 0.02\n");
+    install_slow_clean_filter(&repo, dir.path(), "sleep 0.05\n");
     // Regular files only: a symlink or submodule entry can't be appended to.
     let files: Vec<String> = git(&repo, &["ls-files", "-s"])
         .lines()
         .filter(|l| l.starts_with("100644 "))
         .filter_map(|l| l.split_once('\t').map(|(_, path)| path.to_owned()))
-        .take(200)
+        .take(50)
         .collect();
-    assert_eq!(files.len(), 200, "the fixture has enough files for a burst");
+    assert_eq!(files.len(), 50, "the fixture has enough files for a burst");
     let harness = Harness::start();
     let opened = open(&harness, &repo);
 
+    // A short gap between writes, so the OS reports each one: Windows collapses a burst
+    // that overflows its change buffer into one rescan, and the control below then fails.
     for file in &files {
         let path = repo.join(file);
         let mut bytes = std::fs::read(&path).unwrap();
         bytes.extend_from_slice(b"\nchanged outside Cairn\n");
         std::fs::write(&path, bytes).unwrap();
+        std::thread::sleep(Duration::from_millis(2));
     }
 
     let complete = |u: &ChangesSnapshot| u.result.as_ref().is_ok_and(|c| c.len() == files.len());
