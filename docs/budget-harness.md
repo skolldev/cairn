@@ -16,7 +16,7 @@ scripts/budget.sh run
 
 `--only launch,write,external` picks Budgets. `--runs` and `--samples` allow a quick try, whose result can only come out Invalid below 3 runs or 20 samples. Each run writes a Markdown file to `budget-results/` (git-ignored) and exits non-zero unless everything measured passed. The record of a phase gate is that file's content, pasted into the gate's issue.
 
-Keep the machine on mains power and idle, the screen unlocked and Cairn's window in front. GPUI throttles inactive windows to 30 Hz, and macOS stops presenting a covered one. Don't use the machine during a run: windows take focus.
+Keep the machine on mains power and idle, the screen unlocked and Cairn's window in front. GPUI throttles inactive windows to 30 Hz, and macOS stops presenting a covered one, so a run stops if the window is inactive during a kept sample. Launch has no such check, because a window can paint before it becomes active. A window that stays active but is covered isn't detected, so don't use the machine during a run.
 
 ## What each result records
 

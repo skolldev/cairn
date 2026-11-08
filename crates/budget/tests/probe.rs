@@ -6,6 +6,7 @@ use cairn_budget::probe::{Expect, Frame, Line, Trace};
 fn frame(paint_ns: u64) -> Frame {
     Frame {
         paint_ns,
+        active: true,
         head: Some("budget-a".to_owned()),
         refs: 1,
         staged: 1,
@@ -25,6 +26,7 @@ fn every_line_survives_the_pipe() {
         },
         Line::Frame(frame(77)),
         Line::Frame(Frame {
+            active: false,
             head: None,
             unstaged_paths: vec![],
             untracked_paths: vec![],
@@ -184,4 +186,21 @@ fn a_trace_pairs_drawables_with_their_presented_times_in_any_arrival_order() {
         ]
     );
     assert_eq!(trace.frames().len(), 1);
+}
+
+/// GPUI throttles an inactive window to 30 Hz, and macOS stops presenting a covered one, so a
+/// sample that overlaps one measures the window manager.
+#[test]
+fn a_trace_knows_whether_the_window_lost_focus_during_a_stretch() {
+    let mut trace = Trace::default();
+    for (paint_ns, active) in [(10, true), (20, false), (30, true)] {
+        trace.record(Line::Frame(Frame {
+            active,
+            ..frame(paint_ns)
+        }));
+    }
+    assert!(trace.inactive_during(10, 30));
+    assert!(trace.inactive_during(20, 20), "both ends count");
+    assert!(!trace.inactive_during(21, 30), "after it");
+    assert!(!trace.inactive_during(0, 19), "before it");
 }

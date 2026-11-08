@@ -158,7 +158,7 @@ jobs:
       - name: clippy and test, with the Budget harness's probe
         run: |
           cargo clippy -p cairn-app --all-targets --features measure --locked -- -D warnings
-          cargo test -p cairn-app --features measure --locked --no-fail-fast measure::
+          cargo test -p cairn-app --features measure --locked --no-fail-fast
       - name: No test hooks left running
         if: ${{ always() && runner.os != 'Windows' }}
         run: bash ./scripts/check-test-processes.sh

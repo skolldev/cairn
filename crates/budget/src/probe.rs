@@ -22,6 +22,8 @@ const LIST: char = '\u{1f}';
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Frame {
     pub paint_ns: u64,
+    /// Whether the window was the active one when this painted.
+    pub active: bool,
     /// The branch HEAD is on, as shown. `None` before refs have answered, or when detached.
     pub head: Option<String>,
     /// The generation shown per Slot, 0 before it has answered.
@@ -91,8 +93,9 @@ impl fmt::Display for Line {
             Line::Hello { release, pid } => write!(f, "hello\t{release}\t{pid}"),
             Line::Frame(frame) => write!(
                 f,
-                "frame\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "frame\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 frame.paint_ns,
+                frame.active,
                 frame.head.as_deref().map(clean).unwrap_or_default(),
                 frame.refs,
                 frame.staged,
@@ -134,15 +137,16 @@ impl Line {
             }),
             "frame" => Some(Line::Frame(Frame {
                 paint_ns: number(0)?,
-                head: Some(*rest.get(1)?)
+                active: flag(1)?,
+                head: Some(*rest.get(2)?)
                     .filter(|head| !head.is_empty())
                     .map(str::to_owned),
-                refs: number(2)?,
-                staged: number(3)?,
-                unstaged: number(4)?,
-                untracked: number(5)?,
-                unstaged_paths: unlist(rest.get(6)?),
-                untracked_paths: unlist(rest.get(7)?),
+                refs: number(3)?,
+                staged: number(4)?,
+                unstaged: number(5)?,
+                untracked: number(6)?,
+                unstaged_paths: unlist(rest.get(7)?),
+                untracked_paths: unlist(rest.get(8)?),
             })),
             "intent" => Some(Line::Intent {
                 ns: number(0)?,
@@ -256,6 +260,13 @@ impl Trace {
 
     pub fn drawables(&self) -> Vec<Drawable> {
         self.drawables.values().copied().collect()
+    }
+
+    /// Whether any frame that painted in this stretch was in an inactive window.
+    pub fn inactive_during(&self, start_ns: u64, end_ns: u64) -> bool {
+        self.frames
+            .iter()
+            .any(|f| !f.active && (start_ns..=end_ns).contains(&f.paint_ns))
     }
 
     /// When Cairn sent each Intent, in order.

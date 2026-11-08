@@ -105,9 +105,10 @@ impl Probe {
             .child(
                 canvas(
                     |_, _, _| {},
-                    move |_, _, _, cx: &mut App| {
+                    move |_, _, window: &mut Window, cx: &mut App| {
                         let mut frame = Frame {
                             paint_ns: clock::now_ns(),
+                            active: window.is_window_active(),
                             ..Frame::default()
                         };
                         refs.read(cx).report_to(&mut frame);

@@ -140,6 +140,16 @@ async fn a_frame_reports_what_the_views_hold_after_an_external_change(cx: &mut T
 }
 
 #[gpui::test]
+async fn a_frame_reports_whether_its_window_is_active(cx: &mut TestAppContext) {
+    let (_dir, sandbox) = sandbox();
+    let mut app = open(cx, sandbox.repo());
+    assert!(!app.wait_for_frame(|f| f.head.is_some()).active);
+
+    app.cx.update(|window, _| window.activate_window());
+    app.wait_for_frame(|f| f.active);
+}
+
+#[gpui::test]
 async fn a_switch_intent_is_stamped_and_ends_with_the_flip_on_screen(cx: &mut TestAppContext) {
     let (_dir, sandbox) = sandbox();
     let mut app = open(cx, sandbox.repo());

@@ -31,6 +31,9 @@ const HOLD: Duration = Duration::from_secs(10);
 /// How often the held-key test changes a file, for the watcher to notify about.
 const CHURN: Duration = Duration::from_millis(8);
 const PRESENTMON_SESSION: &str = "CairnBudget";
+/// Why a run stops when the window loses focus: its numbers would measure the window manager.
+const LOST_FOCUS: &str = "Cairn's window lost focus during a sample, so GPUI throttled it and \
+                          the numbers can't count: keep it in front and leave the machine alone";
 
 /// How a harness run is set up.
 #[derive(Clone, Debug)]
@@ -387,6 +390,16 @@ fn latency_run(config: &Config, sandbox: &Sandbox, change: Change) -> Result<Vec
                 .map(|frame| frame.paint_ns)
         })?;
         if index >= WARM_UP_SAMPLES {
+            // From the frame before the change: a `git switch`'s clock starts after its frame
+            // may already have painted.
+            let lost_focus = cairn
+                .trace
+                .lock()
+                .unwrap()
+                .inactive_during(baseline.paint_ns, paint);
+            if lost_focus {
+                return Err(LOST_FOCUS.to_owned());
+            }
             timed.push((start, paint));
         }
     }
@@ -488,6 +501,9 @@ fn held_key_run(config: &Config, sandbox: &Sandbox) -> Result<HeldKeyRun, String
 
     sleep(QUIET);
     let trace = cairn.quit()?;
+    if trace.inactive_during(start, end) {
+        return Err(LOST_FOCUS.to_owned());
+    }
     let presentmon = recorder.finish()?;
     let source = source_for(&trace, presentmon.as_ref())?;
     let in_hold = |ns: u64| (start..=end).contains(&ns);
