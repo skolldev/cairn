@@ -210,8 +210,7 @@ fn unstaged_after(seen: &Seen, after: Generation) -> Vec<&Arc<ChangesSnapshot>> 
 fn a_burst_shorter_than_a_read_costs_at_most_two_status_refreshes() {
     let (dir, repo) = small_fixture_clone();
     // ADR 0004's bound holds for a burst that ends while the first read runs. A longer one
-    // is a stream, which publishes once per read. Slowing every read keeps this burst short.
-    common::install_slow_clean_filter(&repo, dir.path(), "sleep 0.05\n");
+    // is a stream, which publishes once per read.
     // Regular files only: a symlink or submodule entry can't be appended to.
     let files: Vec<String> = git(&repo, &["ls-files", "-s"])
         .lines()
@@ -222,6 +221,22 @@ fn a_burst_shorter_than_a_read_costs_at_most_two_status_refreshes() {
     assert_eq!(files.len(), 50, "the fixture has enough files for a burst");
     let harness = Harness::start();
     let opened = open(&harness, &repo);
+    let started = dir.path().join("burst-read-started");
+    let release = dir.path().join("burst-read-release");
+    let _release = common::Release(&release);
+    common::install_slow_clean_filter(
+        &repo,
+        dir.path(),
+        &format!(
+            "touch '{started}'\n{wait}",
+            started = slash(&started),
+            wait = common::wait_for_release(&release),
+        ),
+    );
+    common::wait_for_file(&started);
+    // The filter setup can publish a Snapshot before the blocked read starts. The burst
+    // begins here, with that read held until its last filesystem event has been seen.
+    harness.service.drain();
 
     // A short gap between writes, so the OS reports each one: Windows collapses a burst
     // that overflows its change buffer into one rescan, and the control below then fails.
@@ -233,8 +248,23 @@ fn a_burst_shorter_than_a_read_costs_at_most_two_status_refreshes() {
         std::thread::sleep(Duration::from_millis(2));
     }
 
-    let complete = |u: &ChangesSnapshot| u.result.as_ref().is_ok_and(|c| c.len() == files.len());
+    // A ref written after all the files is the marker that the watcher has processed the
+    // burst. Refs can publish while the Unstaged read is held in the clean filter.
+    git(&repo, &["branch", "burst-finished"]);
     let mut seen = Seen::default();
+    seen.until(&harness, |seen| {
+        seen.all.iter().any(|s| match s {
+            Snapshot::Refs(r) => r.result.as_ref().is_ok_and(|refs| {
+                refs.local
+                    .iter()
+                    .any(|entry| entry.name.as_str() == "refs/heads/burst-finished")
+            }),
+            _ => false,
+        })
+    });
+    std::fs::write(&release, "").unwrap();
+
+    let complete = |u: &ChangesSnapshot| u.result.as_ref().is_ok_and(|c| c.len() == files.len());
     seen.until(&harness, |seen| {
         unstaged_after(seen, opened.unstaged)
             .iter()
