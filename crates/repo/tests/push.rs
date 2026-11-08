@@ -28,5 +28,6 @@ fn a_push_is_reported_as_running_and_updates_the_remote() {
     });
     let job = seen.job(&JobKind::Push).unwrap();
     assert_eq!(job.state, JobState::Done(Ok(())), "{job:?}");
+    // Seen red: a Job that runs anything but `git push` leaves the remote without it.
     assert_eq!(git(&f.remote, &["rev-parse", "refs/heads/pushed"]), tip);
 }
