@@ -182,3 +182,143 @@ pub fn filters_fixture_copy() -> (tempfile::TempDir, PathBuf) {
     copy(&filters_fixture(), &repo);
     (dir, repo)
 }
+
+// Driving the service: shared by every test that opens a repository and runs Jobs.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use cairn_repo::{Generation, Intent, JobId, JobKind, JobSnapshot, JobState, RefsSnapshot};
+
+/// `path` as git's own sh reads it: forward slashes, on Windows too. For paths written
+/// into hooks, aliases and `uploadpack` wrappers.
+pub fn slash(path: &Path) -> String {
+    path.to_str().unwrap().replace('\\', "/")
+}
+
+/// Creates a release file when dropped, so a failing test never leaves a hook or wrapper
+/// waiting on it. Declare it after the [`Harness`]: it then drops first, releasing the
+/// wait before the service waits for its Local write Jobs.
+pub struct Release<'a>(pub &'a Path);
+
+impl Drop for Release<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::write(self.0, "");
+    }
+}
+
+/// Installs a `post-checkout` hook that logs each run to `log` as `start <branch>` and
+/// `end <branch>`, prints `hook waiting on <branch>`, and blocks until `release` exists.
+pub fn install_blocking_hook(repo: &Path, log: &Path, release: &Path) {
+    let script = format!(
+        "#!/bin/sh\n\
+         branch=$(git symbolic-ref --short HEAD)\n\
+         echo \"start $branch\" >> '{log}'\n\
+         echo \"hook waiting on $branch\"\n\
+         while [ ! -f '{release}' ]; do sleep 0.05; done\n\
+         echo \"end $branch\" >> '{log}'\n",
+        log = slash(log),
+        release = slash(release),
+    );
+    let hook = repo.join(".git/hooks/post-checkout");
+    std::fs::write(&hook, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// The generation each Slot answered an Open with.
+pub struct Opened {
+    pub refs: Generation,
+    pub staged: Generation,
+    pub unstaged: Generation,
+    pub untracked: Generation,
+}
+
+/// Opens `repo` and waits until every Slot has answered it.
+pub fn open(harness: &Harness, repo: &Path) -> Opened {
+    harness.service.send(Intent::Open(repo.to_path_buf()));
+    let (mut refs, mut staged, mut unstaged, mut untracked) = (None, None, None, None);
+    harness.drain_until(|s| {
+        match s {
+            Snapshot::Refs(r) if r.workdir == repo => refs = Some(r.generation),
+            Snapshot::Staged(s) if s.workdir == repo => staged = Some(s.generation),
+            Snapshot::Unstaged(s) if s.workdir == repo => unstaged = Some(s.generation),
+            Snapshot::Untracked(s) if s.workdir == repo => untracked = Some(s.generation),
+            _ => {}
+        }
+        refs.is_some() && staged.is_some() && unstaged.is_some() && untracked.is_some()
+    });
+    Opened {
+        refs: refs.unwrap(),
+        staged: staged.unwrap(),
+        unstaged: unstaged.unwrap(),
+        untracked: untracked.unwrap(),
+    }
+}
+
+pub fn job_of(snapshot: &Snapshot) -> Option<&Arc<JobSnapshot>> {
+    match snapshot {
+        Snapshot::Job(job) => Some(job),
+        _ => None,
+    }
+}
+
+/// Done or Stopped: the Job will publish nothing more.
+pub fn is_ended(job: &JobSnapshot) -> bool {
+    matches!(job.state, JobState::Done(_) | JobState::Stopped)
+}
+
+/// Every Snapshot drained so far, and the newest Snapshot of each Job, kept across drains.
+#[derive(Default)]
+pub struct Seen {
+    pub jobs: BTreeMap<JobId, Arc<JobSnapshot>>,
+    pub all: Vec<Snapshot>,
+}
+
+impl Seen {
+    fn record(&mut self, snapshot: &Snapshot) {
+        if let Some(job) = job_of(snapshot) {
+            self.jobs.insert(job.id, job.clone());
+        }
+        self.all.push(snapshot.clone());
+    }
+
+    /// Drains until `done` accepts what has been seen so far.
+    pub fn until(&mut self, harness: &Harness, mut done: impl FnMut(&Self) -> bool) {
+        if done(self) {
+            return;
+        }
+        harness.drain_until(|s| {
+            self.record(s);
+            done(self)
+        });
+    }
+
+    /// Records whatever has been published by now, without waiting.
+    pub fn drain_now(&mut self, harness: &Harness) {
+        for s in harness.service.drain() {
+            self.record(&s);
+        }
+    }
+
+    /// The `n`th Job, in the order they were asked for.
+    pub fn nth(&self, n: usize) -> Option<&Arc<JobSnapshot>> {
+        self.jobs.values().nth(n)
+    }
+
+    /// The first Job of this kind.
+    pub fn job(&self, kind: &JobKind) -> Option<&Arc<JobSnapshot>> {
+        self.jobs.values().find(|j| &j.kind == kind)
+    }
+
+    /// The newest refs Snapshot newer than `opened`, if any.
+    pub fn refs_after(&self, opened: Generation) -> Option<&Arc<RefsSnapshot>> {
+        self.all.iter().rev().find_map(|s| match s {
+            Snapshot::Refs(r) if r.generation > opened => Some(r),
+            _ => None,
+        })
+    }
+}
