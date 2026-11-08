@@ -8,9 +8,12 @@
 //! Every call runs as `git -C <repo> -c core.longpaths=true --no-pager [--no-optional-locks]
 //! <args>` with `LC_ALL=C` and `GIT_TERMINAL_PROMPT=0`, so output parses the same everywhere
 //! and git never waits on a prompt. Maintenance stays at git's default (#14).
+//!
+//! A Network invocation can carry a [`Stop`], which kills git and what it started.
 
 mod resolve;
 mod run;
+mod stop;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -19,6 +22,7 @@ use std::sync::Arc;
 
 pub use resolve::{Git, GitVersion};
 pub use run::{Invocation, JobClass, Output};
+pub use stop::Stop;
 
 /// Why Cairn can't run git on this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +72,12 @@ pub enum RunError {
         path: PathBuf,
         source: Arc<std::io::Error>,
     },
+    /// The invocation's [`Stop`] was used. `stderr` is what git wrote before it was killed,
+    /// empty if it never started.
+    Stopped { stderr: Vec<u8> },
+    /// A [`Stop`] was attached to an invocation that isn't a Network Job. Only Network Jobs
+    /// can be stopped (ADR 0002), so git wasn't started.
+    NotStoppable { class: JobClass },
 }
 
 impl fmt::Display for RunError {
@@ -82,6 +92,10 @@ impl fmt::Display for RunError {
             ),
             RunError::Spawn { path, source } => {
                 write!(f, "couldn't run git at {}: {source}", path.display())
+            }
+            RunError::Stopped { .. } => f.write_str("stopped"),
+            RunError::NotStoppable { class } => {
+                write!(f, "only a Network Job can be stopped, not a {class:?} Job")
             }
         }
     }

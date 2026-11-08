@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 #[cfg(windows)]
 use crate::MAX_WINDOWS_REPO_PATH;
-use crate::{Git, RunError, git_command};
+use crate::{Git, RunError, Stop, git_command};
 
 /// What a Job is, as far as spawning git goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +32,7 @@ pub struct Invocation {
     repo: PathBuf,
     args: Vec<OsString>,
     stdin: Option<Vec<u8>>,
+    stop: Option<Stop>,
 }
 
 impl Invocation {
@@ -41,6 +42,7 @@ impl Invocation {
             repo: repo.into(),
             args: Vec::new(),
             stdin: None,
+            stop: None,
         }
     }
 
@@ -61,6 +63,13 @@ impl Invocation {
     /// Bytes written to git's stdin. Without this, git's stdin is empty.
     pub fn stdin(mut self, bytes: impl Into<Vec<u8>>) -> Self {
         self.stdin = Some(bytes.into());
+        self
+    }
+
+    /// Lets `stop` end this run. Only a [`JobClass::Network`] invocation can be stopped:
+    /// any other is refused with [`RunError::NotStoppable`] before git starts.
+    pub fn stop_on(mut self, stop: &Stop) -> Self {
+        self.stop = Some(stop.clone());
         self
     }
 }
@@ -119,6 +128,11 @@ impl Git {
     ) -> Result<Output, RunError> {
         #[cfg(windows)]
         check_windows_repo_path(&invocation.repo)?;
+        if invocation.stop.is_some() && invocation.class != JobClass::Network {
+            return Err(RunError::NotStoppable {
+                class: invocation.class,
+            });
+        }
 
         let mut cmd = git_command(self.path());
         cmd.arg("-C")
@@ -135,12 +149,30 @@ impl Git {
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // A stoppable git leads its own process group, so that stopping it reaches the
+        // processes it starts too.
+        #[cfg(unix)]
+        if invocation.stop.is_some() {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
 
         let spawn_error = |e: io::Error| RunError::Spawn {
             path: self.path().to_owned(),
             source: Arc::new(e),
         };
-        let mut child = cmd.spawn().map_err(spawn_error)?;
+        let mut child = match &invocation.stop {
+            None => cmd.spawn(),
+            Some(stop) => match stop.spawn_unless_stopped(|| {
+                let child = cmd.spawn()?;
+                let pid = child.id();
+                Ok((child, pid))
+            }) {
+                Some(spawned) => spawned,
+                None => return Err(RunError::Stopped { stderr: Vec::new() }),
+            },
+        }
+        .map_err(spawn_error)?;
         let pipe = child.stdin.take();
         let mut stdout = child.stdout.take().expect("stdout is piped");
         let mut stderr = child.stderr.take().expect("stderr is piped");
@@ -179,9 +211,16 @@ impl Git {
             let out = stdout.join().expect("the stdout reader doesn't panic");
             stderr_read.and(out).map(|out| (out, err))
         });
+        if let Some(stop) = &invocation.stop {
+            stop.finished();
+        }
         // Always wait, even when reading failed: git is never left running unwatched.
         let status = child.wait().map_err(spawn_error)?;
         let (stdout, stderr) = read.map_err(spawn_error)?;
+        // A git that ended on its own before the stop reached it reports its own outcome.
+        if !status.success() && invocation.stop.as_ref().is_some_and(Stop::reached_git) {
+            return Err(RunError::Stopped { stderr });
+        }
         Ok(Output {
             status,
             stdout,

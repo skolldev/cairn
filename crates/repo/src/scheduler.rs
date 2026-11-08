@@ -1,8 +1,8 @@
 //! The Job scheduler, private to the Repo service.
 //!
 //! One Interactive lane of worker threads that `repo` owns, Slots and generation tokens
-//! for Read Jobs, and the Local write queue. The Background lane and Network Jobs arrive
-//! with their own tickets.
+//! for Read Jobs, and the Job queues that Local write Jobs and Network Jobs each run in.
+//! The Background lane arrives with its own ticket.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -206,16 +206,17 @@ impl Slot {
     }
 }
 
-/// The Local write queue: one thread that runs Local write Jobs one at a time, in the
-/// order they were queued. A Local write Job is never stopped or Superseded (ADR 0002),
-/// so dropping the queue waits for every queued Job to finish.
-pub(crate) struct WriteQueue {
+/// A Job queue: one thread that runs Jobs one at a time, in the order they were queued.
+/// The Local write queue and the Network queue are one each, so they overlap each other
+/// but never themselves. Nothing here stops or Supersedes a Job (ADR 0002): dropping the
+/// queue waits for every queued Job to finish, so a Network Job must be stopped first.
+pub(crate) struct JobQueue {
     shared: Arc<LaneShared>,
     worker: Option<JoinHandle<()>>,
 }
 
-impl WriteQueue {
-    pub(crate) fn new() -> Self {
+impl JobQueue {
+    pub(crate) fn new(name: &str) -> Self {
         let shared = Arc::new(LaneShared {
             queue: Mutex::new(VecDeque::new()),
             ready: Condvar::new(),
@@ -224,9 +225,9 @@ impl WriteQueue {
         let worker = {
             let shared = shared.clone();
             std::thread::Builder::new()
-                .name("cairn-local-write".to_owned())
+                .name(format!("cairn-{name}"))
                 .spawn(move || shared.work_to_completion())
-                .expect("spawn the local write worker")
+                .expect("spawn a job queue worker")
         };
         Self {
             shared,
@@ -234,7 +235,7 @@ impl WriteQueue {
         }
     }
 
-    /// Queues a Local write Job behind every one queued before it.
+    /// Queues a Job behind every one queued before it.
     pub(crate) fn push(&self, job: impl FnOnce() + Send + 'static) {
         self.shared.queue.lock().unwrap().push_back(Box::new(job));
         self.shared.ready.notify_one();
@@ -259,13 +260,13 @@ impl LaneShared {
             };
             // A panicking Job must not take the queue down with it.
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
-                tracing::error!("local write job panicked");
+                tracing::error!("queued job panicked");
             }
         }
     }
 }
 
-impl Drop for WriteQueue {
+impl Drop for JobQueue {
     fn drop(&mut self) {
         self.shared.closing.store(true, Ordering::Release);
         self.shared.ready.notify_all();

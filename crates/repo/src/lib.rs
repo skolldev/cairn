@@ -2,9 +2,10 @@
 //!
 //! This is the only seam `app` uses. Jobs, the Job scheduler and gix stay private: `app`
 //! sends [`Intent`]s, is woken when Snapshots are ready, and drains them with
-//! [`RepoService::drain`]. Read Jobs run on threads this crate owns, with no async runtime
-//! and no UI executor, so the whole service runs headless in tests.
+//! [`RepoService::drain`]. Jobs run on threads this crate owns, with no async runtime and
+//! no UI executor, so the whole service runs headless in tests.
 
+mod fetch;
 mod scheduler;
 mod status;
 mod switch;
@@ -16,7 +17,8 @@ use std::sync::{Arc, Mutex};
 
 pub use cairn_core::{ChangeKind, FileChange, Head, Oid, RefEntry, RefName, Refs, RepoPath, Stash};
 
-use scheduler::{Lane, Slot, WriteQueue};
+use cairn_write::Stop;
+use scheduler::{JobQueue, Lane, Slot};
 
 /// Interactive lane workers. Enough for the Read Jobs one click starts to run side by side.
 const INTERACTIVE_THREADS: usize = 2;
@@ -41,6 +43,13 @@ pub enum Intent {
     /// Switch the open repository to this local branch: `git switch`, run as a Local
     /// write Job. It never creates a branch, not even from a remote-tracking one.
     Switch(String),
+    /// Fetch every remote, pruning what they deleted: `git fetch --all --prune`, run as a
+    /// Network Job beside any Local write Job.
+    Fetch,
+    /// Stop this Network Job. A queued one ends at once and never starts. A running one's
+    /// git is killed, and refs are refreshed before it ends. Anything else, including a Local write Job or a Job that already ended, is
+    /// left alone.
+    Stop(JobId),
 }
 
 /// An immutable view of repository state, shared by `Arc`. Each variant comes from its
@@ -74,6 +83,8 @@ impl JobId {
 pub enum JobKind {
     /// `git switch` to this local branch.
     Switch { branch: String },
+    /// `git fetch --all --prune`.
+    Fetch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,6 +94,8 @@ pub enum JobState {
     Running,
     /// Finished: success, or git's error exactly as git wrote it.
     Done(Result<(), String>),
+    /// Ended by a Stop Intent before it finished. Only a Network Job can be stopped.
+    Stopped,
 }
 
 /// One Job's state. A Job publishes a new one each time its state or output changes, and
@@ -98,6 +111,9 @@ pub struct JobSnapshot {
     pub state: JobState,
     /// What git and its hooks have written so far, live while the Job runs.
     pub output: String,
+    /// The last complete line of [`output`](Self::output), such as git's newest
+    /// `--progress` report, which git ends with a carriage return so the next replaces it.
+    pub progress: Option<String>,
     /// The span of the Intent this Job answers.
     pub span: tracing::Span,
 }
@@ -124,12 +140,15 @@ pub type UntrackedSnapshot = SlotSnapshot<Vec<RepoPath>>;
 
 /// The Repo service for one window. Dropping it stops its threads and drops queued Read Jobs.
 ///
-/// Dropping it waits for every queued Local write Job to finish, because those are never
-/// stopped.
+/// Dropping it stops every Network Job and waits for every queued Local write Job to
+/// finish, because those are never stopped.
 pub struct RepoService {
-    // Declared first so it drops first: a finishing Local write Job still submits its
-    // refresh to the lane.
-    writes: WriteQueue,
+    // Declared first so they drop first: a finishing Job still submits its refresh to the
+    // lane.
+    writes: JobQueue,
+    network: JobQueue,
+    /// Network Jobs that haven't ended, so a Stop Intent can reach them.
+    network_jobs: Arc<Mutex<BTreeMap<JobId, Arc<NetworkJob>>>>,
     reads: Arc<Reads>,
     // Dropping the lane joins its threads. Kept as a field for that, not read.
     _interactive: Lane,
@@ -153,7 +172,9 @@ impl RepoService {
     pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Self {
         let interactive = Lane::new("interactive", INTERACTIVE_THREADS);
         Self {
-            writes: WriteQueue::new(),
+            writes: JobQueue::new("local-write"),
+            network: JobQueue::new("network"),
+            network_jobs: Arc::default(),
             reads: Arc::new(Reads {
                 refs_slot: Slot::new("refs", &interactive),
                 staged_slot: Slot::new("staged", &interactive),
@@ -187,6 +208,18 @@ impl RepoService {
                     switch::switch(workdir, &branch, output)
                 });
             }
+            Intent::Fetch => {
+                let span = tracing::info_span!("intent", kind = "fetch");
+                self.network_job(JobKind::Fetch, span, fetch::fetch);
+            }
+            Intent::Stop(id) => {
+                let _span = tracing::info_span!("intent", kind = "stop", job = id.0).entered();
+                let job = self.network_jobs.lock().unwrap().get(&id).cloned();
+                match job {
+                    Some(job) => job.stop(&self.network_jobs),
+                    None => tracing::debug!("not a running or queued Network Job; nothing to stop"),
+                }
+            }
         }
     }
 
@@ -208,14 +241,9 @@ impl RepoService {
             .collect()
     }
 
-    /// Queues a Local write Job that runs `run` in the open repository, publishing its
-    /// state and live output, and then refreshes refs and status whatever the outcome.
-    fn local_write(
-        &self,
-        kind: JobKind,
-        span: tracing::Span,
-        run: impl FnOnce(&Path, &mut dyn FnMut(&[u8])) -> Result<(), String> + Send + 'static,
-    ) {
+    /// A publisher for a new Job in the open repository, or `None` after publishing that
+    /// no repository is open.
+    fn new_job(&self, kind: JobKind, span: tracing::Span) -> Option<(JobPublisher, PathBuf)> {
         let id = JobId(self.next_job.fetch_add(1, Ordering::Relaxed));
         let workdir = self.reads.open.lock().unwrap().clone();
         let job = JobPublisher {
@@ -225,39 +253,136 @@ impl RepoService {
             span,
             outbox: self.reads.outbox.clone(),
         };
-        let Some(workdir) = workdir else {
-            job.publish(JobState::Done(Err("no repository is open".to_owned())), "");
+        match workdir {
+            Some(workdir) => Some((job, workdir)),
+            None => {
+                job.publish(JobState::Done(Err("no repository is open".to_owned())), "");
+                None
+            }
+        }
+    }
+
+    /// Queues a Local write Job that runs `run` in the open repository, publishing its
+    /// state and live output, and then refreshes refs and status whatever the outcome.
+    fn local_write(
+        &self,
+        kind: JobKind,
+        span: tracing::Span,
+        run: impl FnOnce(&Path, &mut dyn FnMut(&[u8])) -> Result<(), String> + Send + 'static,
+    ) {
+        let Some((job, workdir)) = self.new_job(kind, span) else {
             return;
         };
         job.publish(JobState::Queued, "");
         let reads = self.reads.clone();
         self.writes.push(move || {
             let _entered =
-                tracing::info_span!(parent: &job.span, "local_write_job", id = id.0).entered();
+                tracing::info_span!(parent: &job.span, "local_write_job", id = job.id.0).entered();
             job.publish(JobState::Running, "");
-            let mut output = Vec::new();
-            // A panic must still end the Job and refresh, or its Snapshot would stay Running.
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run(&workdir, &mut |chunk| {
-                    output.extend_from_slice(chunk);
-                    job.publish(JobState::Running, &String::from_utf8_lossy(&output));
-                })
-            }))
-            .unwrap_or_else(|_| {
-                tracing::error!("local write job panicked");
-                Err("Cairn hit an internal error while running this Job".to_owned())
-            });
-            // Refresh before reporting done, so that by the time the UI sees the outcome
-            // the Read Jobs that show its effect are already queued. Only while its repo
-            // is still the open one: otherwise the refresh would replace the newer repo's
-            // Snapshots in the shared Slots.
-            reads.refresh_if_open(&workdir, &job.span);
-            job.publish(JobState::Done(result), &String::from_utf8_lossy(&output));
+            let (state, output) = job.run(|output| JobState::Done(run(&workdir, output)));
+            reads.refresh_if_open(&workdir, Refresh::RefsAndStatus, &job.span);
+            job.publish(state, &output);
+        });
+    }
+
+    /// Queues a Network Job that runs `run` in the open repository, publishing its state
+    /// and live output, and then refreshes refs whatever the outcome, a stop included.
+    /// `run` gets the Stop that a Stop Intent uses. A Job stopped while queued never runs,
+    /// so it changes nothing and isn't refreshed.
+    fn network_job(
+        &self,
+        kind: JobKind,
+        span: tracing::Span,
+        run: impl FnOnce(&Path, &Stop, &mut dyn FnMut(&[u8])) -> JobState + Send + 'static,
+    ) {
+        let Some((publisher, workdir)) = self.new_job(kind, span) else {
+            return;
+        };
+        // Queued is published before a Stop Intent can find the Job, so that a stop's
+        // Snapshot always comes after it.
+        publisher.publish(JobState::Queued, "");
+        let id = publisher.id;
+        let job = Arc::new(NetworkJob {
+            publisher,
+            stop: Stop::new(),
+            phase: Mutex::new(Phase::Queued),
+        });
+        self.network_jobs.lock().unwrap().insert(id, job.clone());
+        let reads = self.reads.clone();
+        let network_jobs = self.network_jobs.clone();
+        self.network.push(move || {
+            let publisher = &job.publisher;
+            let _entered =
+                tracing::info_span!(parent: &publisher.span, "network_job", id = id.0).entered();
+            {
+                let mut phase = job.phase.lock().unwrap();
+                if *phase == Phase::Ended {
+                    tracing::debug!("stopped while queued; never started");
+                    return;
+                }
+                *phase = Phase::Running;
+                publisher.publish(JobState::Running, "");
+            }
+            let (state, output) = publisher.run(|output| run(&workdir, &job.stop, output));
+            reads.refresh_if_open(&workdir, Refresh::Refs, &publisher.span);
+            *job.phase.lock().unwrap() = Phase::Ended;
+            network_jobs.lock().unwrap().remove(&id);
+            publisher.publish(state, &output);
         });
     }
 }
 
-/// What a Local write Job needs to publish its own Snapshots.
+impl Drop for RepoService {
+    /// Stops every Network Job, so that dropping the Network queue doesn't wait on the
+    /// network. The fields then drop in order.
+    fn drop(&mut self) {
+        let jobs: Vec<_> = self
+            .network_jobs
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        for job in jobs {
+            job.stop(&self.network_jobs);
+        }
+    }
+}
+
+/// A Network Job that hasn't ended, as a Stop Intent finds it.
+struct NetworkJob {
+    publisher: JobPublisher,
+    stop: Stop,
+    /// Where the Job stands. Changed and published under this lock, so a stop and the
+    /// Job's own start never publish out of order.
+    phase: Mutex<Phase>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Queued,
+    Running,
+    Ended,
+}
+
+impl NetworkJob {
+    /// A queued Job ends Stopped at once and never starts. A running one's git is killed,
+    /// and the Job then ends as it does after any outcome: refresh, then Stopped.
+    fn stop(&self, network_jobs: &Mutex<BTreeMap<JobId, Arc<NetworkJob>>>) {
+        let mut phase = self.phase.lock().unwrap();
+        match *phase {
+            Phase::Queued => {
+                *phase = Phase::Ended;
+                self.publisher.publish(JobState::Stopped, "");
+                network_jobs.lock().unwrap().remove(&self.publisher.id);
+            }
+            Phase::Running => self.stop.stop(),
+            Phase::Ended => {}
+        }
+    }
+}
+
+/// What a Job needs to publish its own Snapshots.
 struct JobPublisher {
     id: JobId,
     kind: JobKind,
@@ -274,17 +399,61 @@ impl JobPublisher {
             workdir: self.workdir.clone(),
             state,
             output: output.to_owned(),
+            progress: last_line(output),
             span: self.span.clone(),
         }));
     }
+
+    /// Runs a started Job's work, publishing its output live, and returns how it ended
+    /// with all of its output.
+    fn run(&self, work: impl FnOnce(&mut dyn FnMut(&[u8])) -> JobState) -> (JobState, String) {
+        let mut output = Vec::new();
+        // A panic must still end the Job and refresh, or its Snapshot would stay Running.
+        let state = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            work(&mut |chunk| {
+                output.extend_from_slice(chunk);
+                self.publish(JobState::Running, &String::from_utf8_lossy(&output));
+            })
+        }))
+        .unwrap_or_else(|_| {
+            tracing::error!("job panicked");
+            JobState::Done(Err(
+                "Cairn hit an internal error while running this Job".to_owned()
+            ))
+        });
+        (state, String::from_utf8_lossy(&output).into_owned())
+    }
+}
+
+/// The last non-blank line of `output` that git has finished, by newline or by the
+/// carriage return that ends a `--progress` report.
+fn last_line(output: &str) -> Option<String> {
+    let finished = &output[..output.rfind(['\r', '\n'])?];
+    finished
+        .rsplit(['\r', '\n'])
+        .find(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+}
+
+/// Which Slots a finished Job refreshes: only those it can change.
+#[derive(Clone, Copy)]
+enum Refresh {
+    Refs,
+    RefsAndStatus,
 }
 
 impl Reads {
-    /// [`refresh`](Self::refresh), unless an Open has named another repository since.
-    fn refresh_if_open(&self, path: &Path, span: &tracing::Span) {
+    /// Refreshes what a finished Job can change, unless an Open has named another
+    /// repository since: that refresh would replace the newer repo's Snapshots in the
+    /// shared Slots. Called before the Job publishes its outcome, so that by the time the
+    /// UI sees the outcome, the Read Jobs that show its effect are already queued.
+    fn refresh_if_open(&self, path: &Path, what: Refresh, span: &tracing::Span) {
         let open = self.open.lock().unwrap();
         if open.as_deref() == Some(path) {
-            self.refresh(path, span);
+            match what {
+                Refresh::RefsAndStatus => self.refresh(path, span),
+                Refresh::Refs => self.refresh_refs(path, span),
+            }
         } else {
             tracing::debug!(path = %path.display(), "repository no longer open; refresh skipped");
         }
@@ -293,7 +462,7 @@ impl Reads {
     /// Reads refs and status again: everything a switch can change, and everything an
     /// Open shows. Later Intents that change less refresh less.
     fn refresh(&self, path: &Path, span: &tracing::Span) {
-        self.submit(&self.refs_slot, path, span, read_refs, |p| &mut p.refs);
+        self.refresh_refs(path, span);
         self.submit(&self.staged_slot, path, span, status::staged, |p| {
             &mut p.staged
         });
@@ -303,6 +472,10 @@ impl Reads {
         self.submit(&self.untracked_slot, path, span, read_untracked, |p| {
             &mut p.untracked
         });
+    }
+
+    fn refresh_refs(&self, path: &Path, span: &tracing::Span) {
+        self.submit(&self.refs_slot, path, span, read_refs, |p| &mut p.refs);
     }
 
     /// Submits a Read Job to `slot` that runs `read` on the repository at `path` and
