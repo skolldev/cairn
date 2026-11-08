@@ -3,20 +3,28 @@
 //! The service wakes the bridge from its own threads. The bridge drains at most once per
 //! frame, drops stale generations, swaps each Snapshot into the entity that shows it, and
 //! notifies only entities whose Snapshot changed. That caps the notify rate, which matters
-//! for zed#61469 on Windows.
+//! for zed#61469 on Windows. A window that draws no frames still drains, more slowly,
+//! because the app can't exit until it has seen the Quit Snapshot.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use cairn_repo::{Generation, RepoService, Snapshot};
-use gpui::{Context, Entity, Window};
+use gpui::{Context, Entity, Task, Window};
 
+use crate::quit::QuitView;
 use crate::refs_view::RefsView;
 use crate::status_view::StatusView;
+
+/// How long a drain waits for the next frame before going ahead without one. Several frames
+/// long, so a window that is drawing always drains on its frames.
+const FRAMELESS_DRAIN: Duration = Duration::from_millis(100);
 
 pub struct Bridge {
     service: Arc<RepoService>,
     refs: Entity<RefsView>,
     status: Entity<StatusView>,
+    quit: Entity<QuitView>,
     /// The newest generation shown, per Slot. Generations of different Slots are unrelated.
     refs_shown: Option<Generation>,
     staged_shown: Option<Generation>,
@@ -24,6 +32,8 @@ pub struct Bridge {
     untracked_shown: Option<Generation>,
     /// A drain already ran this frame. The next-frame callback drains whatever came since.
     armed: bool,
+    /// Ends the wait if no frame comes. Replacing it cancels the last one.
+    frameless_drain: Option<Task<()>>,
 }
 
 impl Bridge {
@@ -32,6 +42,7 @@ impl Bridge {
         woken: async_channel::Receiver<()>,
         refs: Entity<RefsView>,
         status: Entity<StatusView>,
+        quit: Entity<QuitView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -50,11 +61,13 @@ impl Bridge {
             service,
             refs,
             status,
+            quit,
             refs_shown: None,
             staged_shown: None,
             unstaged_shown: None,
             untracked_shown: None,
             armed: false,
+            frameless_drain: None,
         }
     }
 
@@ -75,6 +88,14 @@ impl Bridge {
                 bridge.pump(window, cx);
             });
         });
+        let timer = cx.background_executor().timer(FRAMELESS_DRAIN);
+        self.frameless_drain = Some(cx.spawn_in(window, async move |this, cx| {
+            timer.await;
+            let _ = this.update_in(cx, |bridge, window, cx| {
+                bridge.armed = false;
+                bridge.pump(window, cx);
+            });
+        }));
     }
 
     fn apply(&mut self, snapshots: Vec<Snapshot>, cx: &mut Context<Self>) {
@@ -115,8 +136,11 @@ impl Bridge {
                         });
                     }
                 }
-                // The shell has no Job view yet, and nothing in it sends a Local write Intent.
-                Snapshot::Job(_) => {}
+                // The shell shows Jobs only while a Quit waits on them.
+                Snapshot::Job(job) => {
+                    self.quit.update(cx, |view, cx| view.record_job(job, cx));
+                }
+                Snapshot::Quit => self.quit.update(cx, |view, cx| view.exit(cx)),
                 Snapshot::Untracked(untracked) => {
                     if newer(
                         &mut self.untracked_shown,

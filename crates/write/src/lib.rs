@@ -10,7 +10,9 @@
 //! and git never waits on a prompt. Maintenance stays at git's default (#14).
 //!
 //! A Network or Read invocation can carry a [`Stop`], which kills git and what it started.
+//! A Local write invocation can pass through a [`StartGate`], which keeps it from starting.
 
+mod gate;
 mod resolve;
 mod run;
 mod stop;
@@ -20,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::Arc;
 
+pub use gate::StartGate;
 pub use resolve::{Git, GitVersion};
 pub use run::{Invocation, JobClass, Output};
 pub use stop::Stop;
@@ -78,6 +81,8 @@ pub enum RunError {
     /// A [`Stop`] was attached to a Local write invocation, which always runs to completion
     /// (ADR 0002), so git wasn't started.
     NotStoppable { class: JobClass },
+    /// The invocation's [`StartGate`] was closed, so git wasn't started.
+    GateClosed,
 }
 
 impl fmt::Display for RunError {
@@ -100,6 +105,7 @@ impl fmt::Display for RunError {
                     "a {class:?} Job always runs to completion and can't be stopped"
                 )
             }
+            RunError::GateClosed => f.write_str("git wasn't started, because Cairn is quitting"),
         }
     }
 }

@@ -42,6 +42,12 @@ A Job that talks to a remote. It stops only when the user asks.
 A Job that changes the local repository. Once started it always runs to completion.
 _Avoid_: Write (alone, because a push also writes)
 
+**Quit**:
+Leaving Cairn without risk to the repository: Read Jobs are dropped, Network Jobs stopped, and Local write Jobs run to their end first. It is itself an Intent.
+
+**Force quit**:
+Leaving Cairn without waiting for Local write Jobs, after a warning, because exiting can kill git mid-step. It is the only way out while one runs, such as under a hung hook.
+
 **Pull**:
 One user action made of two Jobs: a Network Job that fetches the upstream, then a Local write Job that integrates it. The second starts only if the first succeeds.
 

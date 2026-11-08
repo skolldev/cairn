@@ -28,13 +28,13 @@ fn repo_with_other_branch() -> (tempfile::TempDir, std::path::PathBuf, String) {
     (dir, repo, start)
 }
 
-/// The workdir a Read Slot's Snapshot answers, or `None` for a Job's.
+/// The workdir a Read Slot's Snapshot answers, or `None` for any other.
 fn read_workdir(snapshot: &Snapshot) -> Option<&Path> {
     match snapshot {
         Snapshot::Refs(s) => Some(&s.workdir),
         Snapshot::Staged(s) | Snapshot::Unstaged(s) => Some(&s.workdir),
         Snapshot::Untracked(s) => Some(&s.workdir),
-        Snapshot::Job(_) => None,
+        Snapshot::Job(_) | Snapshot::Quit => None,
     }
 }
 

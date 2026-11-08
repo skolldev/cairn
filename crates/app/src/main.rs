@@ -7,10 +7,14 @@
 mod bridge;
 #[cfg(debug_assertions)]
 mod frame_overlay;
+mod quit;
 mod refs_view;
 mod status_view;
+#[cfg(target_os = "macos")]
+mod terminate;
 
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use cairn_repo::{Intent, RepoService};
@@ -20,6 +24,7 @@ use gpui::{
 };
 
 use bridge::Bridge;
+use quit::QuitView;
 use refs_view::RefsView;
 use status_view::StatusView;
 
@@ -27,13 +32,19 @@ struct Workspace {
     service: Arc<RepoService>,
     refs: Entity<RefsView>,
     status: Entity<StatusView>,
+    quit: Entity<QuitView>,
     _bridge: Entity<Bridge>,
     #[cfg(debug_assertions)]
     frame_clock: Option<std::rc::Rc<frame_overlay::FrameClock>>,
 }
 
 impl Workspace {
-    fn new(path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        path: Option<PathBuf>,
+        exit: Rc<dyn Fn(&mut App)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // A bounded channel of one: wakes that arrive before the bridge runs coalesce.
         let (wake, woken) = async_channel::bounded(1);
         let service = Arc::new(RepoService::start(move || {
@@ -41,12 +52,26 @@ impl Workspace {
         }));
         let refs = cx.new(|_| RefsView::default());
         let status = cx.new(|_| StatusView::default());
+        let quit = cx.new(|_| QuitView::new(service.clone(), exit));
+        // The window stays open until the Repo service says it has quit, and the bridge then
+        // exits the app. Deferred, so that a question isn't asked inside the platform's callback.
+        window.on_window_should_close(cx, {
+            let quit = quit.clone();
+            move |window, cx| {
+                let quit = quit.clone();
+                window.defer(cx, move |window, cx| {
+                    quit.update(cx, |view, cx| view.close_requested(window, cx));
+                });
+                false
+            }
+        });
         let bridge = cx.new(|cx| {
             Bridge::new(
                 service.clone(),
                 woken,
                 refs.clone(),
                 status.clone(),
+                quit.clone(),
                 window,
                 cx,
             )
@@ -58,6 +83,7 @@ impl Workspace {
             service,
             refs,
             status,
+            quit,
             _bridge: bridge,
             #[cfg(debug_assertions)]
             frame_clock: frame_overlay::FrameClock::enabled().then(Default::default),
@@ -118,6 +144,7 @@ impl Render for Workspace {
             .text_color(rgb(0xe6edf3))
             .text_size(px(13.))
             .child(header)
+            .child(self.quit.clone())
             .child(
                 div()
                     .flex_1()
@@ -152,6 +179,14 @@ fn init_tracing() {
         .init();
 }
 
+/// Ends the app. By now nothing is left to ask about: the Repo service has quit, or the window
+/// is gone and there is nowhere to ask.
+fn exit(cx: &mut App) {
+    #[cfg(target_os = "macos")]
+    terminate::allow_exit();
+    cx.quit();
+}
+
 fn main() {
     init_tracing();
     let path = std::env::args_os().nth(1).map(PathBuf::from);
@@ -166,10 +201,13 @@ fn main() {
             ..Default::default()
         };
         cx.open_window(options, move |window, cx| {
-            cx.new(|cx| Workspace::new(path, window, cx))
+            let workspace = cx.new(|cx| Workspace::new(path, Rc::new(exit), window, cx));
+            #[cfg(target_os = "macos")]
+            terminate::route_to_close_flow(workspace.read(cx).quit.clone(), window, cx);
+            workspace
         })
         .expect("open the Cairn window");
-        cx.on_window_closed(|cx, _| cx.quit()).detach();
+        cx.on_window_closed(|cx, _| exit(cx)).detach();
         cx.activate(true);
     });
 }

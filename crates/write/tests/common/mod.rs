@@ -86,3 +86,30 @@ impl Repo {
         path
     }
 }
+
+/// An alias that runs a shell which announces itself on stderr and then waits for
+/// `release` to exist, or its directory to go. The shell is a child of git, as `upload-pack` or a remote helper
+/// is during a fetch.
+pub fn blocking_alias(release: &Path) -> String {
+    // git runs aliases with its own sh, which takes forward slashes on Windows too.
+    let dir = release
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .replace('\\', "/");
+    let release = release.to_str().unwrap().replace('\\', "/");
+    format!(
+        "alias.block=!echo waiting >&2; while [ ! -f '{release}' ] && [ -d '{dir}' ]; do sleep 0.05; done; \
+         echo released >&2"
+    )
+}
+
+/// Creates the release file when dropped, so a failing test never leaves a shell waiting.
+pub struct Release<'a>(pub &'a Path);
+
+impl Drop for Release<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::write(self.0, "");
+    }
+}

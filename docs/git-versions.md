@@ -24,6 +24,6 @@ Release notes live at `Documentation/RelNotes/<version>.adoc`. To find the first
 
 ## Gotchas in every version
 
-- **`fetch --all` drops `--progress`.** `--all` hands each remote to a sub-fetch, and `add_options_to_argv` never passes `--progress` down to it (checked from 2.23 through master). So progress reports appear only for one remote on 2.37+. Everything else git and the remote write still streams. See `crates/repo/src/fetch.rs`.
+- **`fetch --all` drops `--progress`.** `--all` hands each remote to a sub-fetch, and `add_options_to_argv` never passes `--progress` down to it (checked from 2.23 through master). So progress reports appear only for one remote on 2.37+. Everything else git and the remote write still streams. See `crates/repo/src/network.rs`.
 - **`-c` goes before the subcommand.** `git -c key=value fetch` sets config for that run. `git fetch -c key=value` doesn't set config: git parses the `-c` as one of `fetch`'s own options.
-- **`remote.<name>.uploadpack` runs through a shell** for a local remote, with the repository path appended. `sh '<script>'` therefore works as a wrapper, and `crates/repo/tests/fetch.rs` uses one to slow a remote down.
+- **`remote.<name>.uploadpack` runs through a shell** for a local remote, with the repository path appended. `sh '<script>'` therefore works as a wrapper, and `remote.<name>.receivepack` does the same for a push. `slow_remote` in `crates/repo/tests/common` uses both to slow a remote down.

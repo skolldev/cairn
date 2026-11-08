@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 #[cfg(windows)]
 use crate::MAX_WINDOWS_REPO_PATH;
-use crate::{Git, RunError, Stop, git_command};
+use crate::{Git, RunError, StartGate, Stop, git_command};
 
 /// What a Job is, as far as spawning git goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +33,7 @@ pub struct Invocation {
     args: Vec<OsString>,
     stdin: Option<Vec<u8>>,
     stop: Option<Stop>,
+    gate: Option<StartGate>,
 }
 
 impl Invocation {
@@ -43,6 +44,7 @@ impl Invocation {
             args: Vec::new(),
             stdin: None,
             stop: None,
+            gate: None,
         }
     }
 
@@ -70,6 +72,13 @@ impl Invocation {
     /// (ADR 0002): it is refused with [`RunError::NotStoppable`] before git starts.
     pub fn stop_on(mut self, stop: &Stop) -> Self {
         self.stop = Some(stop.clone());
+        self
+    }
+
+    /// Starts git only while `gate` is open. Every Local write Job passes through the Repo
+    /// service's gate, so that none starts once a Force quit has decided to exit.
+    pub fn through(mut self, gate: &StartGate) -> Self {
+        self.gate = Some(gate.clone());
         self
     }
 }
@@ -161,14 +170,18 @@ impl Git {
             path: self.path().to_owned(),
             source: Arc::new(e),
         };
-        let mut child = match &invocation.stop {
-            None => cmd.spawn(),
-            Some(stop) => match stop.spawn_unless_stopped(|| cmd.spawn()) {
+        let spawned = match (&invocation.stop, &invocation.gate) {
+            (Some(stop), _) => match stop.spawn_unless_stopped(|| cmd.spawn()) {
                 Some(spawned) => spawned,
                 None => return Err(RunError::Stopped { stderr: Vec::new() }),
             },
-        }
-        .map_err(spawn_error)?;
+            (None, Some(gate)) => match gate.spawn_unless_closed(|| cmd.spawn()) {
+                Some(spawned) => spawned,
+                None => return Err(RunError::GateClosed),
+            },
+            (None, None) => cmd.spawn(),
+        };
+        let mut child = spawned.map_err(spawn_error)?;
         let pipe = child.stdin.take();
         let mut stdout = child.stdout.take().expect("stdout is piped");
         let mut stderr = child.stderr.take().expect("stderr is piped");

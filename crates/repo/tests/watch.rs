@@ -4,13 +4,13 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use cairn_repo::{ChangesSnapshot, Generation, Head, Intent, Snapshot};
-use common::{Harness, Seen, git, open, slash, small_fixture_clone, touch};
+use common::{Harness, Seen, git, open, slash, small_fixture_clone};
 
 #[test]
 fn a_git_switch_run_outside_the_service_is_followed_by_a_refs_snapshot() {
@@ -39,30 +39,23 @@ fn a_newer_status_read_stops_the_running_one_instead_of_waiting_for_it() {
     let release = dir.path().join("release");
     // A clean filter that blocks the first time it runs, until `release` exists. The
     // Unstaged read runs it through `hash-object` for a stat-dirty file.
-    install_slow_clean_filter(
+    common::install_slow_clean_filter(
         &repo,
         dir.path(),
         &format!(
             "if [ ! -f '{started}' ]; then\n\
              touch '{started}'\n\
-             while [ ! -f '{release}' ]; do sleep 0.05; done\n\
+             {wait}\
              fi\n",
             started = slash(&started),
-            release = slash(&release),
+            wait = common::wait_for_release(&release),
         ),
     );
 
     let harness = Harness::start();
     let _release = common::Release(&release);
     harness.service.send(Intent::Open(repo.clone()));
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while !started.exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the first status read never ran the filter"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    common::wait_for_file(&started);
 
     // The first read is blocked in its filter. A newer one must not wait for it: without
     // the stop, nothing publishes until `release` exists, and this drain times out.
@@ -90,7 +83,7 @@ fn quick_refreshes_of_one_slot_publish_only_newer_generations_and_never_a_stoppe
     let (dir, repo) = small_fixture_clone();
     // Every Unstaged read takes a while (git runs the filter many times per read), so most
     // newer reads arrive while one is running and stop it.
-    install_slow_clean_filter(&repo, dir.path(), "sleep 0.02\n");
+    common::install_slow_clean_filter(&repo, dir.path(), "sleep 0.02\n");
     let harness = Harness::start();
     // A fresh service numbers the Unstaged Slot's reads 1, 2, 3, ... one per Open. The
     // watcher may add refreshes of its own, so later generations can be larger.
@@ -178,7 +171,7 @@ fn status_keeps_publishing_while_external_changes_keep_arriving() {
     let (dir, repo) = small_fixture_clone();
     // Each Unstaged read takes far longer than the gap between two writes, so a new event
     // always arrives while a read runs.
-    install_slow_clean_filter(&repo, dir.path(), "sleep 0.02\n");
+    common::install_slow_clean_filter(&repo, dir.path(), "sleep 0.02\n");
     let harness = Harness::start();
     let opened = open(&harness, &repo);
 
@@ -193,24 +186,6 @@ fn status_keeps_publishing_while_external_changes_keep_arriving() {
                 .is_ok_and(|c| c.iter().any(|f| f.path.as_bytes() == b"FAQ.md"))
         })
     });
-}
-
-/// Makes README.md stat-dirty and gives it a clean filter that runs `before` and then
-/// passes the content through. Each Unstaged read then runs the filter, through
-/// `hash-object`, inside the git it can stop.
-fn install_slow_clean_filter(repo: &Path, scratch: &Path, before: &str) {
-    let script = scratch.join("slow-clean.sh");
-    std::fs::write(&script, format!("{before}cat\n")).unwrap();
-    git(
-        repo,
-        &[
-            "config",
-            "filter.slow.clean",
-            &format!("sh '{}'", slash(&script)),
-        ],
-    );
-    std::fs::write(repo.join(".git/info/attributes"), "README.md filter=slow\n").unwrap();
-    touch(&repo.join("README.md"));
 }
 
 /// The Unstaged Snapshots in `seen`, oldest first.
@@ -235,8 +210,7 @@ fn unstaged_after(seen: &Seen, after: Generation) -> Vec<&Arc<ChangesSnapshot>> 
 fn a_burst_shorter_than_a_read_costs_at_most_two_status_refreshes() {
     let (dir, repo) = small_fixture_clone();
     // ADR 0004's bound holds for a burst that ends while the first read runs. A longer one
-    // is a stream, which publishes once per read. Slowing every read keeps this burst short.
-    install_slow_clean_filter(&repo, dir.path(), "sleep 0.05\n");
+    // is a stream, which publishes once per read.
     // Regular files only: a symlink or submodule entry can't be appended to.
     let files: Vec<String> = git(&repo, &["ls-files", "-s"])
         .lines()
@@ -247,6 +221,22 @@ fn a_burst_shorter_than_a_read_costs_at_most_two_status_refreshes() {
     assert_eq!(files.len(), 50, "the fixture has enough files for a burst");
     let harness = Harness::start();
     let opened = open(&harness, &repo);
+    let started = dir.path().join("burst-read-started");
+    let release = dir.path().join("burst-read-release");
+    let _release = common::Release(&release);
+    common::install_slow_clean_filter(
+        &repo,
+        dir.path(),
+        &format!(
+            "touch '{started}'\n{wait}",
+            started = slash(&started),
+            wait = common::wait_for_release(&release),
+        ),
+    );
+    common::wait_for_file(&started);
+    // The filter setup can publish a Snapshot before the blocked read starts. The burst
+    // begins here, with that read held until its last filesystem event has been seen.
+    harness.service.drain();
 
     // A short gap between writes, so the OS reports each one: Windows collapses a burst
     // that overflows its change buffer into one rescan, and the control below then fails.
@@ -258,8 +248,23 @@ fn a_burst_shorter_than_a_read_costs_at_most_two_status_refreshes() {
         std::thread::sleep(Duration::from_millis(2));
     }
 
-    let complete = |u: &ChangesSnapshot| u.result.as_ref().is_ok_and(|c| c.len() == files.len());
+    // A ref written after all the files is the marker that the watcher has processed the
+    // burst. Refs can publish while the Unstaged read is held in the clean filter.
+    git(&repo, &["branch", "burst-finished"]);
     let mut seen = Seen::default();
+    seen.until(&harness, |seen| {
+        seen.all.iter().any(|s| match s {
+            Snapshot::Refs(r) => r.result.as_ref().is_ok_and(|refs| {
+                refs.local
+                    .iter()
+                    .any(|entry| entry.name.as_str() == "refs/heads/burst-finished")
+            }),
+            _ => false,
+        })
+    });
+    std::fs::write(&release, "").unwrap();
+
+    let complete = |u: &ChangesSnapshot| u.result.as_ref().is_ok_and(|c| c.len() == files.len());
     seen.until(&harness, |seen| {
         unstaged_after(seen, opened.unstaged)
             .iter()
