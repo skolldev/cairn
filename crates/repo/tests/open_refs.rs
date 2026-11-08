@@ -109,6 +109,27 @@ fn refs_snapshot_of_the_small_fixture_matches_git_for_each_ref() {
 }
 
 #[test]
+fn cli_refs_path_matches_git_for_each_ref_head_and_stash() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("copy");
+    git(
+        dir.path(),
+        &[
+            "clone",
+            "--quiet",
+            small_fixture().to_str().unwrap(),
+            repo.to_str().unwrap(),
+        ],
+    );
+    git(&repo, &["config", "core.safecrlf", "true"]);
+    git(&repo, &["tag", "-a", "cli-tag", "-m", "tag"]);
+    std::fs::write(repo.join("README.md"), b"changed\n").unwrap();
+    git(&repo, &["stash", "push", "--quiet", "-m", "cli stash"]);
+    let snapshot = open(&repo);
+    assert_matches_git(&repo, snapshot.result.as_ref().unwrap());
+}
+
+#[test]
 fn refs_snapshot_covers_branches_stashes_annotated_tags_and_symrefs() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("copy");

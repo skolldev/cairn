@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use cairn_repo::{ChangeKind, ChangesSnapshot, FileChange, Intent, RepoPath, Snapshot};
-use common::{Harness, git, git_read, small_fixture_clone, touch};
+use common::{Harness, git, git_output, git_read, small_fixture_clone, touch};
 
 /// The three status lists, rendered as comparable lines.
 #[derive(Debug, PartialEq, Eq)]
@@ -117,6 +117,119 @@ fn snapshot_status(repo: &Path) -> Status {
         unstaged: changes(&unstaged.unwrap()),
         untracked: untracked.unwrap(),
     }
+}
+
+#[test]
+fn cli_fallback_configurations_match_git_porcelain_status() {
+    for (key, value) in [
+        ("index.sparse", "true"),
+        ("remote.origin.promisor", "true"),
+        ("core.safecrlf", "true"),
+    ] {
+        let (_dir, repo) = small_fixture_clone();
+        if key == "index.sparse" {
+            // Sparse-index support was added after our minimum Git 2.23. Use a real
+            // sparse index when the installed Git supports it; retain the config
+            // trigger on 2.23 so the same Snapshot path is still covered there.
+            let initialized = git_output(&repo, &["sparse-checkout", "init", "--cone"]);
+            if initialized.status.success() {
+                let set = git_output(&repo, &["sparse-checkout", "set", "--sparse-index", "src"]);
+                if !set.status.success() {
+                    git(&repo, &["config", key, value]);
+                }
+            } else {
+                git(&repo, &["config", key, value]);
+            }
+        } else {
+            git(&repo, &["config", key, value]);
+        }
+        std::fs::write(repo.join("new untracked"), b"new\n").unwrap();
+        std::fs::write(repo.join("README.md"), b"staged change\n").unwrap();
+        git(&repo, &["add", "README.md"]);
+        std::fs::write(repo.join("FAQ.md"), b"unstaged change\n").unwrap();
+        std::fs::create_dir(repo.join("untracked dir")).unwrap();
+        std::fs::write(repo.join("untracked dir/file"), b"new\n").unwrap();
+        std::fs::write(repo.join(".git/info/exclude"), b"ignored-file\n").unwrap();
+        std::fs::write(repo.join("ignored-file"), b"ignored\n").unwrap();
+        let expected = git_status(&repo);
+        assert_eq!(snapshot_status(&repo), expected, "{key}");
+
+        git(&repo, &["config", "status.showUntrackedFiles", "all"]);
+        let expected = git_status(&repo);
+        assert_eq!(
+            snapshot_status(&repo),
+            expected,
+            "{key} with untracked files expanded"
+        );
+
+        git(&repo, &["config", "status.showUntrackedFiles", "no"]);
+        assert_eq!(
+            snapshot_status(&repo),
+            git_status(&repo),
+            "{key} with untracked files hidden"
+        );
+    }
+}
+
+#[test]
+fn partial_clone_status_matches_git_porcelain() {
+    let (_source_dir, source) = small_fixture_clone();
+    git(&source, &["config", "uploadpack.allowFilter", "true"]);
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("partial");
+    let url = format!("file://{}", source.display());
+    let clone = git_output(
+        dir.path(),
+        &[
+            "clone",
+            "--quiet",
+            "--filter=blob:none",
+            &url,
+            repo.to_str().unwrap(),
+        ],
+    );
+    if !clone.status.success() {
+        // Git 2.23 is the minimum supported version and may not support this
+        // local transport's filter negotiation. The config-trigger test above
+        // still exercises the CLI Snapshot path on that version.
+        return;
+    }
+    assert_eq!(
+        git(&repo, &["config", "--get", "remote.origin.promisor"]).trim(),
+        "true"
+    );
+    std::fs::write(repo.join("partial-untracked"), b"new\n").unwrap();
+    std::fs::write(repo.join("README.md"), b"staged change\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    std::fs::write(repo.join("FAQ.md"), b"unstaged change\n").unwrap();
+    assert_eq!(snapshot_status(&repo), git_status(&repo));
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn cli_untracked_keeps_non_utf8_path_bytes() {
+    use std::os::unix::ffi::OsStrExt;
+    let (_dir, repo) = small_fixture_clone();
+    git(&repo, &["config", "core.safecrlf", "true"]);
+    let name = std::ffi::OsStr::from_bytes(b"nonutf8-\xff");
+    std::fs::write(repo.join(name), b"new\n").unwrap();
+    let harness = Harness::start();
+    harness.service.send(Intent::Open(repo));
+    let seen = harness.drain_until(|s| match s {
+        Snapshot::Untracked(s) => s
+            .result
+            .as_ref()
+            .is_ok_and(|paths| paths.iter().any(|p| p.as_bytes() == b"nonutf8-\xff")),
+        _ => false,
+    });
+    let paths = seen
+        .iter()
+        .find_map(|s| match s {
+            Snapshot::Untracked(s) => Some(s.result.as_ref().unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(paths.iter().any(|p| p.as_bytes() == b"nonutf8-\xff"));
 }
 
 #[test]
