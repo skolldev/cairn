@@ -19,7 +19,7 @@ use std::sync::atomic::AtomicBool;
 
 pub use cairn_core::{Refs, RepoPath};
 
-/// A gix error, as text. Reads never retry, so the caller only shows it.
+/// A gix error, as text. The Repo service can retry through git.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadError(String);
 
@@ -54,6 +54,11 @@ impl Repo {
         gix::ThreadSafeRepository::open_opts(path, options)
             .map(Self)
             .map_err(err)
+    }
+
+    /// Whether gix opened this repository with restricted config permissions.
+    pub fn reduced_trust(&self) -> bool {
+        self.0.to_thread_local().git_dir_trust() == gix::sec::Trust::Reduced
     }
 
     /// Every ref Cairn shows: local and remote branches, tags, stashes and HEAD.

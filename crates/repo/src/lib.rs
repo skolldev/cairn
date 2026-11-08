@@ -5,6 +5,7 @@
 //! [`RepoService::drain`]. Jobs run on threads this crate owns, with no async runtime and
 //! no UI executor, so the whole service runs headless in tests.
 
+mod fallback;
 mod network;
 mod scheduler;
 mod status;
@@ -202,6 +203,7 @@ struct Reads {
     outbox: Arc<Outbox>,
     /// The repository the last Open named.
     open: Mutex<Option<PathBuf>>,
+    read_mode: Mutex<Arc<fallback::ReadMode>>,
 }
 
 impl RepoService {
@@ -225,6 +227,7 @@ impl RepoService {
                     wake: Box::new(wake),
                 }),
                 open: Mutex::new(None),
+                read_mode: Mutex::new(Arc::new(fallback::ReadMode::default())),
             }),
             _interactive: interactive,
             next_job: AtomicU64::new(1),
@@ -258,6 +261,7 @@ impl RepoService {
                 let span = tracing::info_span!("intent", kind = "open", path = %path.display());
                 let _entered = span.enter();
                 *self.reads.open.lock().unwrap() = Some(path.clone());
+                *self.reads.read_mode.lock().unwrap() = Arc::new(fallback::ReadMode::default());
                 // Watching starts before the first read, so no change falls between them.
                 // The old watcher stops here; its late events are for a repository that is
                 // no longer open, which `refresh_if_open` ignores.
@@ -606,15 +610,22 @@ impl Reads {
     }
 
     fn refresh_refs(&self, path: &Path, running: Running, span: &tracing::Span) {
-        self.submit(&self.refs_slot, path, running, span, read_refs, |p| {
-            &mut p.refs
-        });
+        let mode = self.read_mode.lock().unwrap().clone();
+        self.submit(
+            &self.refs_slot,
+            path,
+            running,
+            span,
+            move |path, job| read_refs(path, job, &mode),
+            |p| &mut p.refs,
+        );
     }
 
     fn refresh_status(&self, path: &Path, running: Running, span: &tracing::Span) {
         self.submit(&self.staged_slot, path, running, span, read_staged, |p| {
             &mut p.staged
         });
+        let mode = self.read_mode.lock().unwrap().clone();
         self.submit(
             &self.unstaged_slot,
             path,
@@ -628,7 +639,7 @@ impl Reads {
             path,
             running,
             span,
-            read_untracked,
+            move |path, job| read_untracked(path, job, &mode),
             |p| &mut p.untracked,
         );
     }
@@ -641,7 +652,7 @@ impl Reads {
         path: &Path,
         running: Running,
         span: &tracing::Span,
-        read: fn(&Path, &JobContext) -> Result<T, String>,
+        read: impl Fn(&Path, &JobContext) -> Result<T, String> + Send + 'static,
         cell: fn(&mut Pending) -> &mut Latest<T>,
     ) {
         let outbox = self.outbox.clone();
@@ -666,19 +677,26 @@ impl Reads {
     }
 }
 
-/// Opens the repository with gix and reads its refs. Too quick to be worth stopping.
-fn read_refs(path: &Path, _job: &JobContext) -> Result<Refs, String> {
-    cairn_read::Repo::open(path)
-        .and_then(|repo| repo.refs())
-        .map_err(|e| e.message().to_owned())
+/// Reads refs with gix or the CLI fallback.
+fn read_refs(path: &Path, job: &JobContext, mode: &fallback::ReadMode) -> Result<Refs, String> {
+    mode.read(path, job, fallback::refs, || {
+        cairn_read::Repo::open(path)
+            .and_then(|repo| repo.refs())
+            .map_err(|e| e.message().to_owned())
+    })
 }
 
-/// Opens the repository with gix and walks the worktree for untracked files, stopping
-/// early once Superseded.
-fn read_untracked(path: &Path, job: &JobContext) -> Result<Vec<RepoPath>, String> {
-    cairn_read::Repo::open(path)
-        .and_then(|repo| repo.untracked(job.gix_interrupt()))
-        .map_err(|e| e.message().to_owned())
+/// Reads untracked files with gix or the CLI fallback, stopping once Superseded.
+fn read_untracked(
+    path: &Path,
+    job: &JobContext,
+    mode: &fallback::ReadMode,
+) -> Result<Vec<RepoPath>, String> {
+    mode.read(path, job, fallback::untracked, || {
+        cairn_read::Repo::open(path)
+            .and_then(|repo| repo.untracked(job.gix_interrupt()))
+            .map_err(|e| e.message().to_owned())
+    })
 }
 
 fn read_staged(path: &Path, job: &JobContext) -> Result<Vec<FileChange>, String> {

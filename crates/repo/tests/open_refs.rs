@@ -2,10 +2,11 @@
 
 mod common;
 
+use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
-use cairn_repo::{Head, Intent, RefEntry, Refs, RefsSnapshot, Snapshot};
+use cairn_repo::{Head, Intent, JobState, RefEntry, Refs, RefsSnapshot, Snapshot};
 use common::{Harness, git, git_output, small_fixture};
 
 fn refs_of(snapshot: &Snapshot) -> Option<&Arc<RefsSnapshot>> {
@@ -106,6 +107,114 @@ fn refs_snapshot_of_the_small_fixture_matches_git_for_each_ref() {
     let refs = snapshot.result.as_ref().expect("the fixture opens");
     assert!(!refs.tags.is_empty(), "the fixture has tags");
     assert_matches_git(&fixture, refs);
+}
+
+#[test]
+fn cli_refs_path_matches_git_for_each_ref_head_and_stash() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("copy");
+    git(
+        dir.path(),
+        &[
+            "clone",
+            "--quiet",
+            small_fixture().to_str().unwrap(),
+            repo.to_str().unwrap(),
+        ],
+    );
+    git(&repo, &["config", "core.safecrlf", "true"]);
+    git(&repo, &["tag", "-a", "cli-tag", "-m", "tag"]);
+    std::fs::write(repo.join("README.md"), b"changed\n").unwrap();
+    git(&repo, &["stash", "push", "--quiet", "-m", "cli stash"]);
+    let snapshot = open(&repo);
+    assert_matches_git(&repo, snapshot.result.as_ref().unwrap());
+}
+
+#[test]
+fn malformed_stash_reflog_retries_refs_with_git_and_latches_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("copy");
+    git(
+        dir.path(),
+        &[
+            "clone",
+            "--quiet",
+            small_fixture().to_str().unwrap(),
+            repo.to_str().unwrap(),
+        ],
+    );
+    let original = git(&repo, &["symbolic-ref", "--short", "HEAD"])
+        .trim()
+        .to_owned();
+    git(&repo, &["branch", "fallback-other"]);
+    std::fs::write(repo.join("README.md"), b"changed\n").unwrap();
+    git(&repo, &["stash", "push", "--quiet", "-m", "fallback probe"]);
+    let log = repo.join(".git/logs/refs/stash");
+    let valid_log = std::fs::read(&log).unwrap();
+    // gix rejects this reflog line; `git stash list` ignores it. It is a real
+    // repository difference that exercises same-call CLI retry at the public seam.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&log)
+        .unwrap()
+        .write_all(b"malformed\n")
+        .unwrap();
+
+    let harness = Harness::start();
+    harness.service.send(Intent::Open(repo.clone()));
+    let first = harness.drain_until(|s| refs_of(s).is_some());
+    let first = last_refs(&first);
+    // Seen red: returning the gix error instead of retrying through git fails here.
+    assert_matches_git(
+        &repo,
+        first.result.as_ref().expect("git retries a gix refs error"),
+    );
+
+    let mut previous = first.generation;
+    harness
+        .service
+        .send(Intent::Switch("fallback-other".to_owned()));
+    let seen = harness.drain_until(|snapshot| match snapshot {
+        Snapshot::Refs(refs) if refs.generation > previous => refs.result.as_ref().is_ok_and(
+            |refs| matches!(&refs.head, Head::Branch { name, .. } if name.as_str() == "refs/heads/fallback-other"),
+        ),
+        _ => false,
+    });
+    let second = last_refs(&seen);
+    previous = second.generation;
+    assert_matches_git(
+        &repo,
+        second
+            .result
+            .as_ref()
+            .expect("second gix error retries through git"),
+    );
+
+    // Now gix can read Refs, while Git's stash command fails on this date format.
+    // A newly opened service proves that control through the same Snapshot seam.
+    std::fs::write(&log, valid_log).unwrap();
+    git(&repo, &["config", "log.date", "bogus"]);
+    let control = open(&repo);
+    assert!(control.result.is_ok(), "gix reads Refs with this config");
+
+    harness.service.send(Intent::Switch(original));
+    let mut switched = false;
+    let mut later = None;
+    harness.drain_until(|snapshot| {
+        match snapshot {
+            Snapshot::Job(job) if job.state == JobState::Done(Ok(())) => switched = true,
+            Snapshot::Refs(refs) if refs.generation > previous => later = Some(refs.clone()),
+            _ => {}
+        }
+        switched && later.is_some()
+    });
+    // Seen red: removing the failure latch makes gix succeed here instead.
+    let later = later.unwrap();
+    let error = match &later.result {
+        Err(error) => error,
+        Ok(_) => panic!("later Refs Snapshot used gix; expected the latched Git error"),
+    };
+    assert!(error.contains("unknown date format bogus"), "{error}");
 }
 
 #[test]
