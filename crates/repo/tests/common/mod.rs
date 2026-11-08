@@ -330,6 +330,18 @@ pub fn wait_for_release(release: &Path) -> String {
     )
 }
 
+/// sh that blocks only the first process to run it, until `release` exists. `started` appears
+/// once that process is blocked, for [`wait_for_file`]. Decided by `mkdir`, because processes can
+/// run this at once and only one `mkdir` can succeed, where testing for a file lets several
+/// through. `scripts/check-test-gates.sh` keeps it that way.
+pub fn block_first_run(started: &Path, release: &Path) -> String {
+    format!(
+        "if mkdir '{started}' 2>/dev/null; then\n{wait}fi\n",
+        started = slash(started),
+        wait = wait_for_release(release),
+    )
+}
+
 /// Creates a release file when dropped, so a failing test never leaves a hook or wrapper
 /// waiting on it. Declare it after the [`Harness`]: it then drops first, releasing the
 /// wait before the service waits for its Local write Jobs.

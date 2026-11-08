@@ -37,6 +37,33 @@ jobs:
       - name: Only cairn-write starts processes
         run: ./scripts/check-single-git-spawn.sh
 
+  # Rules and tools for the tests themselves, which need nothing of Cairn's built. Each script's
+  # self-test shows it fails when it should.
+  test-tooling:
+    name: test gates and tooling
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Guard self-test (deliberate violations must fail)
+        run: ./scripts/test-check-test-gates.sh
+      - name: No check-then-create gates in tests
+        run: ./scripts/check-test-gates.sh
+      - name: seen-red.py self-test
+        run: ./scripts/test-seen-red.sh
+      - name: Cache the small fixture
+        uses: actions/cache@v4
+        with:
+          path: ~/cairn-fixtures/ripgrep
+          key: fixture-ripgrep-91f5d22ef48bde459d90a8c7dbeab416e97d0f2b-${{ runner.os }}
+      - name: Fixtures
+        run: |
+          ./scripts/fixtures.sh small
+          ./scripts/fixtures.sh filters
+      - name: Fixture check self-test
+        run: ./scripts/test-fixtures-check.sh
+      - name: Fixtures are what their names claim
+        run: ./scripts/fixtures.sh check
+
   # A slowdown shows up against this commit's base, benched by the same runner in the same job,
   # because numbers from different runners can't be compared. It's a signal that a change got
   # slower, and never evidence for a Budget (CODING_STANDARDS.md). The kernel fixture isn't

@@ -43,14 +43,7 @@ fn a_newer_status_read_stops_the_running_one_instead_of_waiting_for_it() {
     common::install_slow_clean_filter(
         &repo,
         dir.path(),
-        &format!(
-            "if [ ! -f '{started}' ]; then\n\
-             touch '{started}'\n\
-             {wait}\
-             fi\n",
-            started = slash(&started),
-            wait = common::wait_for_release(&release),
-        ),
+        &common::block_first_run(&started, &release),
     );
 
     let harness = Harness::start();

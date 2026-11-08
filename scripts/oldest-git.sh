@@ -3,6 +3,8 @@
 # locally exactly as the `oldest-git` CI job does. Skips the build if the prefix already
 # holds that version. Prints the bin directory to put first on PATH.
 #
+# git-matrix.sh also uses it to build the newest git, and tests against both.
+#
 # Usage: scripts/oldest-git.sh [version] [prefix]
 # Defaults: 2.23.0, and ~/git-<version>. Needs make, a C compiler, curl and zlib headers.
 #

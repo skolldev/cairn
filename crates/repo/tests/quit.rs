@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use cairn_repo::{Intent, JobKind, JobState, RepoService, Snapshot};
 use common::{
     Harness, Release, Seen, git, git_read, install_blocking_hook, install_slow_clean_filter,
-    is_ended, lock_files, open, slash, slow_remote, small_fixture_clone, wait_for_file,
+    is_ended, lock_files, open, slow_remote, small_fixture_clone, wait_for_file,
     wait_until_network_job_is_waiting,
 };
 
@@ -173,14 +173,7 @@ fn a_quit_drops_the_running_and_the_pending_read_job() {
     install_slow_clean_filter(
         &repo,
         dir.path(),
-        &format!(
-            "if [ ! -f '{started}' ]; then\n\
-             touch '{started}'\n\
-             {wait}\
-             fi\n",
-            started = slash(&started),
-            wait = common::wait_for_release(&release),
-        ),
+        &common::block_first_run(&started, &release),
     );
     let harness = Harness::start();
     let _release = Release(&release);

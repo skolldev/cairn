@@ -12,6 +12,8 @@ gh api "repos/git/git/contents/builtin/fetch.c?ref=v2.37.0" -H "Accept: applicat
 
 Release notes live at `Documentation/RelNotes/<version>.adoc`. To find the first version with a behaviour, grep the file at a few tags and narrow down.
 
+Check the newest tag as well as 2.23 when a test leans on git's incidental behaviour rather than a documented promise, such as what makes git block or which step fetches. `scripts/git-matrix.sh` then runs the tests on both.
+
 ## Facts
 
 | Behaviour | Since | Where it shows | Checked in |

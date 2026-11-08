@@ -13,7 +13,7 @@ use std::time::Duration;
 use cairn_repo::{Head, Intent, Oid, RefsSnapshot, Snapshot};
 use common::{
     Harness, Release, Seen, SlowRemote, git, install_slow_clean_filter, open, rev_list_order,
-    slow_remote, wait_for_file, wait_for_release,
+    slow_remote, wait_for_file,
 };
 
 /// A repository whose next walk blocks in the slow remote until `release` exists. The ref
@@ -100,17 +100,11 @@ fn a_long_walk_doesnt_delay_an_interactive_read_even_with_a_worker_already_busy(
     let walk = harness.service.walk_history();
     wait_for_wrapper_runs(&f.log, 1);
 
-    // Only the first read to run the filter blocks. Status and Unstaged can both run it at once,
-    // so the first is decided by `mkdir`, which only one of them can win: a test-and-touch let
-    // both through, and that held both Interactive workers with the walk nowhere near them.
+    // Only the first read to run the filter blocks. Status and Unstaged can both run it at once.
     install_slow_clean_filter(
         &f.repo,
         f.dir.path(),
-        &format!(
-            "if mkdir '{started}' 2>/dev/null; then\n{wait}fi\n",
-            started = common::slash(&filter_started),
-            wait = wait_for_release(&filter_release),
-        ),
+        &common::block_first_run(&filter_started, &filter_release),
     );
     std::fs::write(f.repo.join("wake-the-watcher"), "").unwrap();
     wait_for_file(&filter_started);
