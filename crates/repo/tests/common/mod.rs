@@ -53,10 +53,7 @@ pub fn assert_filesystem_events_available(repo: &Path) {
 /// The small fixture: ripgrep at the #5 commit. `scripts/fixtures.sh small` creates it.
 /// `CAIRN_FIXTURES` overrides the fixture root, which defaults to `~/cairn-fixtures`.
 pub fn small_fixture() -> PathBuf {
-    let root = std::env::var_os("CAIRN_FIXTURES")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| real_home().join("cairn-fixtures"));
-    let path = root.join("ripgrep");
+    let path = fixture_root().join("ripgrep");
     assert!(
         path.join(".git").exists(),
         "the small fixture is missing at {}. Create it with `scripts/fixtures.sh small`, \
@@ -64,6 +61,13 @@ pub fn small_fixture() -> PathBuf {
         path.display()
     );
     path
+}
+
+/// Where the fixtures live, one directory under `CAIRN_FIXTURES` or `~/cairn-fixtures` each.
+pub fn fixture_root() -> PathBuf {
+    std::env::var_os("CAIRN_FIXTURES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| real_home().join("cairn-fixtures"))
 }
 
 /// The user's home as the test process found it, before [`hermetic`] replaced `HOME`.
@@ -86,9 +90,84 @@ fn hermetic() -> &'static (PathBuf, tempfile::TempDir) {
             std::env::set_var("HOME", temp.path());
             std::env::set_var("XDG_CONFIG_HOME", temp.path().join(".config"));
             std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+            std::env::set_var("GIT_TRACE2_EVENT", temp.path().join("trace2.jsonl"));
         }
         (real, temp)
     })
+}
+
+/// Whether any git run so far named this subcommand with `repo` as its `-C`, by git's own
+/// trace2 log, which [`hermetic`] turns on. Repositories in temp dirs have unique paths, so
+/// tests running side by side don't see each other's git.
+pub fn git_ran(repo: &Path, subcommand: &str) -> bool {
+    let log = hermetic().1.path().join("trace2.jsonl");
+    // The directory's own name, which needs no JSON escaping on any OS. The copy of the
+    // fixture is always named the same, so look one level up too.
+    let parent = repo.parent().and_then(Path::file_name).unwrap();
+    let parent = parent.to_str().unwrap();
+    std::fs::read_to_string(log).is_ok_and(|log| {
+        log.lines().any(|line| {
+            line.contains(r#""event":"start""#)
+                && line.contains(parent)
+                && line.contains(&format!(r#""{subcommand}""#))
+        })
+    })
+}
+
+pub fn commit_graph_exists(repo: &Path) -> bool {
+    let info = repo.join(".git/objects/info");
+    info.join("commit-graph").exists() || info.join("commit-graphs/commit-graph-chain").exists()
+}
+
+/// Writes a commit-graph of everything reachable, and proves it's there.
+pub fn write_commit_graph(repo: &Path) {
+    git(repo, &["commit-graph", "write", "--reachable"]);
+    assert!(commit_graph_exists(repo), "git wrote a commit-graph");
+}
+
+/// What `git rev-list` prints for the walk Cairn promises, run as a Read Job runs git.
+pub fn rev_list_order(repo: &Path) -> Vec<Oid> {
+    let out = git_read(repo, &["rev-list", "--topo-order", "--date-order", "--all"]);
+    String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(Oid::from_hex)
+        .collect()
+}
+
+/// Writes a commit object with exactly this commit date, and nothing that points to it. Object
+/// first, because only the environment can set a commit date through `git commit`, and the
+/// runner's environment is the same for every test. Its parents needn't exist. `scratch` is a
+/// directory for the object's file.
+pub fn write_commit(
+    repo: &Path,
+    scratch: &Path,
+    tree: &str,
+    parents: &[&str],
+    date: u32,
+    message: &str,
+) -> String {
+    let who = format!("Cairn Test <test@cairn.invalid> {date} +0000");
+    let mut object = format!("tree {tree}\n");
+    for parent in parents {
+        object += &format!("parent {parent}\n");
+    }
+    object += &format!("author {who}\ncommitter {who}\n\n{message}\n");
+    let file = scratch.join("commit-object");
+    std::fs::write(&file, object).unwrap();
+    git(
+        repo,
+        &["hash-object", "-t", "commit", "-w", file.to_str().unwrap()],
+    )
+    .trim()
+    .to_owned()
+}
+
+/// A local clone copies the fixture's commit-graph, if it has one. This removes it.
+pub fn remove_commit_graph(repo: &Path) {
+    let info = repo.join(".git/objects/info");
+    let _ = std::fs::remove_file(info.join("commit-graph"));
+    let _ = std::fs::remove_dir_all(info.join("commit-graphs"));
 }
 
 /// Runs git in `repo` through Cairn's runner, with a test identity, and returns its output.
@@ -196,10 +275,7 @@ pub fn small_fixture_clone() -> (tempfile::TempDir, PathBuf) {
 
 /// The autocrlf and filters fixture. `scripts/fixtures.sh filters` creates it.
 pub fn filters_fixture() -> PathBuf {
-    let root = std::env::var_os("CAIRN_FIXTURES")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| real_home().join("cairn-fixtures"));
-    let path = root.join("filters");
+    let path = fixture_root().join("filters");
     assert!(
         path.join(".git").exists(),
         "the filters fixture is missing at {}. Create it with `scripts/fixtures.sh filters`, \
@@ -235,7 +311,7 @@ pub fn filters_fixture_copy() -> (tempfile::TempDir, PathBuf) {
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use cairn_repo::{Generation, Intent, JobId, JobKind, JobSnapshot, JobState, RefsSnapshot};
+use cairn_repo::{Generation, Intent, JobId, JobKind, JobSnapshot, JobState, Oid, RefsSnapshot};
 
 /// `path` as git's own sh reads it: forward slashes, on Windows too. For paths written
 /// into hooks, aliases and `uploadpack` wrappers.
@@ -420,9 +496,7 @@ pub fn slow_remote() -> SlowRemote {
     );
     // A local clone copies the fixture's commit-graph. Remove it, so that one after the
     // fetch is the fetch's.
-    let info = repo.join(".git/objects/info");
-    let _ = std::fs::remove_file(info.join("commit-graph"));
-    let _ = std::fs::remove_dir_all(info.join("commit-graphs"));
+    remove_commit_graph(&repo);
     let branch = git(&repo, &["symbolic-ref", "--short", "HEAD"])
         .trim()
         .to_owned();

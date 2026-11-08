@@ -1,8 +1,8 @@
 //! The Job scheduler, private to the Repo service.
 //!
-//! One Interactive lane of worker threads that `repo` owns, Slots and generation tokens
-//! for Read Jobs, and the Job queues that Local write Jobs and Network Jobs each run in.
-//! The Background lane arrives with its own ticket.
+//! The Interactive and Background lanes of worker threads that `repo` owns, Slots and
+//! generation tokens for Read Jobs, and the Job queues that Local write Jobs and Network
+//! Jobs each run in.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +14,41 @@ use cairn_write::Stop;
 use crate::Generation;
 
 type Work = Box<dyn FnOnce() + Send>;
+
+/// How macOS should schedule a lane's threads. Elsewhere this does nothing.
+///
+/// Chosen against GPUI's dispatcher at `gpui-pre 0.3.11` (`gpui-pre-apple`'s `dispatcher.rs`):
+/// its High, Medium and Low priorities go to libdispatch's global queues of those priorities,
+/// which map to the user-initiated, default and utility QoS classes, and its UI work runs on
+/// the main thread, at user-interactive. So neither lane can compete with drawing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Qos {
+    /// Someone just clicked and is waiting: the class of GPUI's own High work.
+    UserInitiated,
+    /// Long work whose progress someone will see: the class of GPUI's Low work. Not the
+    /// `background` class, which throttles disk I/O hard enough to make a walk of a large
+    /// repository take far longer, and the graph is waiting on it.
+    Utility,
+}
+
+impl Qos {
+    /// Applies to the calling thread, before it takes any work.
+    fn apply(self) {
+        #[cfg(target_os = "macos")]
+        {
+            let class = match self {
+                Qos::UserInitiated => libc::qos_class_t::QOS_CLASS_USER_INITIATED,
+                Qos::Utility => libc::qos_class_t::QOS_CLASS_UTILITY,
+            };
+            // SAFETY: only sets the calling thread's own QoS, from arguments that are valid
+            // for it. It can't fail for a thread that has never set a QoS override.
+            let result = unsafe { libc::pthread_set_qos_class_self_np(class, 0) };
+            if result != 0 {
+                tracing::warn!(result, ?class, "couldn't set a lane thread's QoS");
+            }
+        }
+    }
+}
 
 /// Worker threads that run Read Jobs in arrival order. Capped, named, and joined on drop.
 pub(crate) struct Lane {
@@ -28,7 +63,7 @@ struct LaneShared {
 }
 
 impl Lane {
-    pub(crate) fn new(name: &str, threads: usize) -> Self {
+    pub(crate) fn new(name: &str, threads: usize, qos: Qos) -> Self {
         let shared = Arc::new(LaneShared {
             queue: Mutex::new(VecDeque::new()),
             ready: Condvar::new(),
@@ -39,7 +74,10 @@ impl Lane {
                 let shared = shared.clone();
                 std::thread::Builder::new()
                     .name(format!("cairn-{name}-{i}"))
-                    .spawn(move || shared.work())
+                    .spawn(move || {
+                        qos.apply();
+                        shared.work();
+                    })
                     .expect("spawn a lane worker")
             })
             .collect();

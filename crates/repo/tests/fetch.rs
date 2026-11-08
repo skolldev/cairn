@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use cairn_repo::{Intent, JobKind, JobState, RefsSnapshot, Snapshot};
 use common::{
-    Harness, Release, Seen, git, git_read, install_blocking_hook, is_ended, lock_files, open,
-    slow_remote, wait_until_network_job_is_waiting,
+    Harness, Release, Seen, commit_graph_exists, git, git_read, install_blocking_hook, is_ended,
+    lock_files, open, slow_remote, wait_until_network_job_is_waiting,
 };
 
 /// Where the remote-tracking branch `origin/<branch>` points in a refs Snapshot.
@@ -101,11 +101,6 @@ fn version(major: u32, minor: u32) -> cairn_write::GitVersion {
         minor,
         patch: 0,
     }
-}
-
-fn commit_graph_exists(repo: &Path) -> bool {
-    let info = repo.join(".git/objects/info");
-    info.join("commit-graph").exists() || info.join("commit-graphs/commit-graph-chain").exists()
 }
 
 #[test]

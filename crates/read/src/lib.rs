@@ -12,12 +12,13 @@
 
 mod refs;
 mod untracked;
+mod walk;
 
 use std::fmt;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-pub use cairn_core::{Refs, RepoPath};
+pub use cairn_core::{Oid, Refs, RepoPath};
 
 /// A gix error, as text. The Repo service can retry through git.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,5 +72,18 @@ impl Repo {
     /// Setting `interrupt` ends the walk early with an error.
     pub fn untracked(&self, interrupt: &AtomicBool) -> Result<Vec<RepoPath>, ReadError> {
         untracked::read(&self.0.to_thread_local(), interrupt)
+    }
+
+    /// Whether [`walk`](Self::walk) can use a commit-graph, as git would. Only then does gix
+    /// walk history: without one, `git rev-list` is the engine that passed (#13).
+    pub fn has_commit_graph(&self) -> Result<bool, ReadError> {
+        walk::has_commit_graph(&self.0.to_thread_local())
+    }
+
+    /// History from all refs and HEAD, in the order of `git rev-list --topo-order
+    /// --date-order --all`, except that commits of equal date may swap places. Setting
+    /// `interrupt` ends the walk early with an error.
+    pub fn walk(&self, interrupt: &AtomicBool) -> Result<Vec<Oid>, ReadError> {
+        walk::read(&self.0.to_thread_local(), interrupt)
     }
 }

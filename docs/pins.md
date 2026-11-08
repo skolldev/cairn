@@ -32,6 +32,10 @@ Checked 2026-11-07, before pinning.
 
 `gpui-component` is used rather than its umbrella crate `gpui-kit`, because the commit-box spike (#10) proved `gpui-component =0.9.0` with `default-features = false`. The 25 GPUI-family packages in `Cargo.lock` are at exactly the versions and checksums of that spike's lockfile.
 
+## GPUI's dispatcher and the lanes' QoS
+
+Checked 2026-11-08 at `gpui-pre 0.3.11`, in `gpui-pre-apple`'s `dispatcher.rs`, before choosing QoS classes for the `repo` crate's lanes (ADR 0001). GPUI runs UI work on the main thread (user-interactive), and sends High, Medium and Low background work to libdispatch's global queues of those priorities, which map to the user-initiated, default and utility classes. So the Interactive lane runs at user-initiated, level with GPUI's High work, and the Background lane at utility, level with its Low work. Neither competes with drawing. Re-check this on any GPUI upgrade. `Qos` in `crates/repo/src/scheduler.rs` holds the choice. A lane's QoS covers its own thread only: nothing here checks what class a git process it starts runs at.
+
 ## gpui-pre against zed@f816e1f: one-time source diff
 
 Done 2026-11-07. Each `gpui-pre-*` crate in `Cargo.lock` (20 of them, all 0.3.11) was taken from the cargo registry cache, its sha256 checked against `Cargo.lock`, and compared file by file with the crate it names in `[package.metadata.gpui-pre] zed-crate` at zed@`f816e1f9263e3a8ef63c4baaa02e1441ce1c6038` (2026-11-01). Every crate names that same `zed-rev`. Manifests were compared by their declared dependencies, because publishing rewrites `Cargo.toml` and resolves workspace inheritance.
