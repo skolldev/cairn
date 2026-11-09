@@ -52,6 +52,10 @@ jobs:
         run: ./scripts/test-check-git-floor.sh
       - name: The git floor is the git tests run against
         run: ./scripts/check-git-floor.sh
+      - name: gix pathspec guard self-test (deliberate violations must fail)
+        run: ./scripts/test-check-gix-pathspec-top.sh
+      - name: Every gix pathspec is anchored at the worktree root
+        run: ./scripts/check-gix-pathspec-top.sh
       - name: git-matrix.sh self-test
         run: ./scripts/test-git-matrix.sh
       - name: seen-red.py self-test

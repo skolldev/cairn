@@ -1,13 +1,13 @@
 # Coding standards
 
-Judgement calls a reviewer applies to every change. Rules a script can check live in `scripts/` and run in CI instead: GPUI only in `cairn-app` (`check-gpui-free.sh`), git spawned only by `cairn-write` (`check-single-git-spawn.sh`, which lets the Budget harness start `cairn` and PresentMon from one file that refuses git), and one oldest git everywhere (`check-git-floor.sh`). Domain terms come from `CONTEXT.md`; decisions from `docs/adr/`.
+Judgement calls a reviewer applies to every change. Rules a script can check live in `scripts/` and run in CI instead: GPUI only in `cairn-app` (`check-gpui-free.sh`), git spawned only by `cairn-write` (`check-single-git-spawn.sh`, which lets the Budget harness start `cairn` and PresentMon from one file that refuses git), one oldest git everywhere (`check-git-floor.sh`), and every gix pathspec anchored with `top` (`check-gix-pathspec-top.sh`). Domain terms come from `CONTEXT.md`; decisions from `docs/adr/`.
 
 ## Tests
 
 From #14's testing decisions.
 
 - **Seams.** A test drives the system through a public seam and asserts what a caller could observe. There are four seams:
-  - **`cairn-repo`'s interface** (Intents in, Snapshots out) is the main one. Assert Snapshot contents, the order and generation of Snapshots, Job outcomes, git's error text, and the repository on disk afterwards.
+  - **`cairn-repo`'s interface** (Intents in, Snapshots out) is the main one. Assert Snapshot contents, the order and generation of Snapshots, Job outcomes, git's error text, and the repository on disk afterwards. Its `read_job` tracing spans are part of it too, because they are how the Budget work learns where time goes (#40): a test installs a subscriber, as `crates/repo/tests/trace.rs` does, and matches spans by their repository, since other tests' services run in the same binary.
   - **`cairn-write`'s runner** (an `Invocation` in, `Output` or git's error out) is for rules awkward to reach through Intents.
   - **`cairn-app`'s window** (a close or click in; a prompt, an exit or the repository on disk out) is for what `app` decides. GPUI's `test-support` drives it, with the real Repo service and real git behind it, as `crates/app/src/quit/tests.rs` does. The test window draws only when resized, so the Bridge drains on its timer: advance the executor's clock.
   - **`cairn-budget`'s public interface** (samples and traces in, verdicts and reports out, and the sandbox a fixture is cloned into) is for how the Budget harness judges numbers. Worked examples, never the same formula again. What it can't show is real presentation timing, because test windows present nothing: that takes a harness run (`docs/budget-harness.md`).

@@ -840,6 +840,7 @@ dependencies = [
  "redb",
  "tempfile",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -6,6 +6,7 @@
 //! no UI executor, so the whole service runs headless in tests.
 
 mod fallback;
+mod narrow;
 mod network;
 mod scheduler;
 mod status;
@@ -205,6 +206,9 @@ struct Reads {
     untracked_slot: Slot,
     /// In the Background lane, unlike every other Slot.
     history_slot: Slot,
+    /// How far an External change narrows the Unstaged and Untracked reads.
+    unstaged_narrowed: Arc<narrow::Narrowed<FileChange>>,
+    untracked_narrowed: Arc<narrow::Narrowed<RepoPath>>,
     outbox: Arc<Outbox>,
     /// The repository the last Open named.
     open: Mutex<Option<PathBuf>>,
@@ -229,6 +233,8 @@ impl RepoService {
                 unstaged_slot: Slot::new("unstaged", &interactive),
                 untracked_slot: Slot::new("untracked", &interactive),
                 history_slot: Slot::new("history", &background),
+                unstaged_narrowed: Arc::new(narrow::Narrowed::new()),
+                untracked_narrowed: Arc::new(narrow::Narrowed::new()),
                 outbox: Arc::new(Outbox {
                     pending: Mutex::new(Pending::default()),
                     wake: Box::new(wake),
@@ -278,7 +284,14 @@ impl RepoService {
                 // A walk of the repository that was open is no longer wanted. Nothing
                 // starts a new one: nothing shows history yet.
                 self.reads.history_slot.drop_jobs();
-                self.reads.refresh(&path, Running::Supersede, &span);
+                self.reads.refresh(
+                    &path,
+                    Asked {
+                        running: Running::Supersede,
+                        cause: "open",
+                        span: &span,
+                    },
+                );
             }
             Intent::Switch(branch) => {
                 let span = tracing::info_span!("intent", kind = "switch", branch = %branch);
@@ -371,7 +384,7 @@ impl RepoService {
         let _entered = span.enter();
         self.reads
             .history_slot
-            .submit(Running::Supersede, move |job| {
+            .submit(Running::Supersede, "walk_history", move |job| {
                 let walked = read_history(&path, job, &mode);
                 if job.is_current() {
                     let _ = answer.send(walked);
@@ -593,21 +606,50 @@ fn last_line(output: &str) -> Option<String> {
 }
 
 /// Which Slots a finished Job or an External change refreshes: only those it can change.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Refresh {
     Refs,
-    /// Staged, Unstaged and Untracked.
+    /// Staged, Unstaged and Untracked, in full.
     Status,
     RefsAndStatus,
+    /// Files in the worktree changed, and nothing in git's own directories did. HEAD vs index
+    /// can't change, so only Unstaged and Untracked are read, narrowed to these files.
+    Worktree(Touched),
+}
+
+/// Worktree files an External change touched.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Touched {
+    /// Relative to the worktree root, with `/` separators.
+    paths: std::collections::BTreeSet<Vec<u8>>,
+    /// A `.gitignore` changed, so any untracked file may now be ignored or not.
+    excludes: bool,
 }
 
 impl Refresh {
+    /// How a `read_job` span names it.
+    fn name(&self) -> &'static str {
+        match self {
+            Refresh::Refs => "refs",
+            Refresh::Status => "status",
+            Refresh::RefsAndStatus => "refs_and_status",
+            Refresh::Worktree(_) => "worktree",
+        }
+    }
+
     /// Everything either refreshes.
     fn union(self, other: Self) -> Self {
-        if self == other {
-            self
-        } else {
-            Refresh::RefsAndStatus
+        match (self, other) {
+            (Refresh::Worktree(mut a), Refresh::Worktree(b)) => {
+                a.paths.extend(b.paths);
+                a.excludes |= b.excludes;
+                Refresh::Worktree(a)
+            }
+            (Refresh::Worktree(_), Refresh::Status) | (Refresh::Status, Refresh::Worktree(_)) => {
+                Refresh::Status
+            }
+            (a, b) if a == b => a,
+            _ => Refresh::RefsAndStatus,
         }
     }
 }
@@ -638,11 +680,16 @@ impl Reads {
     fn refresh_if_open(&self, path: &Path, what: Refresh, span: &tracing::Span) {
         let open = self.open.lock().unwrap();
         if open.as_deref() == Some(path) {
-            let running = Running::Finish;
+            let asked = Asked {
+                running: Running::Finish,
+                cause: what.name(),
+                span,
+            };
             match what {
-                Refresh::RefsAndStatus => self.refresh(path, running, span),
-                Refresh::Refs => self.refresh_refs(path, running, span),
-                Refresh::Status => self.refresh_status(path, running, span),
+                Refresh::RefsAndStatus => self.refresh(path, asked),
+                Refresh::Refs => self.refresh_refs(path, asked),
+                Refresh::Status => self.refresh_status(path, asked),
+                Refresh::Worktree(touched) => self.refresh_worktree(path, touched, asked),
             }
         } else {
             tracing::debug!(path = %path.display(), "repository no longer open; refresh skipped");
@@ -651,42 +698,58 @@ impl Reads {
 
     /// Reads refs and status again: everything a switch can change, and everything an
     /// Open shows. Later Intents that change less refresh less.
-    fn refresh(&self, path: &Path, running: Running, span: &tracing::Span) {
-        self.refresh_refs(path, running, span);
-        self.refresh_status(path, running, span);
+    fn refresh(&self, path: &Path, asked: Asked) {
+        self.refresh_refs(path, asked);
+        self.refresh_status(path, asked);
     }
 
-    fn refresh_refs(&self, path: &Path, running: Running, span: &tracing::Span) {
+    fn refresh_refs(&self, path: &Path, asked: Asked) {
         let mode = self.read_mode.lock().unwrap().clone();
         self.submit(
             &self.refs_slot,
             path,
-            running,
-            span,
+            asked,
             move |path, job| read_refs(path, job, &mode),
             |p| &mut p.refs,
         );
     }
 
-    fn refresh_status(&self, path: &Path, running: Running, span: &tracing::Span) {
-        self.submit(&self.staged_slot, path, running, span, read_staged, |p| {
+    /// Reads Staged, Unstaged and Untracked again, in full.
+    fn refresh_status(&self, path: &Path, asked: Asked) {
+        self.submit(&self.staged_slot, path, asked, read_staged, |p| {
             &mut p.staged
         });
-        let mode = self.read_mode.lock().unwrap().clone();
+        self.unstaged_narrowed.everything();
+        self.untracked_narrowed.everything();
+        self.submit_unstaged_and_untracked(path, asked);
+    }
+
+    /// Reads Unstaged and Untracked again, narrowed to the files an External change touched.
+    fn refresh_worktree(&self, path: &Path, touched: Touched, asked: Asked) {
+        self.unstaged_narrowed.touch(touched.paths.iter().cloned());
+        self.untracked_narrowed.touch(touched.paths);
+        if touched.excludes {
+            self.untracked_narrowed.everything();
+        }
+        self.submit_unstaged_and_untracked(path, asked);
+    }
+
+    fn submit_unstaged_and_untracked(&self, path: &Path, asked: Asked) {
+        let narrowed = self.unstaged_narrowed.clone();
         self.submit(
             &self.unstaged_slot,
             path,
-            running,
-            span,
-            read_unstaged,
+            asked,
+            move |path, job| read_unstaged(path, job, &narrowed),
             |p| &mut p.unstaged,
         );
+        let mode = self.read_mode.lock().unwrap().clone();
+        let narrowed = self.untracked_narrowed.clone();
         self.submit(
             &self.untracked_slot,
             path,
-            running,
-            span,
-            move |path, job| read_untracked(path, job, &mode),
+            asked,
+            move |path, job| read_untracked(path, job, &mode, &narrowed),
             |p| &mut p.untracked,
         );
     }
@@ -697,15 +760,14 @@ impl Reads {
         &self,
         slot: &Slot,
         path: &Path,
-        running: Running,
-        span: &tracing::Span,
+        asked: Asked,
         read: impl Fn(&Path, &JobContext) -> Result<T, String> + Send + 'static,
         cell: fn(&mut Pending) -> &mut Latest<T>,
     ) {
         let outbox = self.outbox.clone();
         let path = path.to_path_buf();
-        let span = span.clone();
-        slot.submit(running, move |job| {
+        let span = asked.span.clone();
+        slot.submit(asked.running, asked.cause, move |job| {
             let result = read(&path, job);
             if !job.is_current() {
                 tracing::debug!("superseded while running; result dropped");
@@ -722,6 +784,16 @@ impl Reads {
             );
         });
     }
+}
+
+/// Who asked for a refresh, and what it does to a read already running.
+#[derive(Clone, Copy)]
+struct Asked<'a> {
+    running: Running,
+    /// Names what asked, in each Read Job's span: `open`, or a [`Refresh`].
+    cause: &'static str,
+    /// The span of the Intent, Job or External change that asked.
+    span: &'a tracing::Span,
 }
 
 /// Reads refs with gix or the CLI fallback.
@@ -753,25 +825,87 @@ fn read_history(
     })
 }
 
-/// Reads untracked files with gix or the CLI fallback, stopping once Superseded.
+/// Reads untracked files with gix or the CLI fallback, stopping once Superseded. gix reads
+/// only what changed when it can; the fallback reads everything.
 fn read_untracked(
     path: &Path,
     job: &JobContext,
     mode: &fallback::ReadMode,
+    narrowed: &narrow::Narrowed<RepoPath>,
 ) -> Result<Vec<RepoPath>, String> {
-    mode.read(path, job, fallback::untracked, || {
-        cairn_read::Repo::open(path)
-            .and_then(|repo| repo.untracked(job.gix_interrupt()))
-            .map_err(|e| e.message().to_owned())
-    })
+    let (scope, reading) = narrowed.begin(path);
+    let within = match scope {
+        narrow::Scope::Unchanged(last) => {
+            record_scope(Some(0));
+            let result = Ok(last);
+            reading.finish(&result);
+            return result;
+        }
+        narrow::Scope::Everything => None,
+        narrow::Scope::Paths { last, paths } => Some((last, paths)),
+    };
+    let mut changed_only = None;
+    let result = mode.read(path, job, fallback::untracked, || {
+        let repo = cairn_read::Repo::open(path).map_err(|e| e.message().to_owned())?;
+        let read = match &within {
+            None => repo.untracked(job.gix_interrupt()),
+            Some((last, paths)) => {
+                let changed: Vec<&[u8]> = paths.iter().map(Vec::as_slice).collect();
+                let read = repo.untracked_within(job.gix_interrupt(), last, &changed);
+                // Only gix narrows: the fallback, after a failure here too, reads everything.
+                changed_only = read.is_ok().then_some(paths.len());
+                read
+            }
+        };
+        read.map_err(|e| e.message().to_owned())
+    });
+    record_scope(changed_only);
+    reading.finish(&result);
+    result
 }
 
 fn read_staged(path: &Path, job: &JobContext) -> Result<Vec<FileChange>, String> {
     status::staged(path, job.cli_stop())
 }
 
-fn read_unstaged(path: &Path, job: &JobContext) -> Result<Vec<FileChange>, String> {
-    status::unstaged(path, job.cli_stop())
+fn read_unstaged(
+    path: &Path,
+    job: &JobContext,
+    narrowed: &narrow::Narrowed<FileChange>,
+) -> Result<Vec<FileChange>, String> {
+    let (scope, reading) = narrowed.begin(path);
+    let result = match scope {
+        narrow::Scope::Everything => {
+            record_scope(None);
+            status::unstaged(path, job.cli_stop())
+        }
+        narrow::Scope::Unchanged(last) => {
+            record_scope(Some(0));
+            Ok(last)
+        }
+        narrow::Scope::Paths { last, paths } => {
+            record_scope(Some(paths.len()));
+            let paths: Vec<&[u8]> = paths.iter().map(Vec::as_slice).collect();
+            status::unstaged_within(path, job.cli_stop(), &last, &paths)
+        }
+    };
+    reading.finish(&result);
+    result
+}
+
+/// Says in the running `read_job` span whether this read was narrowed to the paths an
+/// External change touched, and to how many, or read everything.
+fn record_scope(changed_only: Option<usize>) {
+    let span = tracing::Span::current();
+    match changed_only {
+        Some(paths) => {
+            span.record("scope", "paths");
+            span.record("paths", paths);
+        }
+        None => {
+            span.record("scope", "full");
+        }
+    }
 }
 
 /// Snapshots waiting for the UI, coalesced to the newest per Slot.
