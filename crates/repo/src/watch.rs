@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, Weak};
 use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 
-use crate::{Reads, Refresh};
+use crate::{Reads, Refresh, Touched, narrow};
 
 /// Watches one open repository until dropped.
 pub(crate) struct Watcher {
@@ -191,9 +191,18 @@ fn classify_path(
 ) -> Option<Refresh> {
     let Some((dir, inside)) = dirs.locate(path) else {
         // Anything else under the worktree is a file git may track or list as untracked,
-        // unless it is ignored and untracked.
+        // unless it is ignored and untracked. Only that file is read again (#40).
         let relative = path.strip_prefix(root).ok()?;
-        return (!skips(relative)).then_some(Refresh::Status);
+        if skips(relative) {
+            return None;
+        }
+        return Some(match narrow::git_path(relative) {
+            Some(path) => Refresh::Worktree(Touched {
+                excludes: relative.file_name().is_some_and(|n| n == ".gitignore"),
+                paths: [path].into(),
+            }),
+            None => Refresh::Status,
+        });
     };
     // git writes `<file>.lock` and renames it over `<file>`; the rename reports `<file>`.
     if inside.extension().is_some_and(|e| e == "lock") {

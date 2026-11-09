@@ -321,8 +321,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use cairn_repo::{
-    ChangesSnapshot, Generation, Intent, JobId, JobKind, JobSnapshot, JobState, Oid, RefsSnapshot,
-    UntrackedSnapshot,
+    ChangeKind, ChangesSnapshot, FileChange, Generation, Intent, JobId, JobKind, JobSnapshot,
+    JobState, Oid, RefsSnapshot, RepoPath, UntrackedSnapshot,
 };
 
 /// `path` as git's own sh reads it: forward slashes, on Windows too. For paths written
@@ -689,4 +689,91 @@ impl SlowRemote {
         .stdout
         .is_empty()
     }
+}
+
+// git as the oracle for status: shared by every test that compares a status list with git.
+
+/// The three status lists, rendered as comparable lines.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Status {
+    pub staged: Vec<String>,
+    pub unstaged: Vec<String>,
+    pub untracked: Vec<String>,
+}
+
+pub fn path(p: &RepoPath) -> String {
+    String::from_utf8_lossy(p.as_bytes()).into_owned()
+}
+
+/// `<letter>[score] <path>[ <- <from>]`, the shape both sides render to.
+pub fn render(change: &FileChange) -> String {
+    let (letter, from) = match &change.kind {
+        ChangeKind::Added => ("A".to_owned(), None),
+        ChangeKind::Deleted => ("D".to_owned(), None),
+        ChangeKind::Modified => ("M".to_owned(), None),
+        ChangeKind::TypeChanged => ("T".to_owned(), None),
+        ChangeKind::Unmerged => ("U".to_owned(), None),
+        ChangeKind::Renamed { from, score } => (format!("R{score}"), Some(from)),
+    };
+    match from {
+        Some(from) => format!("{letter} {} <- {}", path(&change.path), path(from)),
+        None => format!("{letter} {}", path(&change.path)),
+    }
+}
+
+/// What git itself reports, split into the three lists.
+pub fn git_status(repo: &Path) -> Status {
+    let out = git_read(repo, &["status", "--porcelain=v2", "-z"]);
+    let mut records = out
+        .strip_suffix(b"\0")
+        .unwrap_or(&out)
+        .split(|&b| b == 0)
+        .filter(|r| !r.is_empty())
+        .map(|r| String::from_utf8_lossy(r).into_owned());
+    let mut status = Status {
+        staged: Vec::new(),
+        unstaged: Vec::new(),
+        untracked: Vec::new(),
+    };
+    while let Some(record) = records.next() {
+        let fields: Vec<&str> = record.splitn(2, ' ').collect();
+        match fields[0] {
+            "?" => status.untracked.push(fields[1].to_owned()),
+            "1" => {
+                // 1 XY sub mH mI mW hH hI path
+                let f: Vec<&str> = record.splitn(9, ' ').collect();
+                let (x, y) = (&f[1][..1], &f[1][1..]);
+                if x != "." {
+                    status.staged.push(format!("{x} {}", f[8]));
+                }
+                if y != "." {
+                    status.unstaged.push(format!("{y} {}", f[8]));
+                }
+            }
+            "2" => {
+                // 2 XY sub mH mI mW hH hI Xscore path, then origPath as its own record
+                let f: Vec<&str> = record.splitn(10, ' ').collect();
+                let from = records.next().expect("a rename names its source");
+                let (x, y) = (&f[1][..1], &f[1][1..]);
+                if x != "." {
+                    status.staged.push(format!("{} {} <- {from}", f[8], f[9]));
+                }
+                if y != "." {
+                    status.unstaged.push(format!("{y} {}", f[9]));
+                }
+            }
+            "u" => {
+                let f: Vec<&str> = record.splitn(11, ' ').collect();
+                status.staged.push(format!("U {}", f[10]));
+                status.unstaged.push(format!("U {}", f[10]));
+            }
+            other => panic!("unexpected porcelain record kind {other:?} in {record:?}"),
+        }
+    }
+    status
+}
+
+pub fn changes(snapshot: &ChangesSnapshot) -> Vec<String> {
+    let list = snapshot.result.as_ref().expect("the list reads");
+    list.iter().map(render).collect()
 }

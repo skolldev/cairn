@@ -92,6 +92,18 @@ impl Repo {
         untracked::read(&self.0.to_thread_local(), interrupt)
     }
 
+    /// [`untracked`](Self::untracked) again after the worktree changed only at `changed`,
+    /// relative paths with `/` separators, starting from `last`, the list it gave before.
+    /// Only right if the index and the excludes are as they were when `last` was read.
+    pub fn untracked_within(
+        &self,
+        interrupt: &AtomicBool,
+        last: &[RepoPath],
+        changed: &[&[u8]],
+    ) -> Result<Vec<RepoPath>, ReadError> {
+        untracked::read_within(&self.0.to_thread_local(), interrupt, last, changed)
+    }
+
     /// Whether [`walk`](Self::walk) can use a commit-graph, as git would. Only then does gix
     /// walk history: without one, `git rev-list` is the engine that passed (#13).
     pub fn has_commit_graph(&self) -> Result<bool, ReadError> {

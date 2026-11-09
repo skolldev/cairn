@@ -32,9 +32,96 @@ pub(crate) fn staged(workdir: &Path, stop: &Stop) -> Result<Vec<FileChange>, Str
 /// `git status` checks such files' content, so this does too, with one `git hash-object`
 /// for every candidate. It applies the same clean filters and line-ending conversion.
 pub(crate) fn unstaged(workdir: &Path, stop: &Stop) -> Result<Vec<FileChange>, String> {
+    unstaged_of(workdir, stop, Vec::new())
+}
+
+/// [`unstaged`] again after the worktree changed only at `changed`, relative paths with `/`
+/// separators, starting from `last`, the list it gave before. Only right if the index is as
+/// it was when `last` was read: an entry's answer changes only if it or its file did.
+///
+/// A path inside a submodule or a nested repository asks about that repository's own entry,
+/// whose answer depends on what's inside it.
+pub(crate) fn unstaged_within(
+    workdir: &Path,
+    stop: &Stop,
+    last: &[FileChange],
+    changed: &[&[u8]],
+) -> Result<Vec<FileChange>, String> {
+    let asked: Vec<&[u8]> = changed
+        .iter()
+        .map(|&p| outermost_repo(workdir, p))
+        .collect();
+    let mut pathspecs = Vec::with_capacity(asked.len());
+    for path in &asked {
+        // Case-insensitive, so that on a case-insensitive filesystem every entry that names
+        // the changed file in another case is asked about too. Asking about more entries
+        // than changed is only slower; [`covers`] folds case the same way.
+        let mut spec = b":(literal,icase)".to_vec();
+        spec.extend_from_slice(path);
+        pathspecs.push(os(spec).ok_or("a changed path isn't valid UTF-8")?);
+    }
+    let read = unstaged_of(workdir, stop, pathspecs)?;
+    // git may fold more than ASCII, so it can answer for an entry that `covers` keeps.
+    let mut changes: Vec<FileChange> = last
+        .iter()
+        .filter(|c| !asked.iter().any(|p| covers(p, c.path.as_bytes())))
+        .filter(|c| !read.iter().any(|r| r.path == c.path))
+        .cloned()
+        .collect();
+    changes.extend(read);
+    changes.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(changes)
+}
+
+/// The topmost directory above `path` that holds a `.git`, such as a submodule, or `path`
+/// itself if there is none.
+fn outermost_repo<'p>(workdir: &Path, path: &'p [u8]) -> &'p [u8] {
+    let path = path.strip_suffix(b"/").unwrap_or(path);
+    path.iter()
+        .enumerate()
+        .filter(|&(_, &b)| b == b'/')
+        .map(|(i, _)| &path[..i])
+        .find(|dir| {
+            std::str::from_utf8(dir).is_ok_and(|dir| workdir.join(dir).join(".git").exists())
+        })
+        .unwrap_or(path)
+}
+
+/// Whether git's `:(literal,icase)` pathspec `spec` matches `path`: the same path or one
+/// under it, ignoring ASCII case as git's `icase` does.
+fn covers(spec: &[u8], path: &[u8]) -> bool {
+    path.get(..spec.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(spec))
+        && (path.len() == spec.len() || path[spec.len()] == b'/')
+}
+
+/// Bytes as an argument. Paths come from the filesystem, so they're Unicode on Windows.
+fn os(bytes: Vec<u8>) -> Option<std::ffi::OsString> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        Some(std::ffi::OsString::from_vec(bytes))
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(bytes).ok().map(Into::into)
+    }
+}
+
+/// `diff-files` for every entry, or only those `pathspecs` match, without the stat-only ones.
+fn unstaged_of(
+    workdir: &Path,
+    stop: &Stop,
+    pathspecs: Vec<std::ffi::OsString>,
+) -> Result<Vec<FileChange>, String> {
     let git = Git::shared().map_err(|e| e.to_string())?;
+    let mut args: Vec<std::ffi::OsString> = vec!["diff-files".into(), "-z".into()];
+    if !pathspecs.is_empty() {
+        args.push("--".into());
+        args.extend(pathspecs);
+    }
     let out = git
-        .run(&read(workdir, stop).args(["diff-files", "-z"]))
+        .run(&read(workdir, stop).args(args))
         .map_err(text)?
         .success()
         .map_err(text)?;

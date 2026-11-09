@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use cairn_write::Stop;
 
@@ -183,6 +184,16 @@ impl Stops {
 
 type ReadJob = Box<dyn FnOnce(&JobContext) + Send>;
 
+/// A Read Job waiting to start, and what its `read_job` span will say about it.
+struct Queued {
+    generation: Generation,
+    /// The span it was submitted in, such as an Intent's or an External change's.
+    parent: tracing::Span,
+    /// What started it, such as `open` or the Refresh an External change mapped to.
+    cause: &'static str,
+    job: ReadJob,
+}
+
 /// One purpose a Read Job serves. Holds at most one running and one pending Read Job.
 #[derive(Clone)]
 pub(crate) struct Slot(Arc<SlotShared>);
@@ -210,7 +221,7 @@ struct SlotState {
     latest: Generation,
     /// How to stop the running Read Job, if one is running.
     running: Option<Stops>,
-    pending: Option<(Generation, tracing::Span, ReadJob)>,
+    pending: Option<Queued>,
 }
 
 impl Slot {
@@ -227,25 +238,33 @@ impl Slot {
     }
 
     /// Submits a Read Job and returns the generation it answers. It Supersedes the pending
-    /// Read Job, if any, and treats the running one as `running` says.
+    /// Read Job, if any, and treats the running one as `running` says. `cause` names what
+    /// asked for it in its `read_job` span.
     pub(crate) fn submit(
         &self,
         running: Running,
+        cause: &'static str,
         job: impl FnOnce(&JobContext) + Send + 'static,
     ) -> Generation {
-        let span = tracing::Span::current();
+        let parent = tracing::Span::current();
         let mut state = self.0.state.lock().unwrap();
         state.latest = Generation(state.latest.0 + 1);
-        let generation = state.latest;
+        let queued = Queued {
+            generation: state.latest,
+            parent,
+            cause,
+            job: Box::new(job),
+        };
+        let generation = queued.generation;
         match &state.running {
             Some(stops) => {
                 if running == Running::Supersede {
                     stops.stop();
                 }
-                if let Some((old, ..)) = state.pending.replace((generation, span, Box::new(job))) {
+                if let Some(old) = state.pending.replace(queued) {
                     tracing::debug!(
                         slot = self.0.name,
-                        generation = old.0,
+                        generation = old.generation.0,
                         "superseded pending read job"
                     );
                 }
@@ -254,7 +273,7 @@ impl Slot {
                 let stops = Stops::default();
                 state.running = Some(stops.clone());
                 drop(state);
-                self.start(generation, stops, span, Box::new(job));
+                self.start(queued, stops, false);
             }
         }
         generation
@@ -269,24 +288,44 @@ impl Slot {
         }
     }
 
-    fn start(&self, generation: Generation, stops: Stops, parent: tracing::Span, job: ReadJob) {
+    /// Queues `queued` on the lane. `pending` says it waited in the Slot behind a running
+    /// Read Job, as the second read of a burst does (ADR 0004).
+    fn start(&self, queued: Queued, stops: Stops, pending: bool) {
         let slot = self.clone();
+        let pushed = Instant::now();
         self.0.lane.push(Box::new(move || {
+            let Queued {
+                generation,
+                parent,
+                cause,
+                job,
+            } = queued;
             let context = JobContext {
                 generation,
                 stops,
             };
             if context.is_current() {
+                // Where an External change's time goes (#40): waiting for a lane worker,
+                // then the read itself, which includes publishing its Snapshot.
                 let span = tracing::info_span!(
                     parent: &parent,
                     "read_job",
                     slot = slot.0.name,
-                    generation = generation.0
+                    generation = generation.0,
+                    refresh = cause,
+                    pending,
+                    lane_wait_ms = pushed.elapsed().as_secs_f64() * 1e3,
+                    ms = tracing::field::Empty,
+                    // Filled in by a read that can be narrowed to what changed (`narrow`).
+                    scope = tracing::field::Empty,
+                    paths = tracing::field::Empty,
                 );
+                let started = Instant::now();
                 // A panicking Read Job must not wedge its Slot or kill a lane worker.
                 let outcome = span.in_scope(|| {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&context)))
                 });
+                span.record("ms", started.elapsed().as_secs_f64() * 1e3);
                 if outcome.is_err() {
                     tracing::error!(parent: &parent, slot = slot.0.name, generation = generation.0, "read job panicked");
                 }
@@ -300,11 +339,11 @@ impl Slot {
     fn finish(&self) {
         let mut state = self.0.state.lock().unwrap();
         match state.pending.take() {
-            Some((generation, span, job)) => {
+            Some(queued) => {
                 let stops = Stops::default();
                 state.running = Some(stops.clone());
                 drop(state);
-                self.start(generation, stops, span, job);
+                self.start(queued, stops, true);
             }
             None => state.running = None,
         }
