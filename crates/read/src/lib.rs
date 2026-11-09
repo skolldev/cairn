@@ -1,5 +1,5 @@
-//! gix queries: refs, revwalk, status, tree and blob diff, and the excludes the watcher
-//! skips ignored files by.
+//! gix queries: refs, revwalk, status, tree and blob diff, and what the watcher needs: where
+//! git keeps its files, and the excludes it skips ignored files by.
 //!
 //! gix rules, from the plan. Keep them where the read code lives:
 //! - Open with `permissions.config.git_binary = true`, so gix sees the same system config
@@ -21,7 +21,7 @@ mod walk;
 pub use excludes::Excludes;
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 pub use cairn_core::{Oid, Refs, RepoPath};
@@ -66,6 +66,18 @@ impl Repo {
     /// Whether gix opened this repository with restricted config permissions.
     pub fn reduced_trust(&self) -> bool {
         self.0.to_thread_local().git_dir_trust() == gix::sec::Trust::Reduced
+    }
+
+    /// Where git keeps this worktree's own files, such as HEAD and the index. Wherever a
+    /// `.git` file points, in a linked worktree or a submodule.
+    pub fn git_dir(&self) -> PathBuf {
+        self.0.git_dir().to_path_buf()
+    }
+
+    /// Where git keeps what every worktree of the repository shares, such as refs and
+    /// config. The same as [`git_dir`](Self::git_dir) except in a linked worktree.
+    pub fn common_dir(&self) -> PathBuf {
+        self.0.to_thread_local().common_dir().to_path_buf()
     }
 
     /// Every ref Cairn shows: local and remote branches, tags, stashes and HEAD.

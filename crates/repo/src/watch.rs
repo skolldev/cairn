@@ -1,6 +1,9 @@
 //! The watcher: how External changes reach the Repo service (ADR 0004).
 //!
-//! notify reports every change under the open repository's worktree, `.git/` included.
+//! notify reports every change under the open repository's worktree, and under git's own
+//! directories: `.git/`, or, in a linked worktree or a submodule, wherever its `.git` file
+//! points. Which of those files belong to this worktree and which it shares with others:
+//! `docs/git-versions.md`.
 //! Each event maps to the Slots it can change, and refreshes them at once. There is no
 //! debounce timer: the Slot coalesces, because it holds at most one running and one
 //! pending Read Job, so a burst costs at most two refreshes back to back.
@@ -37,17 +40,10 @@ pub(crate) fn start(workdir: &Path, reads: Weak<Reads>) -> Option<Watcher> {
         }
     };
     let workdir = workdir.to_path_buf();
-    let git_dir = root.join(".git");
-    let filter = if git_dir.is_dir() {
-        Some(Filter::start(&workdir))
-    } else {
-        // A linked worktree or a submodule keeps its git dir elsewhere, so a switch or a
-        // commit there isn't seen. Worktree files still are, all of them: with the index
-        // unwatched, which files are tracked would go stale unnoticed.
-        tracing::warn!(path = %root.display(), "`.git` is not a directory; git's own changes aren't watched");
-        None
-    };
+    let dirs = Arc::new(GitDirs::resolve(&workdir, &root));
+    let filter = Filter::start(&workdir);
     let handler_root = root.clone();
+    let handler_dirs = dirs.clone();
     let handler = move |event: notify::Result<Event>| {
         let Some(reads) = reads.upgrade() else {
             return;
@@ -63,19 +59,18 @@ pub(crate) fn start(workdir: &Path, reads: Weak<Reads>) -> Option<Watcher> {
         };
         // Not for reads: on Linux every read of the index or a `.gitignore`, the rebuild's
         // own included, reports an open, and each would start the next rebuild.
-        if let Some(filter) = &filter
-            && !matches!(event.kind, EventKind::Access(_))
+        if !matches!(event.kind, EventKind::Access(_))
             && event
                 .paths
                 .iter()
-                .any(|path| changes_filter(path, &handler_root, &git_dir))
+                .any(|path| changes_filter(path, &handler_root, &handler_dirs))
         {
             // Before classifying, so that this event is never skipped by the old matcher,
             // not even for a `.gitignore` that is itself ignored.
             filter.rebuild();
         }
-        let skips = |relative: &Path| filter.as_ref().is_some_and(|f| f.skips(relative));
-        if let Some(what) = classify(&event, &handler_root, &git_dir, skips) {
+        let skips = |relative: &Path| filter.skips(relative);
+        if let Some(what) = classify(&event, &handler_root, &handler_dirs, skips) {
             external_change(&reads, &workdir, what);
         }
     };
@@ -86,11 +81,70 @@ pub(crate) fn start(workdir: &Path, reads: Weak<Reads>) -> Option<Watcher> {
             return None;
         }
     };
-    if let Err(e) = inner.watch(&root, RecursiveMode::Recursive) {
-        tracing::warn!(path = %root.display(), error = %e, "couldn't watch the repository");
-        return None;
+    // The worktree, then git's directories that lie outside it. A linked worktree's own
+    // git dir lies inside the common dir, so watching the common dir covers both.
+    let mut watched: Vec<&Path> = Vec::new();
+    for dir in [root.as_path(), dirs.common.as_path(), dirs.own.as_path()] {
+        if watched.iter().any(|w| dir.starts_with(w)) {
+            continue;
+        }
+        // Watching only part of the repository would let the filter's index go stale
+        // unnoticed, so a failure here watches nothing.
+        if let Err(e) = inner.watch(dir, RecursiveMode::Recursive) {
+            tracing::warn!(path = %dir.display(), error = %e, "couldn't watch the repository");
+            return None;
+        }
+        watched.push(dir);
     }
     Some(Watcher { _inner: inner })
+}
+
+/// Where git keeps the open repository's files, resolved as notify reports paths.
+struct GitDirs {
+    /// HEAD, the index and the rest of what belongs to this worktree alone.
+    own: PathBuf,
+    /// Refs, config and the rest of what every worktree of the repository shares. The same
+    /// as `own` except in a linked worktree, whose `own` lies inside it.
+    common: PathBuf,
+}
+
+impl GitDirs {
+    /// Asks gix, which follows a `.git` file as git does. If gix can't open the repository,
+    /// no read can either, so `<root>/.git` is as good a guess as any.
+    fn resolve(workdir: &Path, root: &Path) -> Self {
+        let (own, common) = match cairn_read::Repo::open(workdir) {
+            Ok(repo) => (repo.git_dir(), repo.common_dir()),
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't find the git dir; guessing `.git`");
+                let guess = root.join(".git");
+                (guess.clone(), guess)
+            }
+        };
+        let resolved = |dir: PathBuf| dir.canonicalize().unwrap_or(dir);
+        Self {
+            own: resolved(own),
+            common: resolved(common),
+        }
+    }
+
+    /// Which of git's directories `path` lies in, and where in it. `None` outside both.
+    fn locate<'p>(&self, path: &'p Path) -> Option<(Dir, &'p Path)> {
+        // The own dir first: a linked worktree's lies inside the common dir, and outside
+        // a linked worktree the two are the same.
+        if let Ok(inside) = path.strip_prefix(&self.own) {
+            return Some((Dir::Own, inside));
+        }
+        let inside = path.strip_prefix(&self.common).ok()?;
+        Some((Dir::Common, inside))
+    }
+}
+
+/// Which of [`GitDirs`] a path lies in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dir {
+    Own,
+    /// A linked worktree's common dir, outside its own dir.
+    Common,
 }
 
 fn external_change(reads: &Reads, workdir: &Path, what: Refresh) {
@@ -104,7 +158,7 @@ fn external_change(reads: &Reads, workdir: &Path, what: Refresh) {
 fn classify(
     event: &Event,
     root: &Path,
-    git_dir: &Path,
+    dirs: &GitDirs,
     mut skips: impl FnMut(&Path) -> bool,
 ) -> Option<Refresh> {
     // Reads open files too. Seeing them would make every refresh trigger the next.
@@ -125,17 +179,17 @@ fn classify(
         .paths
         .iter()
         .filter(|path| !(directory_only && path.is_dir()))
-        .filter_map(|path| classify_path(path, root, git_dir, &mut skips))
+        .filter_map(|path| classify_path(path, root, dirs, &mut skips))
         .reduce(Refresh::union)
 }
 
 fn classify_path(
     path: &Path,
     root: &Path,
-    git_dir: &Path,
+    dirs: &GitDirs,
     skips: &mut impl FnMut(&Path) -> bool,
 ) -> Option<Refresh> {
-    let Ok(inside) = path.strip_prefix(git_dir) else {
+    let Some((dir, inside)) = dirs.locate(path) else {
         // Anything else under the worktree is a file git may track or list as untracked,
         // unless it is ignored and untracked.
         let relative = path.strip_prefix(root).ok()?;
@@ -147,6 +201,9 @@ fn classify_path(
     }
     let mut parts = inside.components().map(|c| c.as_os_str());
     match (parts.next()?.to_str()?, parts.next()) {
+        // In a linked worktree's common dir these belong to the main worktree, and each
+        // linked worktree's own dir sits under `worktrees/`, which matches nothing below.
+        ("HEAD" | "index" | "FETCH_HEAD", None) if dir == Dir::Common => None,
         // HEAD moving changes what the index is compared with.
         ("HEAD", None) => Some(Refresh::RefsAndStatus),
         ("index", None) => Some(Refresh::Status),
@@ -169,14 +226,14 @@ fn classify_path(
 
 /// Whether a change at `path` can change what the [`Filter`] answers: the index, the
 /// excludes and config git reads, or any `.gitignore`.
-fn changes_filter(path: &Path, root: &Path, git_dir: &Path) -> bool {
-    match path.strip_prefix(git_dir) {
-        Ok(inside) => {
-            inside == Path::new("index")
+fn changes_filter(path: &Path, root: &Path, dirs: &GitDirs) -> bool {
+    match dirs.locate(path) {
+        Some((dir, inside)) => {
+            (inside == Path::new("index") && dir == Dir::Own)
                 || inside == Path::new("config")
                 || inside == Path::new("info/exclude")
         }
-        Err(_) => path.starts_with(root) && path.file_name().is_some_and(|n| n == ".gitignore"),
+        None => path.starts_with(root) && path.file_name().is_some_and(|n| n == ".gitignore"),
     }
 }
 
