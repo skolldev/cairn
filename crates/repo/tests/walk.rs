@@ -6,6 +6,8 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use cairn_repo::{Intent, Oid};
 use common::{
@@ -13,13 +15,21 @@ use common::{
     small_fixture_clone, write_commit, write_commit_graph,
 };
 
-fn walk(harness: &Harness) -> Vec<Oid> {
-    harness
+/// Walks the open repository, `repo`. A walk takes about a second, so after 30 the wait
+/// fails with the git runs the trace2 log shows for `repo`, the way to tell a walk that never
+/// started git from a `git rev-list` that never exited.
+fn walk(harness: &Harness, repo: &Path) -> Vec<Oid> {
+    match harness
         .service
         .walk_history()
-        .recv()
-        .expect("nothing Superseded this walk")
-        .expect("the walk succeeds")
+        .recv_timeout(Duration::from_secs(30))
+    {
+        Ok(walked) => walked.expect("the walk succeeds"),
+        Err(mpsc::RecvTimeoutError::Disconnected) => panic!("something Superseded this walk"),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            common::fail_hung(harness, "no walk answered within 30 s", repo)
+        }
+    }
 }
 
 #[test]
@@ -29,7 +39,7 @@ fn with_a_commit_graph_the_walk_matches_git_and_starts_no_rev_list() {
     let harness = Harness::start();
     open(&harness, &repo);
 
-    let walked = walk(&harness);
+    let walked = walk(&harness, &repo);
 
     // The oracle runs rev-list too, so this is read before it.
     assert!(
@@ -51,7 +61,7 @@ fn without_a_commit_graph_the_walk_matches_git_through_rev_list() {
     let harness = Harness::start();
     open(&harness, &repo);
 
-    let walked = walk(&harness);
+    let walked = walk(&harness, &repo);
 
     assert!(
         git_ran(&repo, "rev-list"),
@@ -112,7 +122,7 @@ fn walk_on_both_engines(history: &History) -> [Vec<Oid>; 2] {
     );
     let harness = Harness::start();
     open(&harness, repo);
-    let through_git = walk(&harness);
+    let through_git = walk(&harness, repo);
     assert!(
         git_ran(repo, "rev-list"),
         "no graph: walked by git rev-list"
@@ -123,7 +133,7 @@ fn walk_on_both_engines(history: &History) -> [Vec<Oid>; 2] {
     copy_dir(repo, &copy);
     write_commit_graph(&copy);
     open(&harness, &copy);
-    let through_gix = walk(&harness);
+    let through_gix = walk(&harness, &copy);
     assert!(
         !git_ran(&copy, "rev-list"),
         "with a graph: walked by gix, not git rev-list"
@@ -271,7 +281,7 @@ fn a_commit_graph_missing_the_newest_commits_is_walked_through_gix_and_misses_no
     let harness = Harness::start();
     open(&harness, &repo);
 
-    let walked = walk(&harness);
+    let walked = walk(&harness, &repo);
 
     // Seen red: `has_commit_graph` answering false.
     assert!(!git_ran(&repo, "rev-list"), "walked through gix");
@@ -294,7 +304,7 @@ fn assert_git_walks_a_graph_it_would_ignore(setup: impl FnOnce(&History, &str, &
     let harness = Harness::start();
     open(&harness, &history.repo);
 
-    let walked = walk(&harness);
+    let walked = walk(&harness, &history.repo);
 
     // Seen red, for each caller: `commit_graph()` in place of `commit_graph_if_enabled()` for
     // config and replace refs, and without their check in `has_commit_graph` for grafts and a
@@ -354,7 +364,7 @@ fn a_commit_graph_gix_cant_read_is_walked_by_git_instead() {
     let harness = Harness::start();
     open(&harness, &repo);
 
-    let walked = walk(&harness);
+    let walked = walk(&harness, &repo);
 
     // Seen red: calling gix directly instead of through `ReadMode`, which reports gix's error.
     assert!(
@@ -370,7 +380,7 @@ fn a_repository_with_no_commits_walks_to_nothing() {
     let harness = Harness::start();
     harness.service.send(Intent::Open(history.repo.clone()));
     // Seen red: `HEAD` in place of `--all`, which fails on an unborn branch.
-    assert_eq!(walk(&harness), Vec::<Oid>::new());
+    assert_eq!(walk(&harness, &history.repo), Vec::<Oid>::new());
 }
 
 /// HEAD names a branch with no commits yet, while other refs have history in the graph.
@@ -384,7 +394,7 @@ fn an_unborn_head_doesnt_stop_gix_walking_the_refs() {
     let harness = Harness::start();
     open(&harness, &history.repo);
 
-    let walked = walk(&harness);
+    let walked = walk(&harness, &history.repo);
 
     // Seen red: `repo.head_id()?` in place of treating an unborn HEAD as no tip, which fails
     // and falls back to git, so this first assertion is the one that catches it.
@@ -404,7 +414,7 @@ fn a_partial_clone_with_a_commit_graph_is_walked_by_git() {
     let harness = Harness::start();
     open(&harness, &history.repo);
 
-    let walked = walk(&harness);
+    let walked = walk(&harness, &history.repo);
 
     // Seen red: calling gix directly instead of through `ReadMode`.
     assert!(git_ran(&history.repo, "rev-list"), "walked by git");

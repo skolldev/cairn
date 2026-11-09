@@ -114,6 +114,61 @@ pub fn git_ran(repo: &Path, subcommand: &str) -> bool {
     })
 }
 
+/// Each git run the trace2 log shows for `repo`, as `<argv> -> exit <code>`, or
+/// `-> no exit yet` for one still running. Matched as [`git_ran`] matches.
+pub fn git_runs(repo: &Path) -> Vec<String> {
+    let log = hermetic().1.path().join("trace2.jsonl");
+    let parent = repo.parent().and_then(Path::file_name).unwrap();
+    let parent = parent.to_str().unwrap();
+    let log = std::fs::read_to_string(log).unwrap_or_default();
+    let field = |line: &str, from: &str, to: char| -> Option<String> {
+        let start = line.find(from)? + from.len();
+        let len = line[start..].find(to)?;
+        Some(line[start..start + len].to_owned())
+    };
+    let mut runs: Vec<(String, String, Option<String>)> = Vec::new();
+    for line in log.lines() {
+        let Some(sid) = field(line, r#""sid":""#, '"') else {
+            continue;
+        };
+        if line.contains(r#""event":"start""#) && line.contains(parent) {
+            // Without the first element, git's own path.
+            let argv = field(line, r#""argv":["#, ']').unwrap_or_default();
+            let argv = argv.split_once(',').map_or(argv.as_str(), |(_, rest)| rest);
+            let argv = argv.to_owned();
+            runs.push((sid, argv, None));
+        } else if line.contains(r#""event":"exit""#)
+            && let Some(run) = runs.iter_mut().find(|r| r.0 == sid)
+        {
+            run.2 = field(line, r#""code":"#, '}');
+        }
+    }
+    runs.into_iter()
+        .map(|(_, argv, code)| match code {
+            Some(code) => format!("{argv} -> exit {code}"),
+            None => format!("{argv} -> no exit yet"),
+        })
+        .collect()
+}
+
+/// Fails a test whose wait on `repo` hung, with the git runs the trace2 log shows for it.
+/// The report goes straight to stderr, where cargo's capture can't hold it back: a hung Job
+/// can keep the Harness from dropping, and then the test never ends to print its output.
+/// The Force quit stops what it can first.
+pub fn fail_hung(harness: &Harness, what: &str, repo: &Path) -> ! {
+    use std::io::Write as _;
+    let runs = git_runs(repo);
+    let report = format!(
+        "{what}. git runs for {} by trace2 ({}):\n  {}\n",
+        repo.display(),
+        runs.len(),
+        runs.join("\n  ")
+    );
+    let _ = std::io::stderr().write_all(report.as_bytes());
+    harness.service.send(Intent::ForceQuit);
+    panic!("{report}");
+}
+
 pub fn commit_graph_exists(repo: &Path) -> bool {
     let info = repo.join(".git/objects/info");
     info.join("commit-graph").exists() || info.join("commit-graphs/commit-graph-chain").exists()
