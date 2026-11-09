@@ -18,11 +18,11 @@ use crate::spawn;
 use crate::stats::{self, HeldKeyRun};
 
 /// Samples each run throws away first, so that the OS file cache is warm for the ones it keeps.
-const WARM_UP_SAMPLES: usize = 3;
+pub(crate) const WARM_UP_SAMPLES: usize = 3;
 /// How long the screen has to stay still before the next sample starts, so that one sample's
 /// late refreshes can't land in the next.
-const QUIET: Duration = Duration::from_millis(250);
-const SAMPLE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const QUIET: Duration = Duration::from_millis(250);
+pub(crate) const SAMPLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a launch stays up on Windows, where its first frame is found only afterwards. Well
 /// past the Budget's cap, so that a slow first frame reads as a miss rather than as missing.
 const LAUNCH_HOLD: Duration = Duration::from_secs(1);
@@ -312,8 +312,22 @@ pub enum Change {
 }
 
 impl Change {
+    /// Whether this is made outside Cairn.
+    pub fn is_external(self) -> bool {
+        matches!(self, Change::Save | Change::GitSwitch)
+    }
+
+    /// The branch the `index`th switch goes to. Switches alternate, so each undoes the last.
+    fn branch(index: usize) -> &'static str {
+        if index.is_multiple_of(2) {
+            BRANCH_B
+        } else {
+            BRANCH_A
+        }
+    }
+
     /// The `index`th change. Changes alternate, so each undoes the last.
-    fn expect(self, index: usize) -> Expect {
+    pub(crate) fn expect(self, index: usize) -> Expect {
         let forward = index.is_multiple_of(2);
         match self {
             Change::Save => Expect::Unstaged {
@@ -321,7 +335,7 @@ impl Change {
                 listed: forward,
             },
             Change::GitSwitch | Change::IntentSwitch => Expect::Switched {
-                branch: if forward { BRANCH_B } else { BRANCH_A }.to_owned(),
+                branch: Self::branch(index).to_owned(),
                 untracked: KEEP.to_owned(),
                 // Ignored on BRANCH_B.
                 listed: !forward,
@@ -329,21 +343,28 @@ impl Change {
         }
     }
 
-    /// Makes the change, and returns when the clock starts.
-    fn perform(self, index: usize, sandbox: &Sandbox, cairn: &mut Cairn) -> Result<u64, String> {
-        let forward = index.is_multiple_of(2);
-        let branch = if forward { BRANCH_B } else { BRANCH_A };
+    /// Makes an External change, and returns when the clock starts.
+    pub(crate) fn perform_external(self, index: usize, sandbox: &Sandbox) -> Result<u64, String> {
         match self {
             Change::Save => {
                 let start = clock::now_ns();
-                sandbox.save(forward)?;
+                sandbox.save(index.is_multiple_of(2))?;
                 Ok(start)
             }
             Change::GitSwitch => {
-                sandbox.switch(branch)?;
+                sandbox.switch(Self::branch(index))?;
                 Ok(clock::now_ns())
             }
+            Change::IntentSwitch => Err("a Local write Job isn't an External change".to_owned()),
+        }
+    }
+
+    /// Makes the change, and returns when the clock starts.
+    fn perform(self, index: usize, sandbox: &Sandbox, cairn: &mut Cairn) -> Result<u64, String> {
+        match self {
+            Change::Save | Change::GitSwitch => self.perform_external(index, sandbox),
             Change::IntentSwitch => {
+                let branch = Self::branch(index);
                 let sent = cairn.trace.lock().unwrap().intents().len();
                 cairn.send(&format!("switch {branch}"))?;
                 cairn.wait("Cairn to send the Intent", SAMPLE_TIMEOUT, |trace| {
@@ -562,7 +583,7 @@ fn fixture(config: &Config, name: &str) -> Result<PathBuf, String> {
 }
 
 /// The Linux kernel fixture, which the plan defines as having a commit-graph.
-fn kernel_fixture(config: &Config) -> Result<PathBuf, String> {
+pub(crate) fn kernel_fixture(config: &Config) -> Result<PathBuf, String> {
     let path = fixture(config, "linux-graph")?;
     let info = path.join(".git/objects/info");
     if !info.join("commit-graph").exists()

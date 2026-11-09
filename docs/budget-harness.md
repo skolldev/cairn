@@ -52,6 +52,16 @@ The `measure` build's probe writes a line for each painted frame with what the v
 - **External `git switch` starts when git exits,** as the plan's row says, because git's own time on the kernel isn't Cairn's to spend. A frame can reach the screen before that, which counts as 0 ms.
 - **There's no graph yet.** The External change row names the graph too. Nothing shows one until Phase 2, and when it does the expected state has to include it.
 
+## Where External change's time goes
+
+```bash
+cargo run --release -p cairn-budget -- trace --only external
+```
+
+`run` says how long an External change takes. `trace` says where that time goes, Slot by Slot, as #40 had to find out by hand. It clones `linux-graph` into a sandbox and runs both External change rows' samples, with their warm-up, against the real Repo service with no window. For each sample it prints, in ms from the clock start (before the write, or once git has exited), every `read_job` span that closed after the change began and had published its Snapshot, or ended, by the time the expected Snapshots were drained: its Slot, the Refresh that asked for it, whether it was pending behind a running read, its lane wait, how long it ran, and whether it read in full or only the paths the watcher saw. A read can start before the clock does, while `git switch` is still running, and then reads as a negative time. `--samples N` sets how many samples each row keeps.
+
+**It explains a number and never gives one.** Without a window nothing is presented, so a sample ends when the Snapshots are drained, not when a frame reaches the screen, and presenting isn't in it. It writes no result file and gives no verdict, and Launch and the Local write Job aren't traced. Like `run`, it refuses where `CI` is set and takes only a release build. It runs anywhere else, because nothing it prints counts toward a Budget.
+
 ## Windows
 
 1. Set the primary display to 120 Hz.
