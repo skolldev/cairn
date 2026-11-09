@@ -1,6 +1,6 @@
 # Coding standards
 
-Judgement calls a reviewer applies to every change. Rules a script can check live in `scripts/` and run in CI instead: GPUI only in `cairn-app` (`check-gpui-free.sh`), git spawned only by `cairn-write` (`check-single-git-spawn.sh`, which lets the Budget harness start `cairn` and PresentMon from one file that refuses git), and one oldest git everywhere (`check-git-floor.sh`). Domain terms come from `CONTEXT.md`; decisions from `docs/adr/`.
+Judgement calls a reviewer applies to every change. Rules a script can check live in `scripts/` and run in CI instead: GPUI only in `cairn-app` (`check-gpui-free.sh`), git spawned only by `cairn-write` (`check-single-git-spawn.sh`, which lets the Budget harness start `cairn` and PresentMon from one file that refuses git), one oldest git everywhere (`check-git-floor.sh`), and every gix pathspec anchored with `top` (`check-gix-pathspec-top.sh`). Domain terms come from `CONTEXT.md`; decisions from `docs/adr/`.
 
 ## Tests
 
