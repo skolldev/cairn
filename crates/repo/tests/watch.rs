@@ -9,10 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use cairn_repo::{
-    ChangesSnapshot, Generation, Head, Intent, RepoPath, Snapshot, UntrackedSnapshot,
-};
-use common::{Harness, Seen, git, open, slash, small_fixture_clone};
+use cairn_repo::{ChangesSnapshot, Generation, Head, Intent, RepoPath, Snapshot};
+use common::{Harness, Seen, git, open, slash, small_fixture_clone, unstaged, untracked};
 
 #[test]
 fn a_git_switch_run_outside_the_service_is_followed_by_a_refs_snapshot() {
@@ -57,8 +55,8 @@ fn a_newer_status_read_stops_the_running_one_instead_of_waiting_for_it() {
     // the stop, nothing publishes until `release` exists, and this drain times out.
     harness.service.send(Intent::Open(repo.clone()));
     let mut seen = Seen::default();
-    seen.until(&harness, |seen| !unstaged(seen).is_empty());
-    let published = unstaged(&seen);
+    seen.until(&harness, |seen| !unstaged(&seen.all).is_empty());
+    let published = unstaged(&seen.all);
     assert_eq!(published.len(), 1, "the stopped read published nothing");
     let unstaged = published[0];
     // 2, or later if a watcher event asked for another read meanwhile.
@@ -89,7 +87,9 @@ fn quick_refreshes_of_one_slot_publish_only_newer_generations_and_never_a_stoppe
     }
     let mut seen = Seen::default();
     seen.until(&harness, |seen| {
-        unstaged(seen).iter().any(|u| u.generation.get() >= OPENS)
+        unstaged(&seen.all)
+            .iter()
+            .any(|u| u.generation.get() >= OPENS)
     });
 
     // Marker: open another path. Its Snapshot takes a later generation than every read of
@@ -100,10 +100,12 @@ fn quick_refreshes_of_one_slot_publish_only_newer_generations_and_never_a_stoppe
         .service
         .send(Intent::Open(elsewhere.path().to_path_buf()));
     seen.until(&harness, |seen| {
-        unstaged(seen).iter().any(|u| u.workdir == elsewhere.path())
+        unstaged(&seen.all)
+            .iter()
+            .any(|u| u.workdir == elsewhere.path())
     });
 
-    let mut published = unstaged(&seen);
+    let mut published = unstaged(&seen.all);
     published.retain(|u| u.workdir == repo);
     let generations: Vec<u64> = published.iter().map(|u| u.generation.get()).collect();
     assert!(
@@ -201,7 +203,7 @@ fn append_repeatedly(path: &Path, times: usize) {
 fn untracked_marker(seen: &mut Seen, harness: &Harness, repo: &Path, name: &str) -> u64 {
     std::fs::write(repo.join(name), "marker\n").unwrap();
     let listing = |seen: &Seen| {
-        untracked(seen)
+        untracked(&seen.all)
             .into_iter()
             .find(|u| u.workdir == repo && u.result.as_deref().is_ok_and(|p| has(p, name)))
             .map(|u| u.generation.get())
@@ -235,17 +237,6 @@ const REFRESHED: u64 = 10;
 /// when the change itself refreshed nothing.
 const MARKER_ONLY: u64 = 3;
 
-/// The Untracked Snapshots in `seen`, oldest first.
-fn untracked(seen: &Seen) -> Vec<&Arc<UntrackedSnapshot>> {
-    seen.all
-        .iter()
-        .filter_map(|s| match s {
-            Snapshot::Untracked(u) => Some(u),
-            _ => None,
-        })
-        .collect()
-}
-
 #[test]
 fn writes_to_an_ignored_untracked_file_refresh_nothing_and_writes_to_an_unignored_one_do() {
     let (_dir, repo) = small_fixture_clone();
@@ -268,7 +259,8 @@ fn writes_to_an_ignored_untracked_file_refresh_nothing_and_writes_to_an_unignore
         control > REFRESHED,
         "unignored writes should each refresh: {control} generations"
     );
-    // Only the second marker's own events refresh.
+    // Only the second marker's own events refresh. Seen red on Linux (`scripts/linux-tests.sh`):
+    // with no `Access` check before the rebuild trigger, every read's open rebuilds the matcher.
     assert!(
         ignored <= MARKER_ONLY,
         "ignored writes refreshed status: {ignored} generations (control: {control})"
@@ -290,7 +282,7 @@ fn untracked_after_shows(
     after: u64,
     check: impl Fn(&[RepoPath]) -> bool,
 ) -> bool {
-    untracked(seen).iter().any(|u| {
+    untracked(&seen.all).iter().any(|u| {
         u.workdir == repo && u.generation.get() > after && u.result.as_deref().is_ok_and(&check)
     })
 }
@@ -514,20 +506,9 @@ fn renaming_a_file_from_an_ignored_path_to_an_unignored_one_refreshes() {
     });
 }
 
-/// The Unstaged Snapshots in `seen`, oldest first.
-fn unstaged(seen: &Seen) -> Vec<&Arc<ChangesSnapshot>> {
-    seen.all
-        .iter()
-        .filter_map(|s| match s {
-            Snapshot::Unstaged(u) => Some(u),
-            _ => None,
-        })
-        .collect()
-}
-
 /// The Unstaged Snapshots in `seen` newer than `after`, oldest first.
 fn unstaged_after(seen: &Seen, after: Generation) -> Vec<&Arc<ChangesSnapshot>> {
-    let mut all = unstaged(seen);
+    let mut all = unstaged(&seen.all);
     all.retain(|u| u.generation > after);
     all
 }
@@ -610,7 +591,9 @@ fn a_burst_shorter_than_a_read_costs_at_most_two_status_refreshes() {
         .service
         .send(Intent::Open(elsewhere.path().to_path_buf()));
     seen.until(&harness, |seen| {
-        unstaged(seen).iter().any(|u| u.workdir == elsewhere.path())
+        unstaged(&seen.all)
+            .iter()
+            .any(|u| u.workdir == elsewhere.path())
     });
     let mut published = unstaged_after(&seen, opened.unstaged);
     published.retain(|u| u.workdir == repo);

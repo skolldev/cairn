@@ -7,6 +7,8 @@
 //!
 //! A change to a file git ignores and doesn't track, such as a build writing to `target/`,
 //! refreshes nothing: see [`Filter`].
+//!
+//! Each OS reports different events: `docs/filesystem-events.md` lists them.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};

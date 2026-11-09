@@ -8,6 +8,8 @@
 //! - Never call `Outcome::write_changes()`: it drops index extensions.
 //! - Keep the default `FastEq` comparison. `HashEq` disagrees with git.
 //!
+//! What the pinned gix does that its signatures don't show: `docs/gix-notes.md`.
+//!
 //! Untracked files come from the directory walk alone. Staged and Unstaged are read by the
 //! CLI (#13), so an index-vs-worktree pass here would only repeat their work.
 

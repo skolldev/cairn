@@ -202,11 +202,7 @@ fn a_quit_drops_the_running_and_the_pending_read_job() {
     }
     std::thread::sleep(SETTLE);
     seen.drain_now(&harness);
-    let unstaged: Vec<_> = seen
-        .all
-        .iter()
-        .filter(|s| matches!(s, Snapshot::Unstaged(_)))
-        .collect();
+    let unstaged = common::unstaged(&seen.all);
     assert!(
         unstaged.is_empty(),
         "a dropped read published: {unstaged:?}"
