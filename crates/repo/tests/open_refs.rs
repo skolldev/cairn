@@ -199,25 +199,29 @@ fn malformed_stash_reflog_retries_refs_with_git_and_latches_cli() {
 
     harness.service.send(Intent::Switch(original));
     let mut switched = false;
-    let mut error = None;
-    // Wait for the error, not the next Snapshot: the watcher's refresh after the reflog write
+    let mut git_read_it = false;
+    // Wait for this error, not the next Snapshot: the watcher's refresh after the reflog write
     // can read through git before `log.date` is set, and succeed. Such a Snapshot says nothing
-    // about the latch. Only git reports this error, so its arrival shows git did this read.
+    // about the latch. Nor does another error: on Windows, a refresh racing `git config` above
+    // can fail with `Permission denied` on `.git/config`. Only git reports this error, so its
+    // arrival shows git did this read.
     // Seen red: removing the failure latch means gix reads Refs from here on, and this times out.
     harness.drain_until(|snapshot| {
         match snapshot {
             Snapshot::Job(job) if job.state == JobState::Done(Ok(())) => switched = true,
-            Snapshot::Refs(refs) if refs.generation > previous => {
-                if let Err(e) = &refs.result {
-                    error = Some(e.clone());
-                }
+            Snapshot::Refs(refs)
+                if refs.generation > previous
+                    && refs
+                        .result
+                        .as_ref()
+                        .is_err_and(|e| e.contains("unknown date format bogus")) =>
+            {
+                git_read_it = true;
             }
             _ => {}
         }
-        switched && error.is_some()
+        switched && git_read_it
     });
-    let error = error.unwrap();
-    assert!(error.contains("unknown date format bogus"), "{error}");
 }
 
 #[test]
