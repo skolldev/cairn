@@ -4,7 +4,8 @@
 # not in CI. CI's macOS and Windows runners follow the newest git without saying so.
 #
 # Usage: git-matrix.sh [cargo test arguments]
-# Defaults: -p cairn-write -p cairn-repo -p cairn-budget -p cairn-app --no-fail-fast
+# Defaults: -p cairn-write -p cairn-repo -p cairn-budget -p cairn-app --features cairn-app/measure
+# --no-fail-fast. The feature is what brings in the Budget harness probe's tests, which run git too.
 # Environment: CAIRN_GIT_VERSIONS overrides the versions to run, as a space-separated list. Builds
 # go to ~/git-<version>, as with oldest-git.sh. Create the fixtures first with your usual git.
 set -euo pipefail
@@ -17,7 +18,8 @@ newest_released() {
 }
 
 versions="${CAIRN_GIT_VERSIONS:-2.23.0 $(newest_released)}"
-[ "$#" -gt 0 ] || set -- -p cairn-write -p cairn-repo -p cairn-budget -p cairn-app --no-fail-fast
+[ "$#" -gt 0 ] || set -- -p cairn-write -p cairn-repo -p cairn-budget -p cairn-app \
+  --features cairn-app/measure --no-fail-fast
 
 failed=()
 for version in $versions; do
