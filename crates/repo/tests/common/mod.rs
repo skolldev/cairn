@@ -212,8 +212,16 @@ impl Harness {
     }
 
     /// Drains Snapshots until `done` accepts one, returning everything drained on the way.
-    pub fn drain_until(&self, mut done: impl FnMut(&Snapshot) -> bool) -> Vec<Snapshot> {
-        let deadline = Instant::now() + Duration::from_secs(30);
+    pub fn drain_until(&self, done: impl FnMut(&Snapshot) -> bool) -> Vec<Snapshot> {
+        self.drain_until_with_timeout(Duration::from_secs(30), done)
+    }
+
+    pub fn drain_until_with_timeout(
+        &self,
+        timeout: Duration,
+        mut done: impl FnMut(&Snapshot) -> bool,
+    ) -> Vec<Snapshot> {
+        let deadline = Instant::now() + timeout;
         let mut seen = Vec::new();
         loop {
             let batch = self.service.drain();
@@ -223,10 +231,11 @@ impl Harness {
                 return seen;
             }
             let left = deadline.saturating_duration_since(Instant::now());
-            assert!(
-                !left.is_zero(),
-                "timed out waiting for a Snapshot; drained so far: {seen:?}"
-            );
+            if left.is_zero() {
+                // A timed-out test must not then hang while dropping a blocked Local write Job.
+                self.service.send(Intent::ForceQuit);
+                panic!("timed out waiting for a Snapshot; drained so far: {seen:?}");
+            }
             let _ = self
                 .woken
                 .recv_timeout(left.min(Duration::from_millis(200)));

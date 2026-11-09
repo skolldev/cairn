@@ -761,7 +761,9 @@ name = "cairn-app"
 version = "0.0.0"
 dependencies = [
  "async-channel",
+ "block2 0.6.2",
  "cairn-auth",
+ "cairn-budget",
  "cairn-core",
  "cairn-diff",
  "cairn-graph",
@@ -783,6 +785,16 @@ version = "0.0.0"
 dependencies = [
  "cairn-core",
  "keyring",
+]
+
+[[package]]
+name = "cairn-budget"
+version = "0.0.0"
+dependencies = [
+ "cairn-write",
+ "libc",
+ "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

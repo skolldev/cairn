@@ -30,6 +30,26 @@ impl StatusView {
     pub fn set_untracked(&mut self, snapshot: Arc<UntrackedSnapshot>) {
         self.untracked = Some(snapshot);
     }
+
+    /// Tells the Budget harness what this view shows.
+    #[cfg(feature = "measure")]
+    pub fn report_to(&self, frame: &mut cairn_budget::probe::Frame) {
+        if let Some(staged) = &self.staged {
+            frame.staged = staged.generation.get();
+        }
+        if let Some(unstaged) = &self.unstaged {
+            frame.unstaged = unstaged.generation.get();
+            if let Ok(changes) = &unstaged.result {
+                frame.unstaged_paths = changes.iter().map(|c| c.path.to_string()).collect();
+            }
+        }
+        if let Some(untracked) = &self.untracked {
+            frame.untracked = untracked.generation.get();
+            if let Ok(paths) = &untracked.result {
+                frame.untracked_paths = paths.iter().map(ToString::to_string).collect();
+            }
+        }
+    }
 }
 
 impl Render for StatusView {

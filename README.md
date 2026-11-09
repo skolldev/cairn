@@ -13,6 +13,10 @@ cargo run -p cairn-app -- ~/cairn-fixtures/ripgrep
 
 `RUST_LOG=info,cairn_repo=debug` shows each Read Job and when its Snapshot is shown.
 
+## Measuring Budgets
+
+`scripts/budget.sh run` measures the Phase 1 Budgets on the real binary. `docs/budget-harness.md` has the rules, what each number means and the Windows setup.
+
 ## Developing
 
 `scripts/install-hooks.sh` runs fmt and clippy before each commit, in this clone and its worktrees.

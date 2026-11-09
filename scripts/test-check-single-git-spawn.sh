@@ -17,9 +17,11 @@ run_guard() {
 
 tree="$(mktemp -d)"
 trap 'rm -rf "$tree"' EXIT
-mkdir -p "$tree/crates/write/src" "$tree/crates/repo/src" "$tree/crates/repo/tests" "$tree/crates/app/src"
+mkdir -p "$tree/crates/write/src" "$tree/crates/repo/src" "$tree/crates/repo/tests" "$tree/crates/app/src" "$tree/crates/budget/src"
 echo 'fn spawn() { std::process::Command::new("git"); }' >"$tree/crates/write/src/lib.rs"
 echo 'fn clean() {}' >"$tree/crates/app/src/main.rs"
+echo 'fn tool() { std::process::Command::new("cairn"); }' >"$tree/crates/budget/src/spawn.rs"
+echo 'fn elsewhere() { std::process::Command::new("cairn"); }' >"$tree/crates/budget/src/run.rs"
 echo 'fn f() { std::process::Command::new("git"); }' >"$tree/crates/repo/src/full.rs"
 printf 'use std::process::Command;\nfn f() { Command::new("git"); }\n' >"$tree/crates/repo/tests/imported.rs"
 
@@ -30,10 +32,12 @@ grep -q "^violation: crates/repo/src/full.rs:1:" <<<"$out" || fail "missed a ful
 grep -q "^violation: crates/repo/tests/imported.rs:1:" <<<"$out" || fail "missed an imported Command"
 grep -q "^violation: crates/repo/tests/imported.rs:2:" <<<"$out" || fail "missed a bare Command::new"
 if grep -qE "^violation: crates/(write|app)/" <<<"$out"; then fail "reported an allowed or clean file: $out"; fi
+if grep -q "^violation: crates/budget/src/spawn.rs" <<<"$out"; then fail "reported the harness's one allowed file: $out"; fi
+grep -q "^violation: crates/budget/src/run.rs:1:" <<<"$out" || fail "allowed all of the harness, not its one file"
 case1="$out"
 
 # 2. With the offenders allowed, the guard passes.
-run_guard "$tree" crates/write/src/ crates/repo/
+run_guard "$tree" crates/write/src/ crates/repo/ crates/budget/
 [ "$status" -eq 0 ] || fail "guard failed with every offender allowed (exit $status): $out"
 
 # 3. A root with no crates/ is an error, never a pass.

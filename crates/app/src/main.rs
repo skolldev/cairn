@@ -7,6 +7,8 @@
 mod bridge;
 #[cfg(debug_assertions)]
 mod frame_overlay;
+#[cfg(feature = "measure")]
+mod measure;
 mod quit;
 mod refs_view;
 mod status_view;
@@ -36,6 +38,8 @@ struct Workspace {
     _bridge: Entity<Bridge>,
     #[cfg(debug_assertions)]
     frame_clock: Option<std::rc::Rc<frame_overlay::FrameClock>>,
+    #[cfg(feature = "measure")]
+    probe: Option<measure::Probe>,
 }
 
 impl Workspace {
@@ -87,6 +91,8 @@ impl Workspace {
             _bridge: bridge,
             #[cfg(debug_assertions)]
             frame_clock: frame_overlay::FrameClock::enabled().then(Default::default),
+            #[cfg(feature = "measure")]
+            probe: None,
         }
     }
 
@@ -164,6 +170,11 @@ impl Render for Workspace {
         if let Some(clock) = &self.frame_clock {
             root = root.child(clock.overlay()).child(clock.end_marker());
         }
+        #[cfg(feature = "measure")]
+        if let Some(probe) = &self.probe {
+            // Last, so that it paints after everything the frame shows.
+            root = probe.attach(root, self.refs.clone(), self.status.clone(), _window, cx);
+        }
         root
     }
 }
@@ -189,6 +200,8 @@ fn exit(cx: &mut App) {
 
 fn main() {
     init_tracing();
+    #[cfg(feature = "measure")]
+    measure::install_frame_source();
     let path = std::env::args_os().nth(1).map(PathBuf::from);
     gpui_platform::application().run(move |cx: &mut App| {
         let options = WindowOptions {
@@ -201,7 +214,13 @@ fn main() {
             ..Default::default()
         };
         cx.open_window(options, move |window, cx| {
-            let workspace = cx.new(|cx| Workspace::new(path, Rc::new(exit), window, cx));
+            let workspace = cx.new(|cx| {
+                #[allow(unused_mut)]
+                let mut workspace = Workspace::new(path, Rc::new(exit), window, cx);
+                #[cfg(feature = "measure")]
+                workspace.probe_from_env(window, cx);
+                workspace
+            });
             #[cfg(target_os = "macos")]
             terminate::route_to_close_flow(workspace.read(cx).quit.clone(), window, cx);
             workspace

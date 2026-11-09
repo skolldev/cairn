@@ -1,0 +1,21 @@
+[package]
+name = "cairn-budget"
+description = "The Budget harness: measures Phase 1 Budgets on the real Cairn binary, by the Budget rules."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "cairn-budget"
+path = "src/main.rs"
+
+[dependencies]
+cairn-write.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Performance"] }

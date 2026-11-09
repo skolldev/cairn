@@ -240,7 +240,7 @@ These numbers are the definition of "blazing fast" for this project. Each Budget
 | Graph scrolling, at 120 Hz, over the top 100k rows, in the Floor's five scenarios | at least 99.5% of presented intervals within 12.5 ms, no gap over 25 ms | Linux kernel | Proven on Windows. macOS needs an Instruments cross-check (Phase 2) |
 | Select commit to file list, settled (merges diffed against the first parent) | < 50 ms | Linux kernel | Unproven (Phase 2) |
 | Select file to first diff screen, settled with highlighting, for files under 10k lines | < 50 ms | any | Unproven (Phase 3) |
-| External change to UI updated: a file saved or a `git` command run outside Cairn, to the updated status, sidebar and graph | < 100 ms | Linux kernel | Unproven (Phase 1) |
+| External change to UI updated: from a file saved, or a `git` command run outside Cairn having exited, to the updated status, sidebar and graph | < 100 ms | Linux kernel | Unproven (Phase 1) |
 | Intent to UI updated after a Local write Job, such as Commit pressed to the updated graph and status | < 100 ms | small repo | Unproven (Phase 1). Needs the tuned CLI runner: a four-spawn commit is about 50 ms tuned and 125 ms naive on Windows |
 | Memory, settled after the scroll scenarios plus 10 s, at a 1728x1117 logical window, with commit metadata resident | < 500 MB | Linux kernel | Unproven (Phase 2). The framework and delta row store measured 248 MB on macOS and 37 MB on Windows |
 

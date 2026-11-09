@@ -10,7 +10,13 @@ publish.workspace = true
 name = "cairn"
 path = "src/main.rs"
 
+[features]
+# The Budget harness's probe: what each frame painted and when it reached the screen. Never in a
+# build that ships. `scripts/budget.sh` builds with it. See docs/budget-harness.md.
+measure = ["dep:cairn-budget", "dep:block2"]
+
 [dependencies]
+cairn-budget = { workspace = true, optional = true }
 cairn-core.workspace = true
 cairn-read.workspace = true
 cairn-write.workspace = true
@@ -26,6 +32,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = { workspace = true, optional = true }
 objc2.workspace = true
 
 [dev-dependencies]

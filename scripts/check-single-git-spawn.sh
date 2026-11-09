@@ -2,16 +2,17 @@
 # Fails if any Rust file under crates/ outside the allowed paths starts a process. Only
 # cairn-write's runner may spawn git (#14), and it carries the rules every spawn needs: the
 # real binary, -C, core.longpaths, no prompts, no console window. Tests included: they go
-# through cairn-write too, so they run the same git the product does.
+# through cairn-write too, so they run the same git the product does. The Budget harness has to
+# start `cairn` and PresentMon, so it has one file of its own, and that file refuses git.
 #
 # Usage: check-single-git-spawn.sh [root] [allowed path prefix...]
-# Defaults: the current directory, and `crates/write/src/` as the only allowed prefix.
+# Defaults: the current directory, `crates/write/src/` and `crates/budget/src/spawn.rs`.
 set -euo pipefail
 
 root="${1:-.}"
 shift || true
 allowed=("$@")
-[ "${#allowed[@]}" -gt 0 ] || allowed=(crates/write/src/)
+[ "${#allowed[@]}" -gt 0 ] || allowed=(crates/write/src/ crates/budget/src/spawn.rs)
 
 [ -d "$root/crates" ] || { echo "error: no crates/ directory under $root" >&2; exit 2; }
 

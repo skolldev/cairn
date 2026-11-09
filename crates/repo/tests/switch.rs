@@ -181,6 +181,42 @@ fn a_switch_beside_a_held_index_lock_publishes_gits_error_and_leaves_the_lock_al
 }
 
 #[test]
+fn a_timed_out_snapshot_wait_does_not_wait_for_a_blocked_local_write() {
+    let (dir, repo, _) = repo_with_other_branch();
+    let log = dir.path().join("hook.log");
+    let release = dir.path().join("release");
+    install_blocking_hook(&repo, &log, &release);
+    let harness = Harness::start();
+    let _release_on_panic = Release(&release);
+    open(&harness, &repo);
+
+    harness.service.send(Intent::Switch("other".to_owned()));
+    let mut jobs = Seen::default();
+    jobs.until(&harness, |j| {
+        j.nth(0)
+            .is_some_and(|job| job.output.contains("hook waiting on other"))
+    });
+
+    let release_later = release.clone();
+    let watchdog = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::fs::write(release_later, "").unwrap();
+    });
+    let start = std::time::Instant::now();
+    let timed_out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        harness.drain_until_with_timeout(std::time::Duration::from_millis(100), |_| false)
+    }));
+    assert!(timed_out.is_err());
+    drop(harness);
+    let elapsed = start.elapsed();
+    watchdog.join().unwrap();
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "a timed-out test waited {elapsed:?} for the blocked write"
+    );
+}
+
+#[test]
 fn a_switch_refused_for_local_changes_publishes_gits_message() {
     let (_dir, repo, start) = repo_with_other_branch();
     let harness = Harness::start();

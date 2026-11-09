@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "measure")]
+use cairn_repo::Refs;
 use cairn_repo::{Generation, Head, RefEntry, RefsSnapshot};
 use gpui::{
     AnyElement, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window, div,
@@ -19,6 +21,22 @@ pub struct RefsView {
 impl RefsView {
     pub fn set_snapshot(&mut self, snapshot: Arc<RefsSnapshot>) {
         self.snapshot = Some(snapshot);
+    }
+
+    /// Tells the Budget harness what this view shows.
+    #[cfg(feature = "measure")]
+    pub fn report_to(&self, frame: &mut cairn_budget::probe::Frame) {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        frame.refs = snapshot.generation.get();
+        if let Ok(Refs {
+            head: Head::Branch { name, .. },
+            ..
+        }) = &snapshot.result
+        {
+            frame.head = Some(name.short().to_owned());
+        }
     }
 }
 
