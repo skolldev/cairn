@@ -30,6 +30,9 @@ fn closed() -> &'static Mutex<Vec<Fields>> {
 
 struct ReadJobs;
 
+/// The repository a span is about, kept for the `read_job` spans inside it.
+struct Repository(String);
+
 struct Recorder<'a>(&'a mut Fields);
 
 impl Visit for Recorder<'_> {
@@ -43,12 +46,23 @@ impl Visit for Recorder<'_> {
 
 impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for ReadJobs {
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
-        if attrs.metadata().name() != "read_job" {
-            return;
-        }
+        let span = ctx.span(id).unwrap();
         let mut fields = Fields::new();
         attrs.record(&mut Recorder(&mut fields));
-        ctx.span(id).unwrap().extensions_mut().insert(fields);
+        if attrs.metadata().name() != "read_job" {
+            // An Intent's or an External change's span names the repository it is about.
+            if let Some(path) = fields.remove("path") {
+                span.extensions_mut().insert(Repository(path));
+            }
+            return;
+        }
+        // Which repository it read: other tests' services run in this binary too.
+        if let Some(parent) = span.parent()
+            && let Some(Repository(path)) = parent.extensions().get::<Repository>()
+        {
+            fields.insert("repository".to_owned(), path.clone());
+        }
+        span.extensions_mut().insert(fields);
     }
 
     fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
@@ -73,6 +87,7 @@ fn a_file_saved_outside_the_service_traces_narrowed_reads_of_unstaged_and_untrac
     common::assert_filesystem_events_available(&repo);
     let harness = Harness::start();
     let opened = open(&harness, &repo);
+    let ours = repo.display().to_string();
 
     std::fs::write(repo.join("README.md"), "saved outside Cairn\n").unwrap();
     // Shown in Unstaged: by then every status Slot has been asked again.
@@ -89,15 +104,14 @@ fn a_file_saved_outside_the_service_traces_narrowed_reads_of_unstaged_and_untrac
     for slot in ["unstaged", "untracked"] {
         // The saved file wakes both Slots. Each Slot's newest Snapshot so far may
         // still be the Open's, so wait for its span by name and Refresh, not generation.
-        // Other tests' services also number their Slots from 1, but only a watcher's
-        // refresh of worktree files is traced as `worktree`.
         let after = match slot {
             "unstaged" => opened.unstaged,
             _ => opened.untracked,
         }
         .get();
         let span = wait_for_span(|f| {
-            f.get("slot").map(String::as_str) == Some(slot)
+            f.get("repository") == Some(&ours)
+                && f.get("slot").map(String::as_str) == Some(slot)
                 && f.get("refresh").map(String::as_str) == Some("worktree")
                 && f.get("generation").and_then(|g| g.parse::<u64>().ok()) > Some(after)
         });
@@ -145,29 +159,47 @@ fn an_open_traces_its_read_jobs_as_open_and_not_pending() {
     let (_dir, repo) = small_fixture_clone();
     let harness = Harness::start();
     let opened = open(&harness, &repo);
+    let repository = repo.display().to_string();
 
-    let spans = closed().lock().unwrap().clone();
+    // A Read Job's span closes once it has published, so it can trail the Snapshot.
+    let spans = |slot: &str| {
+        wait_for_span(|f| {
+            f.get("repository") == Some(&repository)
+                && f.get("slot").map(String::as_str) == Some(slot)
+        });
+        closed().lock().unwrap().clone()
+    };
     for (slot, generation) in [
         ("refs", opened.refs),
         ("staged", opened.staged),
         ("unstaged", opened.unstaged),
         ("untracked", opened.untracked),
     ] {
-        // Other tests' services number their Slots from 1 too, so look for this repository's.
-        let ours = spans.iter().any(|f| {
-            f.get("slot").map(String::as_str) == Some(slot)
-                && f.get("generation") == Some(&generation.get().to_string())
-                && f.get("refresh").map(String::as_str) == Some("open")
-                && f.get("pending").map(String::as_str) == Some("false")
-        });
-        assert!(ours, "{slot}: {spans:?}");
+        let spans = spans(slot);
+        let span = spans
+            .iter()
+            .find(|f| {
+                f.get("repository") == Some(&repository)
+                    && f.get("slot").map(String::as_str) == Some(slot)
+                    && f.get("generation") == Some(&generation.get().to_string())
+            })
+            .unwrap_or_else(|| panic!("{slot}: {spans:?}"));
+        assert_eq!(
+            span.get("refresh").map(String::as_str),
+            Some("open"),
+            "{span:?}"
+        );
+        assert_eq!(
+            span.get("pending").map(String::as_str),
+            Some("false"),
+            "{span:?}"
+        );
         if matches!(slot, "unstaged" | "untracked") {
-            let full = spans.iter().any(|f| {
-                f.get("slot").map(String::as_str) == Some(slot)
-                    && f.get("refresh").map(String::as_str) == Some("open")
-                    && f.get("scope").map(String::as_str) == Some("full")
-            });
-            assert!(full, "an Open reads {slot} in full: {spans:?}");
+            assert_eq!(
+                span.get("scope").map(String::as_str),
+                Some("full"),
+                "an Open reads {slot} in full"
+            );
         }
     }
 }

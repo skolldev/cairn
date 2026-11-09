@@ -72,7 +72,19 @@ impl<T: Clone> Narrowed<T> {
     }
 
     /// Takes what changed since the last read began, as what the read starting now reads.
-    pub(crate) fn begin(&self, workdir: &Path) -> Scope<T> {
+    /// Until [`finish`](Reading::finish), the changes it took are held by the returned
+    /// [`Reading`], which hands them back as "read everything" if the read never finishes,
+    /// such as when it panics.
+    pub(crate) fn begin<'a>(&'a self, workdir: &'a Path) -> (Scope<T>, Reading<'a, T>) {
+        let reading = Reading {
+            narrowed: self,
+            workdir,
+            finished: false,
+        };
+        (self.take(workdir), reading)
+    }
+
+    fn take(&self, workdir: &Path) -> Scope<T> {
         let changes = std::mem::take(&mut *self.changes.lock().unwrap());
         let last = self.last.lock().unwrap();
         match &*last {
@@ -94,9 +106,7 @@ impl<T: Clone> Narrowed<T> {
         }
     }
 
-    /// Keeps what the read that began last answered, for the next one to start from. A read
-    /// that failed, or was stopped, may have taken changes it never read: the next reads all.
-    pub(crate) fn finish(&self, workdir: &Path, result: &Result<Vec<T>, String>) {
+    fn keep(&self, workdir: &Path, result: &Result<Vec<T>, String>) {
         let mut last = self.last.lock().unwrap();
         match result {
             Ok(list) => {
@@ -109,6 +119,31 @@ impl<T: Clone> Narrowed<T> {
                 *last = None;
                 self.everything();
             }
+        }
+    }
+}
+
+/// A read that has taken its changes from a [`Narrowed`].
+pub(crate) struct Reading<'a, T: Clone> {
+    narrowed: &'a Narrowed<T>,
+    workdir: &'a Path,
+    finished: bool,
+}
+
+impl<T: Clone> Reading<'_, T> {
+    /// Keeps what the read answered, for the next one to start from. A read that failed, or
+    /// was stopped, may have taken changes it never read: the next reads all.
+    pub(crate) fn finish(mut self, result: &Result<Vec<T>, String>) {
+        self.finished = true;
+        self.narrowed.keep(self.workdir, result);
+    }
+}
+
+impl<T: Clone> Drop for Reading<'_, T> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.narrowed
+                .keep(self.workdir, &Err("the read never finished".to_owned()));
         }
     }
 }

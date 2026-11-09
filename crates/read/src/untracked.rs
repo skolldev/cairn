@@ -138,7 +138,9 @@ fn walk(
         .into_iter()
         .flatten()
         .map(|p| {
-            let mut pattern = gix::bstr::BString::from(":(literal)");
+            // `top`: gix otherwise reads a pattern as relative to the process's current
+            // directory when that lies inside the worktree.
+            let mut pattern = gix::bstr::BString::from(":(top,literal)");
             pattern.extend_from_slice(p.as_ref());
             pattern
         })

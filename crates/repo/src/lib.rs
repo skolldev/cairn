@@ -833,10 +833,13 @@ fn read_untracked(
     mode: &fallback::ReadMode,
     narrowed: &narrow::Narrowed<RepoPath>,
 ) -> Result<Vec<RepoPath>, String> {
-    let within = match narrowed.begin(path) {
+    let (scope, reading) = narrowed.begin(path);
+    let within = match scope {
         narrow::Scope::Unchanged(last) => {
             record_scope(Some(0));
-            return Ok(last);
+            let result = Ok(last);
+            reading.finish(&result);
+            return result;
         }
         narrow::Scope::Everything => None,
         narrow::Scope::Paths { last, paths } => Some((last, paths)),
@@ -857,7 +860,7 @@ fn read_untracked(
         read.map_err(|e| e.message().to_owned())
     });
     record_scope(changed_only);
-    narrowed.finish(path, &result);
+    reading.finish(&result);
     result
 }
 
@@ -870,14 +873,15 @@ fn read_unstaged(
     job: &JobContext,
     narrowed: &narrow::Narrowed<FileChange>,
 ) -> Result<Vec<FileChange>, String> {
-    let result = match narrowed.begin(path) {
+    let (scope, reading) = narrowed.begin(path);
+    let result = match scope {
         narrow::Scope::Everything => {
             record_scope(None);
             status::unstaged(path, job.cli_stop())
         }
         narrow::Scope::Unchanged(last) => {
             record_scope(Some(0));
-            return Ok(last);
+            Ok(last)
         }
         narrow::Scope::Paths { last, paths } => {
             record_scope(Some(paths.len()));
@@ -885,7 +889,7 @@ fn read_unstaged(
             status::unstaged_within(path, job.cli_stop(), &last, &paths)
         }
     };
-    narrowed.finish(path, &result);
+    reading.finish(&result);
     result
 }
 

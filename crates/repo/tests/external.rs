@@ -162,7 +162,6 @@ fn a_change_to_excludes_reads_untracked_again() {
         "a .gitignore that ignores them",
     );
 
-    write(&repo, ".git/info/exclude", "");
     let ignore = ignore.replace("\n/notes/\n*.log\n", "\n");
     write(&repo, ".gitignore", &ignore);
     wait_for_git(&harness, &repo, &mut shown, "that .gitignore undone");
@@ -202,5 +201,31 @@ fn a_file_saved_outside_the_service_does_not_read_staged_again() {
         staged,
         Some(opened.staged.get() + 1),
         "a saved file can't change HEAD vs index"
+    );
+
+    // Control: a change that can move HEAD vs index, an index write, does ask Staged again,
+    // so the next Open's answer is no longer the next generation.
+    let marker = staged.unwrap();
+    git(&repo, &["add", "--", "README.md"]);
+    let mut shown_staged = false;
+    harness.drain_until(|s| match s {
+        Snapshot::Staged(s) => {
+            shown_staged |= s.result.as_ref().is_ok_and(|c| !c.is_empty());
+            shown_staged
+        }
+        _ => false,
+    });
+    harness.service.send(Intent::Open(repo.clone()));
+    let mut reopened = None;
+    harness.drain_until(|s| match s {
+        Snapshot::Staged(s) if s.result.as_ref().is_ok_and(|c| !c.is_empty()) => {
+            reopened = Some(s.generation.get());
+            reopened > Some(marker + 1)
+        }
+        _ => false,
+    });
+    assert!(
+        reopened > Some(marker + 1),
+        "the index write was read: {reopened:?}"
     );
 }
