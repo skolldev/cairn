@@ -227,13 +227,7 @@ fn cli_untracked_keeps_non_utf8_path_bytes() {
             .is_ok_and(|paths| paths.iter().any(|p| p.as_bytes() == b"nonutf8-\xff")),
         _ => false,
     });
-    let paths = seen
-        .iter()
-        .find_map(|s| match s {
-            Snapshot::Untracked(s) => Some(s.result.as_ref().unwrap()),
-            _ => None,
-        })
-        .unwrap();
+    let paths = common::untracked(&seen)[0].result.as_ref().unwrap();
     assert!(paths.iter().any(|p| p.as_bytes() == b"nonutf8-\xff"));
 }
 

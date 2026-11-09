@@ -4,13 +4,13 @@
 
 mod common;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use cairn_repo::{ChangesSnapshot, Generation, Head, Intent, Snapshot};
-use common::{Harness, Seen, git, open, slash, small_fixture_clone};
+use cairn_repo::{ChangesSnapshot, Generation, Head, Intent, RepoPath, Snapshot};
+use common::{Harness, Seen, git, open, slash, small_fixture_clone, unstaged, untracked};
 
 #[test]
 fn a_git_switch_run_outside_the_service_is_followed_by_a_refs_snapshot() {
@@ -55,8 +55,8 @@ fn a_newer_status_read_stops_the_running_one_instead_of_waiting_for_it() {
     // the stop, nothing publishes until `release` exists, and this drain times out.
     harness.service.send(Intent::Open(repo.clone()));
     let mut seen = Seen::default();
-    seen.until(&harness, |seen| !unstaged(seen).is_empty());
-    let published = unstaged(&seen);
+    seen.until(&harness, |seen| !unstaged(&seen.all).is_empty());
+    let published = unstaged(&seen.all);
     assert_eq!(published.len(), 1, "the stopped read published nothing");
     let unstaged = published[0];
     // 2, or later if a watcher event asked for another read meanwhile.
@@ -87,7 +87,9 @@ fn quick_refreshes_of_one_slot_publish_only_newer_generations_and_never_a_stoppe
     }
     let mut seen = Seen::default();
     seen.until(&harness, |seen| {
-        unstaged(seen).iter().any(|u| u.generation.get() >= OPENS)
+        unstaged(&seen.all)
+            .iter()
+            .any(|u| u.generation.get() >= OPENS)
     });
 
     // Marker: open another path. Its Snapshot takes a later generation than every read of
@@ -98,10 +100,12 @@ fn quick_refreshes_of_one_slot_publish_only_newer_generations_and_never_a_stoppe
         .service
         .send(Intent::Open(elsewhere.path().to_path_buf()));
     seen.until(&harness, |seen| {
-        unstaged(seen).iter().any(|u| u.workdir == elsewhere.path())
+        unstaged(&seen.all)
+            .iter()
+            .any(|u| u.workdir == elsewhere.path())
     });
 
-    let mut published = unstaged(&seen);
+    let mut published = unstaged(&seen.all);
     published.retain(|u| u.workdir == repo);
     let generations: Vec<u64> = published.iter().map(|u| u.generation.get()).collect();
     assert!(
@@ -183,20 +187,328 @@ fn status_keeps_publishing_while_external_changes_keep_arriving() {
     });
 }
 
-/// The Unstaged Snapshots in `seen`, oldest first.
-fn unstaged(seen: &Seen) -> Vec<&Arc<ChangesSnapshot>> {
-    seen.all
-        .iter()
-        .filter_map(|s| match s {
-            Snapshot::Unstaged(u) => Some(u),
-            _ => None,
-        })
-        .collect()
+/// Appends to `path` `times` times, 10 ms apart, as a build writing its output does.
+fn append_repeatedly(path: &Path, times: usize) {
+    for _ in 0..times {
+        let mut bytes = std::fs::read(path).unwrap_or_default();
+        bytes.extend_from_slice(b"more\n");
+        std::fs::write(path, bytes).unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Creates the untracked file `name` and waits until an Untracked Snapshot lists it. Returns
+/// that Snapshot's generation. The file is a marker: every event the watcher saw before it
+/// has been classified, and any refresh one asked for took an older generation.
+fn untracked_marker(seen: &mut Seen, harness: &Harness, repo: &Path, name: &str) -> u64 {
+    std::fs::write(repo.join(name), "marker\n").unwrap();
+    let listing = |seen: &Seen| {
+        untracked(&seen.all)
+            .into_iter()
+            .find(|u| u.workdir == repo && u.result.as_deref().is_ok_and(|p| has(p, name)))
+            .map(|u| u.generation.get())
+    };
+    seen.until(harness, |seen| listing(seen).is_some());
+    listing(seen).unwrap()
+}
+
+/// How many status refreshes the watcher asked for while `change` ran: the generation gap
+/// between an Untracked marker before it and one after. Late events from a test's setup
+/// land before the first marker, and the second marker's own events add a few. A single
+/// refresh can show a change for another event's sake, so a test that needs to know the
+/// change itself refreshed repeats it and counts.
+fn status_refreshes_during(
+    seen: &mut Seen,
+    harness: &Harness,
+    repo: &Path,
+    label: &str,
+    change: impl FnOnce(),
+) -> u64 {
+    let before = untracked_marker(seen, harness, repo, &format!("{label}-before.txt"));
+    change();
+    untracked_marker(seen, harness, repo, &format!("{label}-after.txt")) - before
+}
+
+/// A [`status_refreshes_during`] gap this large means the change itself asked for refreshes.
+/// Twenty writes measured about 80 generations.
+const REFRESHED: u64 = 10;
+
+/// The most a [`status_refreshes_during`] gap reaches from the second marker's own events,
+/// when the change itself refreshed nothing.
+const MARKER_ONLY: u64 = 3;
+
+#[test]
+fn writes_to_an_ignored_untracked_file_refresh_nothing_and_writes_to_an_unignored_one_do() {
+    let (_dir, repo) = small_fixture_clone();
+    common::assert_filesystem_events_available(&repo);
+    std::fs::write(repo.join(".git/info/exclude"), "build.log\n").unwrap();
+    std::fs::write(repo.join("build.log"), "").unwrap();
+    let harness = Harness::start();
+    open(&harness, &repo);
+    let mut seen = Seen::default();
+
+    let ignored = status_refreshes_during(&mut seen, &harness, &repo, "ignored", || {
+        append_repeatedly(&repo.join("build.log"), 20)
+    });
+    // Control: the same writes to a file git doesn't ignore each ask for a refresh, and each
+    // refresh takes a new generation.
+    let control = status_refreshes_during(&mut seen, &harness, &repo, "control", || {
+        append_repeatedly(&repo.join("control.txt"), 20)
+    });
+    assert!(
+        control > REFRESHED,
+        "unignored writes should each refresh: {control} generations"
+    );
+    // Only the second marker's own events refresh. Seen red on Linux (`scripts/linux-tests.sh`):
+    // with no `Access` check before the rebuild trigger, every read's open rebuilds the matcher.
+    assert!(
+        ignored <= MARKER_ONLY,
+        "ignored writes refreshed status: {ignored} generations (control: {control})"
+    );
+}
+
+/// Whether a Snapshot of `repo`'s changes lists `path`.
+fn lists_change(u: &ChangesSnapshot, repo: &Path, path: &str) -> bool {
+    u.workdir == repo
+        && u.result
+            .as_ref()
+            .is_ok_and(|c| c.iter().any(|f| f.path.as_bytes() == path.as_bytes()))
+}
+
+/// Whether an Untracked Snapshot of `repo` newer than `after` passes `check`.
+fn untracked_after_shows(
+    seen: &Seen,
+    repo: &Path,
+    after: u64,
+    check: impl Fn(&[RepoPath]) -> bool,
+) -> bool {
+    untracked(&seen.all).iter().any(|u| {
+        u.workdir == repo && u.generation.get() > after && u.result.as_deref().is_ok_and(&check)
+    })
+}
+
+fn has(paths: &[RepoPath], path: &str) -> bool {
+    paths.iter().any(|p| p.as_bytes() == path.as_bytes())
+}
+
+#[test]
+fn a_change_to_a_tracked_file_matching_an_ignore_pattern_shows_in_unstaged() {
+    let (_dir, repo) = small_fixture_clone();
+    common::assert_filesystem_events_available(&repo);
+    std::fs::write(repo.join(".git/info/exclude"), "*.log\n").unwrap();
+    std::fs::write(repo.join("tracked.log"), "first\n").unwrap();
+    git(&repo, &["add", "-f", "tracked.log"]);
+    let harness = Harness::start();
+    let opened = open(&harness, &repo);
+
+    let mut seen = Seen::default();
+    let refreshes = status_refreshes_during(&mut seen, &harness, &repo, "tracked", || {
+        append_repeatedly(&repo.join("tracked.log"), 20)
+    });
+    // Seen red: with `Tracked::covers` not looking up the entry itself, the writes are skipped.
+    assert!(
+        refreshes > REFRESHED,
+        "each write to the tracked file refreshes: {refreshes} generations"
+    );
+    seen.until(&harness, |seen| {
+        unstaged_after(seen, opened.unstaged)
+            .iter()
+            .any(|u| lists_change(u, &repo, "tracked.log"))
+    });
+}
+
+#[test]
+fn a_pattern_added_to_an_ignored_gitignore_drops_the_files_it_covers_from_untracked() {
+    let (_dir, repo) = small_fixture_clone();
+    common::assert_filesystem_events_available(&repo);
+    // The `.gitignore` is ignored itself, so only its role as an exclude source refreshes.
+    std::fs::write(repo.join(".git/info/exclude"), ".gitignore\n").unwrap();
+    std::fs::create_dir(repo.join("notes")).unwrap();
+    std::fs::write(repo.join("notes/draft.tmp"), "draft\n").unwrap();
+    let harness = Harness::start();
+    // Untracked lists `notes/` until the pattern arrives: nothing in it is ignored yet.
+    let opened = open(&harness, &repo);
+
+    std::fs::write(repo.join("notes/.gitignore"), "*.tmp\n").unwrap();
+    let mut seen = Seen::default();
+    // Seen red: with `changes_filter` not matching `.gitignore`, the old matcher skips the
+    // ignored `.gitignore`'s own event, and Untracked keeps `notes/`.
+    seen.until(&harness, |seen| {
+        untracked_after_shows(seen, &repo, opened.untracked.get(), |p| !has(p, "notes/"))
+    });
+}
+
+#[test]
+fn a_file_a_removed_pattern_covered_shows_in_untracked_once_written() {
+    let (_dir, repo) = small_fixture_clone();
+    common::assert_filesystem_events_available(&repo);
+    let gitignore = repo.join(".gitignore");
+    let original = std::fs::read(&gitignore).unwrap();
+    std::fs::write(&gitignore, [original.as_slice(), b"*.tmp\n"].concat()).unwrap();
+    std::fs::write(repo.join("old.tmp"), "old\n").unwrap();
+    let harness = Harness::start();
+    let opened = open(&harness, &repo);
+    let mut seen = Seen::default();
+    // The matcher reads a `.gitignore` when a lookup first needs it, so this also has it
+    // read the pattern before the pattern goes.
+    let ignored = status_refreshes_during(&mut seen, &harness, &repo, "old", || {
+        append_repeatedly(&repo.join("old.tmp"), 20)
+    });
+    // Its control is the `new.tmp` writes below, which refresh once the pattern is gone.
+    assert!(
+        ignored <= MARKER_ONLY,
+        "the pattern applies: {ignored} generations"
+    );
+
+    std::fs::write(&gitignore, &original).unwrap();
+    seen.until(&harness, |seen| {
+        untracked_after_shows(seen, &repo, opened.untracked.get(), |p| has(p, "old.tmp"))
+    });
+    // Written after the pattern's removal was seen. A matcher that still held the pattern
+    // would skip each write.
+    let refreshes = status_refreshes_during(&mut seen, &harness, &repo, "new", || {
+        append_repeatedly(&repo.join("new.tmp"), 20)
+    });
+    // Seen red: with `Filter::rebuild` returning at once, the old matcher stays.
+    assert!(
+        refreshes > REFRESHED,
+        "each write to the no longer ignored file refreshes: {refreshes} generations"
+    );
+    seen.until(&harness, |seen| {
+        untracked_after_shows(seen, &repo, opened.untracked.get(), |p| has(p, "new.tmp"))
+    });
+}
+
+#[test]
+fn moving_an_ignored_directory_with_a_tracked_file_out_of_the_worktree_shows_the_deletion() {
+    let (dir, repo) = small_fixture_clone();
+    common::assert_filesystem_events_available(&repo);
+    // No trailing slash: the directory itself matches, so its own event is excluded.
+    std::fs::write(repo.join(".git/info/exclude"), "build\n").unwrap();
+    std::fs::create_dir(repo.join("build")).unwrap();
+    std::fs::write(repo.join("build/keep.txt"), "keep\n").unwrap();
+    std::fs::write(repo.join("build/output.o"), "output\n").unwrap();
+    git(&repo, &["add", "-f", "build/keep.txt"]);
+    let harness = Harness::start();
+    let opened = open(&harness, &repo);
+
+    // On macOS each move reports one event, for `build`, and none for the files inside.
+    let (inside, outside) = (repo.join("build"), dir.path().join("moved"));
+    let mut seen = Seen::default();
+    let refreshes = status_refreshes_during(&mut seen, &harness, &repo, "moves", || {
+        for _ in 0..10 {
+            std::fs::rename(&inside, &outside).unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+            std::fs::rename(&outside, &inside).unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::rename(&inside, &outside).unwrap();
+    });
+    // Seen red: with `Tracked::covers` not asking `path_is_directory`, the moves are skipped.
+    assert!(
+        refreshes > REFRESHED,
+        "each move of the directory refreshes: {refreshes} generations"
+    );
+    seen.until(&harness, |seen| {
+        unstaged_after(seen, opened.unstaged)
+            .iter()
+            .any(|u| lists_change(u, &repo, "build/keep.txt"))
+    });
+}
+
+#[test]
+fn a_directory_replaced_without_its_gitignore_stops_skipping_what_that_gitignore_covered() {
+    let (dir, repo) = small_fixture_clone();
+    common::assert_filesystem_events_available(&repo);
+    let sub = repo.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join(".gitignore"), "*.o\n").unwrap();
+    std::fs::write(sub.join("keep.txt"), "keep\n").unwrap();
+    git(&repo, &["add", "sub/keep.txt"]);
+    let harness = Harness::start();
+    open(&harness, &repo);
+    let mut seen = Seen::default();
+    let ignored = status_refreshes_during(&mut seen, &harness, &repo, "before", || {
+        append_repeatedly(&sub.join("first.o"), 20)
+    });
+    assert!(
+        ignored <= MARKER_ONLY,
+        "`sub/.gitignore` applies: {ignored} generations"
+    );
+
+    let refreshes = status_refreshes_during(&mut seen, &harness, &repo, "after", || {
+        // The stack keeps what it read for the directories of the last lookup, so the
+        // lookup before the move is one inside `sub`, after the marker's at the root.
+        append_repeatedly(&sub.join("first.o"), 1);
+        // On macOS the move reports `sub` alone, nothing for `sub/.gitignore`.
+        std::fs::rename(&sub, dir.path().join("moved")).unwrap();
+        std::fs::create_dir(&sub).unwrap();
+        append_repeatedly(&sub.join("second.o"), 20);
+    });
+    // Seen red: with `Excludes::skips` returning early for a tracked path such as `sub`, the
+    // stack keeps the old `sub/.gitignore` and skips these writes.
+    assert!(
+        refreshes > REFRESHED,
+        "nothing ignores `sub/*.o` any more: {refreshes} generations"
+    );
+}
+
+#[test]
+fn in_a_linked_worktree_a_newly_tracked_ignored_file_shows_in_unstaged_when_changed() {
+    let (dir, repo) = small_fixture_clone();
+    let worktree = dir.path().join("linked");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    common::assert_filesystem_events_available(&worktree);
+    // The common dir's excludes apply to every worktree.
+    std::fs::write(repo.join(".git/info/exclude"), "*.log\n").unwrap();
+    std::fs::write(worktree.join("now-tracked.log"), "first\n").unwrap();
+    let harness = Harness::start();
+    let opened = open(&harness, &worktree);
+
+    // The linked worktree's index lives in the common dir, which isn't watched.
+    git(&worktree, &["add", "-f", "now-tracked.log"]);
+    std::fs::write(worktree.join("now-tracked.log"), "changed outside Cairn\n").unwrap();
+    let mut seen = Seen::default();
+    // Seen red: with the filter started here too, its index misses the `git add -f`, and the
+    // change is skipped.
+    seen.until(&harness, |seen| {
+        unstaged_after(seen, opened.unstaged)
+            .iter()
+            .any(|u| lists_change(u, &worktree, "now-tracked.log"))
+    });
+}
+
+#[test]
+fn renaming_a_file_from_an_ignored_path_to_an_unignored_one_refreshes() {
+    let (_dir, repo) = small_fixture_clone();
+    common::assert_filesystem_events_available(&repo);
+    std::fs::write(repo.join(".git/info/exclude"), "*.log\n").unwrap();
+    std::fs::write(repo.join("renamed.log"), "renamed\n").unwrap();
+    let harness = Harness::start();
+    open(&harness, &repo);
+    let mut seen = Seen::default();
+    // Late events from the setup could refresh after the rename and hide a skipped one.
+    let settled = untracked_marker(&mut seen, &harness, &repo, "settled.txt");
+
+    std::fs::rename(repo.join("renamed.log"), repo.join("renamed.txt")).unwrap();
+    // Seen red: with `Excludes::skips` skipping every untracked path, excluded or not.
+    seen.until(&harness, |seen| {
+        untracked_after_shows(seen, &repo, settled, |p| has(p, "renamed.txt"))
+    });
 }
 
 /// The Unstaged Snapshots in `seen` newer than `after`, oldest first.
 fn unstaged_after(seen: &Seen, after: Generation) -> Vec<&Arc<ChangesSnapshot>> {
-    let mut all = unstaged(seen);
+    let mut all = unstaged(&seen.all);
     all.retain(|u| u.generation > after);
     all
 }
@@ -279,7 +591,9 @@ fn a_burst_shorter_than_a_read_costs_at_most_two_status_refreshes() {
         .service
         .send(Intent::Open(elsewhere.path().to_path_buf()));
     seen.until(&harness, |seen| {
-        unstaged(seen).iter().any(|u| u.workdir == elsewhere.path())
+        unstaged(&seen.all)
+            .iter()
+            .any(|u| u.workdir == elsewhere.path())
     });
     let mut published = unstaged_after(&seen, opened.unstaged);
     published.retain(|u| u.workdir == repo);

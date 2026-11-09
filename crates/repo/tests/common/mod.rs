@@ -320,7 +320,10 @@ pub fn filters_fixture_copy() -> (tempfile::TempDir, PathBuf) {
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use cairn_repo::{Generation, Intent, JobId, JobKind, JobSnapshot, JobState, Oid, RefsSnapshot};
+use cairn_repo::{
+    ChangesSnapshot, Generation, Intent, JobId, JobKind, JobSnapshot, JobState, Oid, RefsSnapshot,
+    UntrackedSnapshot,
+};
 
 /// `path` as git's own sh reads it: forward slashes, on Windows too. For paths written
 /// into hooks, aliases and `uploadpack` wrappers.
@@ -412,6 +415,28 @@ pub fn open(harness: &Harness, repo: &Path) -> Opened {
         unstaged: unstaged.unwrap(),
         untracked: untracked.unwrap(),
     }
+}
+
+/// The Unstaged Snapshots among `snapshots`, oldest first.
+pub fn unstaged(snapshots: &[Snapshot]) -> Vec<&Arc<ChangesSnapshot>> {
+    snapshots
+        .iter()
+        .filter_map(|s| match s {
+            Snapshot::Unstaged(u) => Some(u),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The Untracked Snapshots among `snapshots`, oldest first.
+pub fn untracked(snapshots: &[Snapshot]) -> Vec<&Arc<UntrackedSnapshot>> {
+    snapshots
+        .iter()
+        .filter_map(|s| match s {
+            Snapshot::Untracked(u) => Some(u),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn job_of(snapshot: &Snapshot) -> Option<&Arc<JobSnapshot>> {
