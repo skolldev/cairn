@@ -2,7 +2,8 @@
 //!
 //! notify reports every change under the open repository's worktree, and under git's own
 //! directories: `.git/`, or, in a linked worktree or a submodule, wherever its `.git` file
-//! points.
+//! points. Which of those files belong to this worktree and which it shares with others:
+//! `docs/git-versions.md`.
 //! Each event maps to the Slots it can change, and refreshes them at once. There is no
 //! debounce timer: the Slot coalesces, because it holds at most one running and one
 //! pending Read Job, so a burst costs at most two refreshes back to back.
