@@ -22,6 +22,31 @@ pub enum JobClass {
     Network,
 }
 
+/// How Windows starts git, which decides what console git and the programs it runs get.
+///
+/// Cairn ships [`NoWindow`](Self::NoWindow). `docs/detached-process.md` holds the evidence
+/// for a later decision on [`Detached`](Self::Detached), and `crates/write/tests/windows_console.rs`
+/// is what gathers it. Nothing else sets this.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowsProcess {
+    /// `CREATE_NO_WINDOW`: a console with no window, which git's children share.
+    #[default]
+    NoWindow,
+    /// `DETACHED_PROCESS`: no console at all, which saves about 8 ms a call.
+    Detached,
+}
+
+#[cfg(windows)]
+impl WindowsProcess {
+    pub(crate) fn creation_flag(self) -> u32 {
+        match self {
+            WindowsProcess::NoWindow => 0x0800_0000,
+            WindowsProcess::Detached => 0x0000_0008,
+        }
+    }
+}
+
 /// One run of git: where, with what arguments and stdin, and for which class of Job.
 ///
 /// Commit messages and patches belong in [`stdin`](Self::stdin), never in arguments, so
@@ -34,6 +59,8 @@ pub struct Invocation {
     stdin: Option<Vec<u8>>,
     stop: Option<Stop>,
     gate: Option<StartGate>,
+    #[cfg(windows)]
+    windows_process: WindowsProcess,
 }
 
 impl Invocation {
@@ -45,6 +72,8 @@ impl Invocation {
             stdin: None,
             stop: None,
             gate: None,
+            #[cfg(windows)]
+            windows_process: WindowsProcess::default(),
         }
     }
 
@@ -79,6 +108,13 @@ impl Invocation {
     /// service's gate, so that none starts once a Force quit has decided to exit.
     pub fn through(mut self, gate: &StartGate) -> Self {
         self.gate = Some(gate.clone());
+        self
+    }
+
+    /// Starts git under `process` instead of the shipped [`WindowsProcess::NoWindow`].
+    #[cfg(windows)]
+    pub fn windows_process(mut self, process: WindowsProcess) -> Self {
+        self.windows_process = process;
         self
     }
 }
@@ -164,6 +200,11 @@ impl Git {
         if invocation.stop.is_some() {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(invocation.windows_process.creation_flag());
         }
 
         let spawn_error = |e: io::Error| RunError::Spawn {

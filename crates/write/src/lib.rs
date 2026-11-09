@@ -24,6 +24,8 @@ use std::sync::Arc;
 
 pub use gate::StartGate;
 pub use resolve::{Git, GitVersion};
+#[cfg(windows)]
+pub use run::WindowsProcess;
 pub use run::{Invocation, JobClass, Output};
 pub use stop::Stop;
 
@@ -127,8 +129,7 @@ fn git_command(program: &Path) -> Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.creation_flags(WindowsProcess::default().creation_flag());
     }
     cmd
 }
