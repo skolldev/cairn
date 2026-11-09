@@ -21,7 +21,7 @@ mod walk;
 pub use excludes::Excludes;
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 pub use cairn_core::{Oid, Refs, RepoPath};
@@ -66,6 +66,17 @@ impl Repo {
     /// Whether gix opened this repository with restricted config permissions.
     pub fn reduced_trust(&self) -> bool {
         self.0.to_thread_local().git_dir_trust() == gix::sec::Trust::Reduced
+    }
+
+    /// Where git keeps this repository's own files, such as HEAD and the index, and the
+    /// common dir holding what its worktrees share, such as refs and config. The two are
+    /// the same directory except in a linked worktree.
+    pub fn git_dirs(&self) -> (PathBuf, PathBuf) {
+        let repo = self.0.to_thread_local();
+        (
+            repo.git_dir().to_path_buf(),
+            repo.common_dir().to_path_buf(),
+        )
     }
 
     /// Every ref Cairn shows: local and remote branches, tags, stashes and HEAD.

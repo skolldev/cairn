@@ -456,18 +456,7 @@ fn a_directory_replaced_without_its_gitignore_stops_skipping_what_that_gitignore
 
 #[test]
 fn in_a_linked_worktree_a_newly_tracked_ignored_file_shows_in_unstaged_when_changed() {
-    let (dir, repo) = small_fixture_clone();
-    let worktree = dir.path().join("linked");
-    git(
-        &repo,
-        &[
-            "worktree",
-            "add",
-            "--quiet",
-            "--detach",
-            worktree.to_str().unwrap(),
-        ],
-    );
+    let (_dir, repo, worktree) = linked_worktree();
     common::assert_filesystem_events_available(&worktree);
     // The common dir's excludes apply to every worktree.
     std::fs::write(repo.join(".git/info/exclude"), "*.log\n").unwrap();
@@ -475,12 +464,25 @@ fn in_a_linked_worktree_a_newly_tracked_ignored_file_shows_in_unstaged_when_chan
     let harness = Harness::start();
     let opened = open(&harness, &worktree);
 
-    // The linked worktree's index lives in the common dir, which isn't watched.
+    // The linked worktree's index lies in its own git dir, under the common dir's
+    // `worktrees/`.
     git(&worktree, &["add", "-f", "now-tracked.log"]);
-    std::fs::write(worktree.join("now-tracked.log"), "changed outside Cairn\n").unwrap();
     let mut seen = Seen::default();
-    // Seen red: with the filter started here too, its index misses the `git add -f`, and the
-    // change is skipped.
+    seen.until(&harness, |seen| {
+        seen.all.iter().any(|s| match s {
+            Snapshot::Staged(u) => lists_change(u, &worktree, "now-tracked.log"),
+            _ => false,
+        })
+    });
+    let refreshes = status_refreshes_during(&mut seen, &harness, &worktree, "tracked", || {
+        append_repeatedly(&worktree.join("now-tracked.log"), 20)
+    });
+    // Seen red: with `changes_filter` not matching the linked worktree's index, the matcher
+    // keeps the file untracked and ignored, and skips each write.
+    assert!(
+        refreshes > REFRESHED,
+        "each write to the newly tracked file refreshes: {refreshes} generations"
+    );
     seen.until(&harness, |seen| {
         unstaged_after(seen, opened.unstaged)
             .iter()
@@ -615,5 +617,175 @@ fn a_burst_shorter_than_a_read_costs_at_most_two_status_refreshes() {
         "at most two status refreshes back to back, saw {}: {:?}",
         published.len(),
         published.iter().map(|u| u.generation).collect::<Vec<_>>()
+    );
+}
+
+/// A linked worktree of a fresh small fixture clone, detached at its HEAD.
+fn linked_worktree() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let (dir, repo) = small_fixture_clone();
+    let worktree = dir.path().join("linked");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    (dir, repo, worktree)
+}
+
+/// Opens `workdir`, runs `git switch` there to a new branch at the same commit, and waits
+/// for a Refs Snapshot on that branch and a newer Snapshot from each status Slot. The
+/// switch changes no worktree file, so only git's own files can ask for those refreshes.
+fn assert_an_external_switch_refreshes_refs_and_status(workdir: &Path) {
+    common::assert_filesystem_events_available(workdir);
+    git(workdir, &["branch", "elsewhere"]);
+    let harness = Harness::start();
+    let opened = open(&harness, workdir);
+
+    git(workdir, &["switch", "--quiet", "elsewhere"]);
+
+    let mut seen = Seen::default();
+    seen.until(&harness, |seen| {
+        let on_elsewhere = seen.all.iter().any(|s| match s {
+            Snapshot::Refs(r) if r.workdir == workdir && r.generation > opened.refs => {
+                r.result.as_ref().is_ok_and(|refs| {
+                    matches!(&refs.head, Head::Branch { name, .. } if name.as_str() == "refs/heads/elsewhere")
+                })
+            }
+            _ => false,
+        });
+        let newer = |slot: fn(&Snapshot) -> Option<(&Path, Generation)>, after: Generation| {
+            seen.all
+                .iter()
+                .filter_map(slot)
+                .any(|(w, g)| w == workdir && g > after)
+        };
+        on_elsewhere
+            && newer(
+                |s| match s {
+                    Snapshot::Staged(s) => Some((&s.workdir, s.generation)),
+                    _ => None,
+                },
+                opened.staged,
+            )
+            && newer(
+                |s| match s {
+                    Snapshot::Unstaged(s) => Some((&s.workdir, s.generation)),
+                    _ => None,
+                },
+                opened.unstaged,
+            )
+            && newer(
+                |s| match s {
+                    Snapshot::Untracked(s) => Some((&s.workdir, s.generation)),
+                    _ => None,
+                },
+                opened.untracked,
+            )
+    });
+}
+
+#[test]
+fn a_git_switch_in_a_linked_worktree_refreshes_refs_and_status() {
+    let (_dir, _repo, worktree) = linked_worktree();
+    assert_an_external_switch_refreshes_refs_and_status(&worktree);
+}
+
+#[test]
+fn a_git_switch_in_a_submodule_refreshes_refs_and_status() {
+    let (_dir, repo) = small_fixture_clone();
+    // git 2.38.1 stopped cloning local submodules by default; older git ignores the key.
+    git(
+        &repo,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+            common::small_fixture().to_str().unwrap(),
+            "sub",
+        ],
+    );
+    let submodule = repo.join("sub");
+    assert!(
+        submodule.join(".git").is_file(),
+        "a submodule's `.git` is a file pointing into the superproject's `.git/modules`"
+    );
+    // Seen red: with only the worktree watched, nothing refreshes and this times out.
+    assert_an_external_switch_refreshes_refs_and_status(&submodule);
+}
+
+#[test]
+fn a_branch_created_in_the_main_worktree_shows_in_a_linked_worktrees_refs() {
+    let (_dir, repo, worktree) = linked_worktree();
+    common::assert_filesystem_events_available(&worktree);
+    let harness = Harness::start();
+    let opened = open(&harness, &worktree);
+
+    // Every worktree shares the branch, which git writes to the common dir.
+    git(&repo, &["branch", "made-in-main"]);
+
+    // Seen red: with the linked worktree's own git dir watched but not the common dir, no
+    // Refs Snapshot lists the branch.
+    let mut seen = Seen::default();
+    seen.until(&harness, |seen| {
+        seen.all.iter().any(|s| match s {
+            Snapshot::Refs(r) if r.workdir == worktree && r.generation > opened.refs => {
+                r.result.as_ref().is_ok_and(|refs| {
+                    refs.local
+                        .iter()
+                        .any(|b| b.name.as_str() == "refs/heads/made-in-main")
+                })
+            }
+            _ => false,
+        })
+    });
+}
+
+#[test]
+fn switches_in_the_main_worktree_refresh_no_status_in_a_linked_one_and_its_own_switches_do() {
+    let (_dir, repo, worktree) = linked_worktree();
+    common::assert_filesystem_events_available(&worktree);
+    for (workdir, prefix) in [(&repo, "main"), (&worktree, "linked")] {
+        git(workdir, &["branch", &format!("{prefix}-there")]);
+        git(workdir, &["branch", &format!("{prefix}-back")]);
+    }
+    // Twenty switches between two branches at the same commit, so no worktree file changes.
+    let switches = |workdir: &Path, prefix: &str| {
+        for i in 0..20 {
+            let branch = if i % 2 == 0 { "there" } else { "back" };
+            git(
+                workdir,
+                &["switch", "--quiet", &format!("{prefix}-{branch}")],
+            );
+        }
+    };
+    let harness = Harness::start();
+    open(&harness, &worktree);
+    let mut seen = Seen::default();
+
+    // The main worktree's HEAD and index lie in the common dir, which is watched for the
+    // linked worktree's refs and config.
+    let main = status_refreshes_during(&mut seen, &harness, &worktree, "main", || {
+        switches(&repo, "main")
+    });
+    // Control: the same switches in the linked worktree move its own HEAD, each a refresh.
+    let control = status_refreshes_during(&mut seen, &harness, &worktree, "control", || {
+        switches(&worktree, "linked")
+    });
+    assert!(
+        control > REFRESHED,
+        "the linked worktree's own switches should each refresh: {control} generations"
+    );
+    // Seen red: with the common dir's HEAD and index classified as the linked worktree's own,
+    // the main worktree's switches refresh as many generations as the control's.
+    assert!(
+        main <= MARKER_ONLY,
+        "the main worktree's switches refreshed the linked one: {main} generations (control: {control})"
     );
 }
