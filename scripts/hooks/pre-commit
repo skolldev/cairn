@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# What CI would reject soonest, run before a commit rather than after a push. It checks the working
+# tree, which is what got built. `scripts/install-hooks.sh` turns it on. CI runs these and the tests.
+set -euo pipefail
+
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked --quiet -- -D warnings
