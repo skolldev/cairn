@@ -1,6 +1,6 @@
 name: CI
 
-# Every push gets its own complete run: no pull_request duplicate, no cancelling.
+# THROWAWAY: probes for a transient read failure, on Windows only. Never to be merged.
 on:
   push:
   workflow_dispatch:
@@ -10,238 +10,24 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  # Only cairn-app may depend on GPUI. The dependency graph is resolved for every target,
-  # so one OS is enough. The self-test shows the check fails on deliberate violations.
-  gpui-free:
-    name: GPUI-free crates
-    runs-on: macos-latest
+  probe:
+    name: read failure probes (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - name: Guard self-test (deliberate violations must fail)
-        run: ./scripts/test-check-gpui-free.sh
-      - name: Every crate except cairn-app is GPUI-free
-        run: ./scripts/check-gpui-free.sh
-
-  # Only cairn-write's runner may start processes, so every git call gets its rules. A
-  # source scan, so one OS is enough. The self-test shows it fails on deliberate violations.
-  single-git-spawn:
-    name: git spawned only by cairn-write
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Guard self-test (deliberate violations must fail)
-        run: ./scripts/test-check-single-git-spawn.sh
-      - name: Only cairn-write starts processes
-        run: ./scripts/check-single-git-spawn.sh
-
-  # Rules and tools for the tests themselves, which need nothing of Cairn's built. Each script's
-  # self-test shows it fails when it should.
-  test-tooling:
-    name: test gates and tooling
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Guard self-test (deliberate violations must fail)
-        run: ./scripts/test-check-test-gates.sh
-      - name: No check-then-create gates in tests
-        run: ./scripts/check-test-gates.sh
-      - name: seen-red.py self-test
-        run: ./scripts/test-seen-red.sh
-      - name: Cache the small fixture
-        uses: actions/cache@v4
-        with:
-          path: ~/cairn-fixtures/ripgrep
-          key: fixture-ripgrep-91f5d22ef48bde459d90a8c7dbeab416e97d0f2b-${{ runner.os }}
-      - name: Fixtures
-        run: |
-          ./scripts/fixtures.sh small
-          ./scripts/fixtures.sh filters
-      - name: Fixture check self-test
-        run: ./scripts/test-fixtures-check.sh
-      - name: Fixtures are what their names claim
-        run: ./scripts/fixtures.sh check
-
-  # A slowdown shows up against this commit's base, benched by the same runner in the same job,
-  # because numbers from different runners can't be compared. It's a signal that a change got
-  # slower, and never evidence for a Budget (CODING_STANDARDS.md). The kernel fixture isn't
-  # here, so those benches skip and say so.
-  benches:
-    name: bench regressions (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    env:
-      BENCHES: -p cairn-write -p cairn-repo --bench runner --bench reads --locked
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-      - name: Install toolchain from rust-toolchain.toml
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Cache the small fixture
-        uses: actions/cache@v4
-        with:
-          path: ~/cairn-fixtures/ripgrep
-          key: fixture-ripgrep-91f5d22ef48bde459d90a8c7dbeab416e97d0f2b-${{ runner.os }}
-      - name: Small fixture
-        shell: bash
-        run: ./scripts/fixtures.sh small
-      - name: Self-test (deliberate regressions must fail)
-        shell: bash
-        run: ./scripts/test-check-bench-regressions.sh
-      # main compares with what it was before this push, and a branch with where it left
-      # main, or its own parent if it hasn't left.
-      - name: Bench the base
-        shell: bash
-        env:
-          BEFORE: ${{ github.event.before }}
-        run: |
-          if [ "$GITHUB_REF_NAME" = main ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-            base="$BEFORE"
-          else
-            base="$(git merge-base origin/main HEAD)"
-            [ "$base" != "$(git rev-parse HEAD)" ] || base="$(git rev-parse HEAD~1)"
-          fi
-          git worktree add --quiet --detach ../cairn-base "$base"
-          if [ -f ../cairn-base/crates/repo/benches/reads.rs ]; then
-            (cd ../cairn-base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
-              cargo bench $BENCHES -- --save-baseline base)
-            (cd ../cairn-base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
-              "$GITHUB_WORKSPACE/scripts/bench-binary-hashes.sh" $BENCHES) \
-              > target/bench-binaries-base.txt
-            test -s target/bench-binaries-base.txt
-            echo "COMPARE=true" >> "$GITHUB_ENV"
-          else
-            echo "$base has no benches yet, so there is nothing to compare with"
-          fi
-      - name: Bench this commit
-        shell: bash
-        run: |
-          cargo bench $BENCHES -- --save-baseline head
-          ./scripts/bench-binary-hashes.sh $BENCHES > target/bench-binaries-head.txt
-          test -s target/bench-binaries-head.txt
-      - name: Compare
-        if: ${{ env.COMPARE == 'true' }}
-        shell: bash
-        run: |
-          if cmp -s target/bench-binaries-base.txt target/bench-binaries-head.txt; then
-            echo 'Benchmark executables are identical; timing differences are runner noise'
-            exit 0
-          fi
-          if first="$(./scripts/check-bench-regressions.sh target/criterion 2>&1)"; then
-            printf '%s\n' "$first"
-            exit 0
-          else
-            status=$?
-            printf '%s\n' "$first"
-            [ "$status" -eq 1 ] || exit "$status"
-          fi
-          first_regressed="$(printf '%s\n' "$first" | awk '$1 == "regressed:" { print $2 }' | sort)"
-          [ -n "$first_regressed" ] || exit 1
-
-          # Confirm on the same runner, in reverse order to counter drift during the job.
-          cargo bench $BENCHES -- --save-baseline confirm-head
-          (cd ../cairn-base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
-            cargo bench $BENCHES -- --save-baseline confirm-base)
-          if second="$(./scripts/check-bench-regressions.sh target/criterion 30 confirm-base confirm-head 2>&1)"; then
-            printf '%s\n' "$second"
-            exit 0
-          else
-            status=$?
-            printf '%s\n' "$second"
-            [ "$status" -eq 1 ] || exit "$status"
-          fi
-          second_regressed="$(printf '%s\n' "$second" | awk '$1 == "regressed:" { print $2 }' | sort)"
-          [ -n "$second_regressed" ] || exit 1
-          repeated="$(comm -12 <(printf '%s\n' "$first_regressed") <(printf '%s\n' "$second_regressed"))"
-          if [ -n "$repeated" ]; then
-            printf 'confirmed regression(s):\n%s\n' "$repeated"
-            exit 1
-          fi
-          echo 'No benchmark regressed in both comparisons'
-
-  check:
-    name: fmt, clippy, test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install toolchain from rust-toolchain.toml
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Cache the small fixture
-        uses: actions/cache@v4
-        with:
-          path: ~/cairn-fixtures/ripgrep
-          key: fixture-ripgrep-91f5d22ef48bde459d90a8c7dbeab416e97d0f2b-${{ runner.os }}
-      - name: Small fixture
-        shell: bash
-        run: ./scripts/fixtures.sh small
-      # Built locally in well under a second, so it isn't cached.
-      - name: autocrlf and filters fixture
-        shell: bash
-        run: ./scripts/fixtures.sh filters
-      - name: fmt
-        run: cargo fmt --all --check
-      - name: clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: test
-        run: cargo test --workspace --locked --no-fail-fast
-      - name: No test hooks left running
-        if: ${{ always() && runner.os != 'Windows' }}
-        run: bash ./scripts/check-test-processes.sh
-
-  # The oldest supported git is a tested claim: every test that runs git runs against
-  # git 2.23 itself. Linux, because building an old git from source is quickest there; the
-  # runner's resolution there is simply the first git on PATH.
-  oldest-git:
-    name: git tests against git 2.23
-    runs-on: ubuntu-latest
-    env:
-      GIT_VERSION: 2.23.0
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install toolchain from rust-toolchain.toml
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Cache git ${{ env.GIT_VERSION }}
-        uses: actions/cache@v4
-        with:
-          path: ~/git-${{ env.GIT_VERSION }}
-          key: git-${{ env.GIT_VERSION }}-${{ runner.os }}-${{ hashFiles('scripts/oldest-git.sh') }}
-      # Made with the runner's own git, before 2.23 goes on PATH: 2.23 is built without
-      # curl, so it can't clone the small fixture over HTTPS.
-      - name: Cache the small fixture
-        uses: actions/cache@v4
-        with:
-          path: ~/cairn-fixtures/ripgrep
-          key: fixture-ripgrep-91f5d22ef48bde459d90a8c7dbeab416e97d0f2b-${{ runner.os }}
-      - name: Fixtures
-        run: |
-          ./scripts/fixtures.sh small
-          ./scripts/fixtures.sh filters
-      - name: Build git ${{ env.GIT_VERSION }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libz-dev
-          ./scripts/oldest-git.sh "$GIT_VERSION" "$HOME/git-$GIT_VERSION" >> "$GITHUB_PATH"
-      # The runner itself, and the Repo service's reads. cairn-app's tests run git too, but
-      # building GPUI here isn't worth it: run those on 2.23 locally (CODING_STANDARDS.md).
-      - name: runner and Repo service tests
-        env:
-          CAIRN_EXPECT_GIT_VERSION: ${{ env.GIT_VERSION }}
+      - name: Defender and git
+        shell: pwsh
         run: |
           git --version
-          cargo test -p cairn-write -p cairn-repo --locked --no-fail-fast
-      - name: No test hooks left running
+          Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled,AMRunningMode | Format-List
+      - name: Build
+        run: cargo test -p cairn-repo --test probe_sticky --test probe_stress --locked --no-run
+      - name: Sticky
+        run: cargo test -p cairn-repo --test probe_sticky --locked -- --nocapture --test-threads=1
+      - name: Stress
         if: ${{ always() }}
-        run: bash ./scripts/check-test-processes.sh
+        run: cargo test -p cairn-repo --test probe_stress --locked -- --nocapture --test-threads=1
