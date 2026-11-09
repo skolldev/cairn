@@ -256,8 +256,9 @@ mod tests {
             minor,
             patch,
         };
-        assert!(v(2, 36, 9) < GitVersion::MINIMUM);
-        assert!(v(2, 37, 0) >= GitVersion::MINIMUM);
+        // Seen red: declaring `patch` before `major` puts 2.9.9 after 2.10.0.
+        assert!(v(2, 9, 9) < v(2, 10, 0));
         assert!(v(2, 100, 0) > v(2, 37, 0));
+        assert!(v(2, 37, 1) > v(2, 37, 0));
     }
 }

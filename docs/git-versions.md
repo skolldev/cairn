@@ -1,6 +1,6 @@
 # git behaviour by version
 
-Cairn runs git 2.37 and newer (`GitVersion::MINIMUM`, ADR 0007). These are the git behaviours that set the minimum, changed after it, or surprise a caller, each checked in git's own source. Check a git command in a spec, product code or a test against this list, and add every new fact you confirm.
+Cairn runs `GitVersion::MINIMUM` and newer (ADR 0007). These are the git behaviours that set the minimum, changed after it, or surprise a caller, each checked in git's own source. Check a git command in a spec, product code or a test against this list, and add every new fact you confirm.
 
 ## Checking a fact
 
@@ -12,7 +12,7 @@ gh api "repos/git/git/contents/builtin/fetch.c?ref=v2.37.0" -H "Accept: applicat
 
 Release notes live at `Documentation/RelNotes/<version>.adoc`. To find the first version with a behaviour, grep the file at a few tags and narrow down.
 
-Check the newest tag as well as 2.37 when a test leans on git's incidental behaviour rather than a documented promise, such as what makes git block or which step fetches. `scripts/git-matrix.sh` then runs the tests on both.
+Check the newest tag as well as the oldest supported one when a test leans on git's incidental behaviour rather than a documented promise, such as what makes git block or which step fetches. `scripts/git-matrix.sh` then runs the tests on both.
 
 ## Facts
 

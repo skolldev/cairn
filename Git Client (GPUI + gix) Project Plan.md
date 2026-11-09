@@ -278,7 +278,7 @@ The biggest risk isn't technical. It's a side project that never gets good enoug
 | GPUI is less mature on Windows than on macOS | A second-class Windows build, or Windows-only blockers late in the project | Run every Phase 0 spike and gate on both OSes. A Windows failure is a no-go for GPUI |
 | Windows file and process overhead (NTFS, antivirus scanning, process spawn cost) | Status and write Budgets missed on Windows only | Measured in Phase 0 (#11, #12). The tuned CLI runner is required, and Windows sets the write-path Budget |
 | gix behaves differently from git (filters, autocrlf, sparse index, fsmonitor) | Phantom changes, wrong status | Golden tests against `git status --porcelain=v2`, `git diff --numstat` and full `git diff` hunks. Three-scope CLI fallback (see Architecture) |
-| CLI output differs across git versions | Broken write path | Porcelain formats, `LC_ALL=C`, a minimum git version (2.37+, ADR 0007), CI against the oldest version you support |
+| CLI output differs across git versions | Broken write path | Porcelain formats, `LC_ALL=C`, a minimum git version (ADR 0007), CI against the oldest version you support |
 | Patch builder for line staging corrupts the index | Lost work, lost trust | Property tests: stage then unstage must round-trip to the original diff |
 | Your client's Azure DevOps org restricts PATs | Layer 2 auth unusable there | Layer 1 (GCM with Entra sign-in) needs no PAT |
 | Lane explosion in repos with hundreds of branches | Unreadable, slow graph | Lane cap with collapse, hide-remote toggle, filter graph by branch |

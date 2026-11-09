@@ -6,12 +6,12 @@
 # git-matrix.sh also uses it to build the newest git, and tests against both.
 #
 # Usage: scripts/oldest-git.sh [version] [prefix]
-# Defaults: 2.37.0, and ~/git-<version>. Needs make, a C compiler, curl and zlib headers.
+# Defaults: the oldest supported git, and ~/git-<version>. Needs make, a C compiler, curl and zlib headers.
 #
-#   PATH="$(scripts/oldest-git.sh):$PATH" CAIRN_EXPECT_GIT_VERSION=2.37.0 \
+#   PATH="$(scripts/oldest-git.sh):$PATH" CAIRN_EXPECT_GIT_VERSION=<version> \
 #     cargo test -p cairn-write -p cairn-repo --no-fail-fast
 #
-# Create the fixtures first with your usual git: 2.37 is built without curl.
+# Create the fixtures first with your usual git: this git is built without curl.
 set -euo pipefail
 
 version="${1:-2.37.0}"
@@ -27,8 +27,8 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 curl -fsSL "https://mirrors.edge.kernel.org/pub/software/scm/git/git-$version.tar.gz" | tar xz -C "$work"
 jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)"
-# Current compilers default to C23, where thread_local is a keyword git 2.37 uses as a name,
-# and may reject some pre-C99 idioms outright (-fpermissive is untested on 2.37 with GCC 14+,
+# Current compilers default to C23, where thread_local is a keyword that old git uses as a name,
+# and may reject some pre-C99 idioms outright (-fpermissive is untested with GCC 14+,
 # ADR 0007). Build it as the C it was written in.
 make -C "$work/git-$version" -j"$jobs" prefix="$prefix" \
   CFLAGS="-O2 -std=gnu11 -fpermissive" \
