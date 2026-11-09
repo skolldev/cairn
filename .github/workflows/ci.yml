@@ -112,17 +112,28 @@ jobs:
           if [ -f ../cairn-base/crates/repo/benches/reads.rs ]; then
             (cd ../cairn-base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
               cargo bench $BENCHES -- --save-baseline base)
+            (cd ../cairn-base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
+              "$GITHUB_WORKSPACE/scripts/bench-binary-hashes.sh" $BENCHES) \
+              > target/bench-binaries-base.txt
+            test -s target/bench-binaries-base.txt
             echo "COMPARE=true" >> "$GITHUB_ENV"
           else
             echo "$base has no benches yet, so there is nothing to compare with"
           fi
       - name: Bench this commit
         shell: bash
-        run: cargo bench $BENCHES -- --save-baseline head
+        run: |
+          cargo bench $BENCHES -- --save-baseline head
+          ./scripts/bench-binary-hashes.sh $BENCHES > target/bench-binaries-head.txt
+          test -s target/bench-binaries-head.txt
       - name: Compare
         if: ${{ env.COMPARE == 'true' }}
         shell: bash
         run: |
+          if cmp -s target/bench-binaries-base.txt target/bench-binaries-head.txt; then
+            echo 'Benchmark executables are identical; timing differences are runner noise'
+            exit 0
+          fi
           if first="$(./scripts/check-bench-regressions.sh target/criterion 2>&1)"; then
             printf '%s\n' "$first"
             exit 0
