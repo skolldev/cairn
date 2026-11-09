@@ -1,4 +1,5 @@
-//! gix queries: refs, revwalk, status, tree and blob diff.
+//! gix queries: refs, revwalk, status, tree and blob diff, and the excludes the watcher
+//! skips ignored files by.
 //!
 //! gix rules, from the plan. Keep them where the read code lives:
 //! - Open with `permissions.config.git_binary = true`, so gix sees the same system config
@@ -10,9 +11,12 @@
 //! Untracked files come from the directory walk alone. Staged and Unstaged are read by the
 //! CLI (#13), so an index-vs-worktree pass here would only repeat their work.
 
+mod excludes;
 mod refs;
 mod untracked;
 mod walk;
+
+pub use excludes::Excludes;
 
 use std::fmt;
 use std::path::Path;

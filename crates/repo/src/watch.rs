@@ -4,9 +4,12 @@
 //! Each event maps to the Slots it can change, and refreshes them at once. There is no
 //! debounce timer: the Slot coalesces, because it holds at most one running and one
 //! pending Read Job, so a burst costs at most two refreshes back to back.
+//!
+//! A change to a file git ignores and doesn't track, such as a build writing to `target/`,
+//! refreshes nothing: see [`Filter`].
 
-use std::path::Path;
-use std::sync::Weak;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, Weak};
 
 use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
@@ -33,11 +36,15 @@ pub(crate) fn start(workdir: &Path, reads: Weak<Reads>) -> Option<Watcher> {
     };
     let workdir = workdir.to_path_buf();
     let git_dir = root.join(".git");
-    if !git_dir.is_dir() {
+    let filter = if git_dir.is_dir() {
+        Some(Filter::start(&workdir))
+    } else {
         // A linked worktree or a submodule keeps its git dir elsewhere, so a switch or a
-        // commit there isn't seen. Worktree files still are.
+        // commit there isn't seen. Worktree files still are, all of them: with the index
+        // unwatched, which files are tracked would go stale unnoticed.
         tracing::warn!(path = %root.display(), "`.git` is not a directory; git's own changes aren't watched");
-    }
+        None
+    };
     let handler_root = root.clone();
     let handler = move |event: notify::Result<Event>| {
         let Some(reads) = reads.upgrade() else {
@@ -52,7 +59,21 @@ pub(crate) fn start(workdir: &Path, reads: Weak<Reads>) -> Option<Watcher> {
                 return;
             }
         };
-        if let Some(what) = classify(&event, &handler_root, &git_dir) {
+        // Not for reads: on Linux every read of the index or a `.gitignore`, the rebuild's
+        // own included, reports an open, and each would start the next rebuild.
+        if let Some(filter) = &filter
+            && !matches!(event.kind, EventKind::Access(_))
+            && event
+                .paths
+                .iter()
+                .any(|path| changes_filter(path, &handler_root, &git_dir))
+        {
+            // Before classifying, so that this event is never skipped by the old matcher,
+            // not even for a `.gitignore` that is itself ignored.
+            filter.rebuild();
+        }
+        let skips = |relative: &Path| filter.as_ref().is_some_and(|f| f.skips(relative));
+        if let Some(what) = classify(&event, &handler_root, &git_dir, skips) {
             external_change(&reads, &workdir, what);
         }
     };
@@ -77,7 +98,13 @@ fn external_change(reads: &Reads, workdir: &Path, what: Refresh) {
 }
 
 /// The Slots one event can change, or `None` for an event that changes nothing Cairn shows.
-fn classify(event: &Event, root: &Path, git_dir: &Path) -> Option<Refresh> {
+/// `skips` says whether a change at a worktree path, relative to `root`, can't change status.
+fn classify(
+    event: &Event,
+    root: &Path,
+    git_dir: &Path,
+    mut skips: impl FnMut(&Path) -> bool,
+) -> Option<Refresh> {
     // Reads open files too. Seeing them would make every refresh trigger the next.
     if matches!(event.kind, EventKind::Access(_)) {
         return None;
@@ -96,15 +123,21 @@ fn classify(event: &Event, root: &Path, git_dir: &Path) -> Option<Refresh> {
         .paths
         .iter()
         .filter(|path| !(directory_only && path.is_dir()))
-        .filter_map(|path| classify_path(path, root, git_dir))
+        .filter_map(|path| classify_path(path, root, git_dir, &mut skips))
         .reduce(Refresh::union)
 }
 
-fn classify_path(path: &Path, root: &Path, git_dir: &Path) -> Option<Refresh> {
+fn classify_path(
+    path: &Path,
+    root: &Path,
+    git_dir: &Path,
+    skips: &mut impl FnMut(&Path) -> bool,
+) -> Option<Refresh> {
     let Ok(inside) = path.strip_prefix(git_dir) else {
-        // Anything else under the worktree is a file git may track, ignore or list as
-        // untracked.
-        return path.starts_with(root).then_some(Refresh::Status);
+        // Anything else under the worktree is a file git may track or list as untracked,
+        // unless it is ignored and untracked.
+        let relative = path.strip_prefix(root).ok()?;
+        return (!skips(relative)).then_some(Refresh::Status);
     };
     // git writes `<file>.lock` and renames it over `<file>`; the rename reports `<file>`.
     if inside.extension().is_some_and(|e| e == "lock") {
@@ -129,5 +162,93 @@ fn classify_path(path: &Path, root: &Path, git_dir: &Path) -> Option<Refresh> {
         ("refs", Some(_)) => Some(Refresh::Refs),
         // objects/, the other logs, hooks/ and the rest change nothing shown.
         _ => None,
+    }
+}
+
+/// Whether a change at `path` can change what the [`Filter`] answers: the index, the
+/// excludes and config git reads, or any `.gitignore`.
+fn changes_filter(path: &Path, root: &Path, git_dir: &Path) -> bool {
+    match path.strip_prefix(git_dir) {
+        Ok(inside) => {
+            inside == Path::new("index")
+                || inside == Path::new("config")
+                || inside == Path::new("info/exclude")
+        }
+        Err(_) => path.starts_with(root) && path.file_name().is_some_and(|n| n == ".gitignore"),
+    }
+}
+
+/// Skips worktree paths git ignores and doesn't track (ADR 0004: a refresh storm is fixed in
+/// how events map to Slots). Shared by notify's thread, which asks, and the thread that
+/// rebuilds the matcher, which never holds the lock while it reads the index.
+struct Filter {
+    workdir: PathBuf,
+    state: Mutex<FilterState>,
+}
+
+#[derive(Default)]
+struct FilterState {
+    /// `None` while a rebuild runs, or after one failed: then nothing is skipped.
+    matcher: Option<cairn_read::Excludes>,
+    rebuilding: bool,
+    /// A change the running rebuild may have missed arrived while it ran.
+    rerun: bool,
+}
+
+impl Filter {
+    /// Builds the matcher here, once per Open, before any event is seen.
+    fn start(workdir: &Path) -> Arc<Self> {
+        Arc::new(Self {
+            workdir: workdir.to_path_buf(),
+            state: Mutex::new(FilterState {
+                matcher: Self::build(workdir),
+                ..FilterState::default()
+            }),
+        })
+    }
+
+    fn build(workdir: &Path) -> Option<cairn_read::Excludes> {
+        cairn_read::Excludes::build(workdir)
+            .inspect_err(|e| {
+                tracing::warn!(error = %e, "couldn't read excludes; every change refreshes");
+            })
+            .ok()
+    }
+
+    fn skips(&self, relative: &Path) -> bool {
+        let mut state = self.state.lock().unwrap();
+        state.matcher.as_mut().is_some_and(|m| m.skips(relative))
+    }
+
+    /// Drops the matcher, which may now be wrong, and builds a new one on its own thread.
+    fn rebuild(self: &Arc<Self>) {
+        let mut state = self.state.lock().unwrap();
+        state.matcher = None;
+        if state.rebuilding {
+            state.rerun = true;
+            return;
+        }
+        state.rebuilding = true;
+        drop(state);
+        let filter = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("excludes".into())
+            .spawn(move || {
+                loop {
+                    let matcher = Self::build(&filter.workdir);
+                    let mut state = filter.state.lock().unwrap();
+                    if std::mem::take(&mut state.rerun) {
+                        continue;
+                    }
+                    state.matcher = matcher;
+                    state.rebuilding = false;
+                    return;
+                }
+            });
+        if let Err(e) = spawned {
+            // With no matcher, nothing is skipped: correct, only slower.
+            tracing::warn!(error = %e, "couldn't start a rebuild of the excludes");
+            self.state.lock().unwrap().rebuilding = false;
+        }
     }
 }
