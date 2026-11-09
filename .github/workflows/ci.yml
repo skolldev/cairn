@@ -122,7 +122,38 @@ jobs:
       - name: Compare
         if: ${{ env.COMPARE == 'true' }}
         shell: bash
-        run: ./scripts/check-bench-regressions.sh target/criterion
+        run: |
+          if first="$(./scripts/check-bench-regressions.sh target/criterion 2>&1)"; then
+            printf '%s\n' "$first"
+            exit 0
+          else
+            status=$?
+            printf '%s\n' "$first"
+            [ "$status" -eq 1 ] || exit "$status"
+          fi
+          first_regressed="$(printf '%s\n' "$first" | awk '$1 == "regressed:" { print $2 }' | sort)"
+          [ -n "$first_regressed" ] || exit 1
+
+          # Confirm on the same runner, in reverse order to counter drift during the job.
+          cargo bench $BENCHES -- --save-baseline confirm-head
+          (cd ../cairn-base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
+            cargo bench $BENCHES -- --save-baseline confirm-base)
+          if second="$(./scripts/check-bench-regressions.sh target/criterion 30 confirm-base confirm-head 2>&1)"; then
+            printf '%s\n' "$second"
+            exit 0
+          else
+            status=$?
+            printf '%s\n' "$second"
+            [ "$status" -eq 1 ] || exit "$status"
+          fi
+          second_regressed="$(printf '%s\n' "$second" | awk '$1 == "regressed:" { print $2 }' | sort)"
+          [ -n "$second_regressed" ] || exit 1
+          repeated="$(comm -12 <(printf '%s\n' "$first_regressed") <(printf '%s\n' "$second_regressed"))"
+          if [ -n "$repeated" ]; then
+            printf 'confirmed regression(s):\n%s\n' "$repeated"
+            exit 1
+          fi
+          echo 'No benchmark regressed in both comparisons'
 
   check:
     name: fmt, clippy, test (${{ matrix.os }})
@@ -153,9 +184,11 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: test
-        run: cargo test --workspace --locked --no-fail-fast
+        timeout-minutes: 10
+        run: cargo test --workspace --locked --no-fail-fast -- --nocapture
       # The Budget harness's probe builds only with this feature, and never ships.
       - name: clippy and test, with the Budget harness's probe
+        timeout-minutes: 10
         run: |
           cargo clippy -p cairn-app --all-targets --features measure --locked -- -D warnings
           cargo test -p cairn-app --features measure --locked --no-fail-fast
