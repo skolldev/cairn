@@ -112,17 +112,59 @@ jobs:
           if [ -f ../cairn-base/crates/repo/benches/reads.rs ]; then
             (cd ../cairn-base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
               cargo bench $BENCHES -- --save-baseline base)
+            (cd ../cairn-base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
+              "$GITHUB_WORKSPACE/scripts/bench-binary-hashes.sh" $BENCHES) \
+              > target/bench-binaries-base.txt
+            test -s target/bench-binaries-base.txt
             echo "COMPARE=true" >> "$GITHUB_ENV"
           else
             echo "$base has no benches yet, so there is nothing to compare with"
           fi
       - name: Bench this commit
         shell: bash
-        run: cargo bench $BENCHES -- --save-baseline head
+        run: |
+          cargo bench $BENCHES -- --save-baseline head
+          ./scripts/bench-binary-hashes.sh $BENCHES > target/bench-binaries-head.txt
+          test -s target/bench-binaries-head.txt
       - name: Compare
         if: ${{ env.COMPARE == 'true' }}
         shell: bash
-        run: ./scripts/check-bench-regressions.sh target/criterion
+        run: |
+          if cmp -s target/bench-binaries-base.txt target/bench-binaries-head.txt; then
+            echo 'Benchmark executables are identical; timing differences are runner noise'
+            exit 0
+          fi
+          if first="$(./scripts/check-bench-regressions.sh target/criterion 2>&1)"; then
+            printf '%s\n' "$first"
+            exit 0
+          else
+            status=$?
+            printf '%s\n' "$first"
+            [ "$status" -eq 1 ] || exit "$status"
+          fi
+          first_regressed="$(printf '%s\n' "$first" | awk '$1 == "regressed:" { print $2 }' | sort)"
+          [ -n "$first_regressed" ] || exit 1
+
+          # Confirm on the same runner, in reverse order to counter drift during the job.
+          cargo bench $BENCHES -- --save-baseline confirm-head
+          (cd ../cairn-base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
+            cargo bench $BENCHES -- --save-baseline confirm-base)
+          if second="$(./scripts/check-bench-regressions.sh target/criterion 30 confirm-base confirm-head 2>&1)"; then
+            printf '%s\n' "$second"
+            exit 0
+          else
+            status=$?
+            printf '%s\n' "$second"
+            [ "$status" -eq 1 ] || exit "$status"
+          fi
+          second_regressed="$(printf '%s\n' "$second" | awk '$1 == "regressed:" { print $2 }' | sort)"
+          [ -n "$second_regressed" ] || exit 1
+          repeated="$(comm -12 <(printf '%s\n' "$first_regressed") <(printf '%s\n' "$second_regressed"))"
+          if [ -n "$repeated" ]; then
+            printf 'confirmed regression(s):\n%s\n' "$repeated"
+            exit 1
+          fi
+          echo 'No benchmark regressed in both comparisons'
 
   check:
     name: fmt, clippy, test (${{ matrix.os }})
