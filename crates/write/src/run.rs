@@ -26,23 +26,26 @@ pub enum JobClass {
 ///
 /// Cairn ships [`NoWindow`](Self::NoWindow). `docs/detached-process.md` holds the evidence
 /// for a later decision on [`Detached`](Self::Detached), and `crates/write/tests/windows_console.rs`
-/// is what gathers it. Nothing else sets this.
+/// is what gathers it. Nothing else sets this, which is why it stays out of the docs.
 #[cfg(windows)]
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WindowsProcess {
     /// `CREATE_NO_WINDOW`: a console with no window, which git's children share.
     #[default]
     NoWindow,
-    /// `DETACHED_PROCESS`: no console at all, which saves about 8 ms a call.
+    /// `DETACHED_PROCESS`: no console at all, which saves about 7 ms a call.
     Detached,
 }
 
 #[cfg(windows)]
 impl WindowsProcess {
     pub(crate) fn creation_flag(self) -> u32 {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
         match self {
-            WindowsProcess::NoWindow => 0x0800_0000,
-            WindowsProcess::Detached => 0x0000_0008,
+            WindowsProcess::NoWindow => CREATE_NO_WINDOW,
+            WindowsProcess::Detached => DETACHED_PROCESS,
         }
     }
 }
@@ -113,6 +116,7 @@ impl Invocation {
 
     /// Starts git under `process` instead of the shipped [`WindowsProcess::NoWindow`].
     #[cfg(windows)]
+    #[doc(hidden)]
     pub fn windows_process(mut self, process: WindowsProcess) -> Self {
         self.windows_process = process;
         self

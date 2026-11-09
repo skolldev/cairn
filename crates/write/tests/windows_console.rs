@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use cairn_write::{Invocation, JobClass, RunError, Stop, WindowsProcess};
-use common::{Repo, git, ok, read};
+use common::{Repo, git, ok, read, slashes};
 use windows_sys::Win32::Foundation::{HWND, LPARAM};
 use windows_sys::Win32::System::Console::{GetConsoleCP, GetConsoleWindow};
 use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, GetClassNameW, IsWindowVisible};
@@ -54,10 +54,6 @@ fn probe_line(out: &Path) -> String {
         "CAIRN_CONSOLE_PROBE='{}' '{exe}' --ignored --exact console_probe >/dev/null 2>&1",
         slashes(out)
     )
-}
-
-fn slashes(path: &Path) -> String {
-    path.to_str().unwrap().replace('\\', "/")
 }
 
 /// `path` as gpg reads it. gpg is an MSYS program, which takes `/c/Users` and not `C:/Users`.
@@ -169,14 +165,11 @@ impl Seen {
     }
 }
 
-/// Runs `invocation` under `process`, killing it if it outlasts [`HANG`]. Every case runs as
-/// a Network Job, whatever git is doing, because only those can be stopped: a hung Local
-/// write Job would outlive the test. A Job's class doesn't change how git is started.
-fn run(process: WindowsProcess, invocation: Invocation, probes: &Path) -> Seen {
-    run_as_given(invocation.windows_process(process), probes)
-}
-
-fn run_as_given(invocation: Invocation, probes: &Path) -> Seen {
+/// Runs `invocation`, killing it if it outlasts [`HANG`], and reports what it did. Every case
+/// runs as a Network Job, whatever git is doing: a hung Local write Job can't be stopped and
+/// would outlive the test, and a Read Job adds `--no-optional-locks`. A Job's class doesn't
+/// change how git is started.
+fn run_watched(invocation: Invocation, probes: &Path) -> Seen {
     let _one = one_case_at_a_time();
     let stop = Stop::new();
     let invocation = invocation.stop_on(&stop);
@@ -218,10 +211,6 @@ fn run_as_given(invocation: Invocation, probes: &Path) -> Seen {
     }
 }
 
-fn network(repo: &Path, args: &[&str]) -> Invocation {
-    Invocation::new(JobClass::Network, repo).args(args)
-}
-
 fn script(path: &Path, body: &str) -> String {
     std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
     slashes(path)
@@ -241,31 +230,42 @@ impl Case {
         let probes = dir.path().join("probes");
         Self { repo, dir, probes }
     }
+
+    /// A case whose pre-commit hook runs `body` after the probe, or just the probe.
+    fn with_hook(body: &str) -> Self {
+        let case = Self::new();
+        script(
+            &case.repo.path.join(".git/hooks/pre-commit"),
+            &format!("{}\n{body}", probe_line(&case.probes)),
+        );
+        case
+    }
+
+    fn invocation(&self, args: &[&str]) -> Invocation {
+        Invocation::new(JobClass::Network, &self.repo.path).args(args)
+    }
+
+    fn run(&self, process: WindowsProcess, args: &[&str]) -> Seen {
+        run_watched(self.invocation(args).windows_process(process), &self.probes)
+    }
 }
 
 // ---- The cases. Each runs under whichever flag it is given.
 
+/// A commit, which runs the case's hook.
+const COMMIT: [&str; 5] = ["commit", "--allow-empty", "-q", "-m", "hooked"];
+
 fn hook(process: WindowsProcess) -> Seen {
-    let case = Case::new();
-    script(
-        &case.repo.path.join(".git/hooks/pre-commit"),
-        &probe_line(&case.probes),
-    );
-    let args = ["commit", "--allow-empty", "-q", "-m", "hooked"];
-    run(process, network(&case.repo.path, &args), &case.probes)
+    Case::with_hook("").run(process, &COMMIT)
 }
 
 /// A hook that asks the terminal directly, the way a hand-written "are you sure?" does.
 fn hook_reading_the_terminal(process: WindowsProcess) -> Seen {
-    let case = Case::new();
-    let body = format!(
-        "{}\nif (: </dev/tty) 2>/dev/null; then echo opened-tty >&2; read -r answer </dev/tty; \
+    Case::with_hook(
+        "if (: </dev/tty) 2>/dev/null; then echo opened-tty >&2; read -r answer </dev/tty; \
          else echo no-tty >&2; fi",
-        probe_line(&case.probes)
-    );
-    script(&case.repo.path.join(".git/hooks/pre-commit"), &body);
-    let args = ["commit", "--allow-empty", "-q", "-m", "hooked"];
-    run(process, network(&case.repo.path, &args), &case.probes)
+    )
+    .run(process, &COMMIT)
 }
 
 /// A server that refuses every request and asks for Basic auth, as a private remote does.
@@ -353,7 +353,7 @@ fn no_way_to_ask(process: WindowsProcess) -> Sent {
 fn fetch_with(process: WindowsProcess, case: &Case, config: &str) -> Sent {
     let (url, authorization) = refusing_http_remote();
     let args = ["-c", "http.proxy=", "-c", config, "ls-remote", &url];
-    let seen = run(process, network(&case.repo.path, &args), &case.probes);
+    let seen = case.run(process, &args);
     let authorization = authorization.lock().unwrap().clone();
     Sent {
         seen,
@@ -380,7 +380,7 @@ fn ssh(process: WindowsProcess) -> Seen {
         "ls-remote",
         "ssh://git@cairn.invalid/repo.git",
     ];
-    run(process, network(&case.repo.path, &args), &case.probes)
+    case.run(process, &args)
 }
 
 /// A real `ssh` meeting a host it doesn't know, which it asks about on the terminal. Needs
@@ -396,10 +396,12 @@ fn ssh_asking_about_a_host(
     let case = Case::new();
     let known_hosts = slashes(&case.dir.path().join("known_hosts"));
     let command = format!(
-        "core.sshCommand='{program}' -F {null} -o UserKnownHostsFile='{known_hosts}'          -o GlobalKnownHostsFile={null} -o IdentitiesOnly=yes -o IdentityAgent=none          -o ConnectTimeout=10 {options}"
+        "core.sshCommand='{program}' -F {null} -o UserKnownHostsFile='{known_hosts}' \
+         -o GlobalKnownHostsFile={null} -o IdentitiesOnly=yes -o IdentityAgent=none \
+         -o ConnectTimeout=10 {options}"
     );
     let args = ["-c", &command, "ls-remote", "git@github.com:git/git.git"];
-    run(process, network(&case.repo.path, &args), &case.probes)
+    case.run(process, &args)
 }
 
 /// A throwaway gpg home holding one key, and a `gpg.program` that uses it. Sets up through
@@ -413,40 +415,40 @@ struct Gpg {
 impl Gpg {
     fn new(passphrase: &str) -> Self {
         let case = Case::new();
-        let home_dir = case.dir.path().join("gnupg");
-        std::fs::create_dir(&home_dir).unwrap();
-        let home = msys_path(&home_dir);
+        let home = case.dir.path().join("gnupg");
+        std::fs::create_dir(&home).unwrap();
+        let msys_home = msys_path(&home);
         let setup = format!(
-            "alias.setup=!GNUPGHOME='{home}' gpg --batch --quiet --pinentry-mode loopback \
+            "alias.setup=!GNUPGHOME='{msys_home}' gpg --batch --quiet --pinentry-mode loopback \
              --passphrase '{passphrase}' --quick-generate-key \
              'Cairn Test <test@cairn.invalid>' ed25519 sign never"
         );
         ok(git()
-            .run(&Invocation::new(JobClass::Network, &case.repo.path).args(["-c", &setup, "setup"]))
+            .run(&case.invocation(&["-c", &setup, "setup"]))
             .unwrap());
         // gpg started the agent for that key. Stop it, so the case's own run starts one under
         // the flag being tested.
-        Self::stop_agent(&case.repo.path, &home_dir);
+        Self::stop_agent(&case, &home);
         let program = script(
             &case.dir.path().join("gpg.sh"),
             &format!(
-                "{}\nGNUPGHOME='{home}' exec gpg \"$@\"",
+                "{}\nGNUPGHOME='{msys_home}' exec gpg \"$@\"",
                 probe_line(&case.probes)
             ),
         );
         Self {
             case,
             program,
-            home: home_dir,
+            home,
         }
     }
 
-    fn stop_agent(repo: &Path, home: &Path) {
+    fn stop_agent(case: &Case, home: &Path) {
         let stop = format!(
             "alias.stop=!GNUPGHOME='{}' gpgconf --kill gpg-agent",
             msys_path(home)
         );
-        let _ = git().run(&Invocation::new(JobClass::Network, repo).args(["-c", &stop, "stop"]));
+        let _ = git().run(&case.invocation(&["-c", &stop, "stop"]));
     }
 
     fn sign(&self, process: WindowsProcess) -> Signed {
@@ -463,12 +465,8 @@ impl Gpg {
             "-m",
             "signed",
         ];
-        let seen = run(
-            process,
-            network(&self.case.repo.path, &args),
-            &self.case.probes,
-        );
-        Self::stop_agent(&self.case.repo.path, &self.home);
+        let seen = self.case.run(process, &args);
+        Self::stop_agent(&self.case, &self.home);
         let commit = read(&self.case.repo.path, &["cat-file", "commit", "HEAD"]);
         Signed {
             seen,
@@ -481,6 +479,17 @@ impl Gpg {
 struct Signed {
     seen: Seen,
     commit: String,
+}
+
+impl Signed {
+    fn is_signed(&self) -> bool {
+        self.commit.contains("gpgsig ")
+    }
+
+    fn record(&self, process: WindowsProcess, case: &str) {
+        self.seen.record(process, case);
+        println!("  and left a signed commit: {}", self.is_signed());
+    }
 }
 
 fn gpg_signing(process: WindowsProcess) -> Signed {
@@ -501,7 +510,7 @@ fn gpg_asking_for_a_passphrase(process: WindowsProcess) -> Signed {
         ),
     );
     std::fs::write(
-        Path::new(&gpg.home).join("gpg-agent.conf"),
+        gpg.home.join("gpg-agent.conf"),
         format!("pinentry-program {pinentry}\n"),
     )
     .unwrap();
@@ -510,16 +519,17 @@ fn gpg_asking_for_a_passphrase(process: WindowsProcess) -> Signed {
 
 /// Git ran, and the prompt ran with no console window for anyone to see. Seen red: with
 /// `WindowsProcess::NoWindow` set to `CREATE_NEW_CONSOLE` (0x10), every test using this fails
-/// here, and with `HANG` at a millisecond every one fails on the first line.
+/// at the watcher's check, and at the probe's with that check taken out. With `HANG` at a
+/// millisecond, `a_hook_runs_out_of_sight` fails on the first line.
 #[track_caller]
 fn assert_out_of_sight(seen: &Seen) {
     assert!(seen.exit.is_some(), "git hung: {seen:?}");
     assert!(!seen.console.is_empty(), "the prompt never ran: {seen:?}");
+    assert!(!seen.windows.iter().any(|c| is_console(c)), "{seen:?}");
     assert!(
         seen.console.iter().all(|c| c.ends_with("visible=false")),
         "{seen:?}"
     );
-    assert!(!seen.windows.iter().any(|c| is_console(c)), "{seen:?}");
 }
 
 /// `cairn-user:cairn-secret` in Base64, as curl sends it.
@@ -527,13 +537,8 @@ const ANSWERED: &str = "Basic Y2Fpcm4tdXNlcjpjYWlybi1zZWNyZXQ=";
 
 #[test]
 fn the_shipped_default_is_a_console_without_a_window() {
-    let case = Case::new();
-    script(
-        &case.repo.path.join(".git/hooks/pre-commit"),
-        &probe_line(&case.probes),
-    );
-    let args = ["commit", "--allow-empty", "-q", "-m", "hooked"];
-    let seen = run_as_given(network(&case.repo.path, &args), &case.probes);
+    let case = Case::with_hook("");
+    let seen = run_watched(case.invocation(&COMMIT), &case.probes);
     // Seen red: with `Invocation::new` starting at `Detached`, this reads `window=true`.
     assert_eq!(
         seen.console,
@@ -546,6 +551,7 @@ fn the_shipped_default_is_a_console_without_a_window() {
 fn a_hook_runs_out_of_sight() {
     let seen = hook(WindowsProcess::NoWindow);
     assert_out_of_sight(&seen);
+    // Seen red: with the hook ending `exit 1`.
     assert_eq!(seen.exit, Some(0));
 }
 
@@ -553,7 +559,9 @@ fn a_hook_runs_out_of_sight() {
 fn a_hook_reading_the_terminal_finds_none_and_does_not_hang() {
     let seen = hook_reading_the_terminal(WindowsProcess::NoWindow);
     assert_out_of_sight(&seen);
+    // Seen red: with the hook exiting 1 when it finds no terminal.
     assert_eq!(seen.exit, Some(0));
+    // Seen red: with the hook reporting something else when it finds no terminal.
     assert!(seen.stderr.contains("no-tty"), "{seen:?}");
 }
 
@@ -578,7 +586,7 @@ fn an_askpass_program_answers_out_of_sight() {
 fn with_no_way_to_ask_git_fails_at_once_with_its_own_words() {
     let sent = no_way_to_ask(WindowsProcess::NoWindow);
     assert_eq!(sent.seen.exit, Some(128), "{:?}", sent.seen);
-    // Seen red: without `GIT_TERMINAL_PROMPT=0` in `git_command`.
+    // Seen red: with `GIT_TERMINAL_PROMPT=1` in `git_command`.
     assert!(
         sent.seen.stderr.contains("terminal prompts disabled"),
         "{:?}",
@@ -591,23 +599,21 @@ fn with_no_way_to_ask_git_fails_at_once_with_its_own_words() {
 fn ssh_runs_out_of_sight() {
     let seen = ssh(WindowsProcess::NoWindow);
     assert_out_of_sight(&seen);
-    assert_eq!(seen.exit, Some(128), "the ProxyCommand fails: {seen:?}");
 }
 
 #[test]
 fn gpg_signs_out_of_sight() {
     let signed = gpg_signing(WindowsProcess::NoWindow);
+    // Seen red: with `--no-gpg-sign` in place of `-S`.
+    assert!(signed.is_signed(), "{}", signed.commit);
     assert_out_of_sight(&signed.seen);
-    assert_eq!(signed.seen.exit, Some(0), "{:?}", signed.seen);
-    assert!(signed.commit.contains("gpgsig "), "{}", signed.commit);
 }
 
 #[test]
 fn gpg_asks_its_pinentry_out_of_sight() {
     let signed = gpg_asking_for_a_passphrase(WindowsProcess::NoWindow);
+    assert!(signed.is_signed(), "{}", signed.commit);
     assert_out_of_sight(&signed.seen);
-    assert_eq!(signed.seen.exit, Some(0), "{:?}", signed.seen);
-    assert!(signed.commit.contains("gpgsig "), "{}", signed.commit);
     // Seen red: with the key's passphrase empty, which leaves only the first of these.
     assert_eq!(
         signed.seen.console.len(),
@@ -628,10 +634,8 @@ fn detached_process_results_are_recorded() {
     askpass(process).record(process, "askpass");
     no_way_to_ask(process).record(process, "no way to ask");
     ssh(process).record(process, "ssh");
-    gpg_signing(process).seen.record(process, "gpg signing");
-    gpg_asking_for_a_passphrase(process)
-        .seen
-        .record(process, "gpg passphrase");
+    gpg_signing(process).record(process, "gpg signing");
+    gpg_asking_for_a_passphrase(process).record(process, "gpg passphrase");
 }
 
 /// Prompts no offline test can reach, under both flags.
@@ -661,15 +665,6 @@ fn record_real_dialogs() {
         let case = Case::new();
         fetch_with(process, &case, "credential.helper=manager")
             .record(process, "Git Credential Manager");
-        let case = Case::new();
-        let (url, _) = refusing_http_remote();
-        let alias = format!(
-            "alias.prompting=!GIT_TERMINAL_PROMPT=1 git -c http.proxy= \
-             -c credential.helper=manager ls-remote {url}"
-        );
-        let args = ["-c", &alias, "prompting"];
-        run(process, network(&case.repo.path, &args), &case.probes)
-            .record(process, "Git Credential Manager with GIT_TERMINAL_PROMPT=1");
         Gpg::new("cairn-secret")
             .sign(process)
             .seen

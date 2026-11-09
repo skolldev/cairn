@@ -25,6 +25,7 @@ use std::sync::Arc;
 pub use gate::StartGate;
 pub use resolve::{Git, GitVersion};
 #[cfg(windows)]
+#[doc(hidden)]
 pub use run::WindowsProcess;
 pub use run::{Invocation, JobClass, Output};
 pub use stop::Stop;

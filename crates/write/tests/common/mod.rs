@@ -21,6 +21,18 @@ fn hermetic() {
             std::env::set_var("HOME", home.path());
             std::env::set_var("XDG_CONFIG_HOME", home.path().join(".config"));
             std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+            // These win over the `core.askPass` and `core.sshCommand` a test sets, or stop Git
+            // Credential Manager asking at all, and a developer's terminal can carry them:
+            // VS Code's sets `GIT_ASKPASS`.
+            for name in [
+                "GIT_ASKPASS",
+                "SSH_ASKPASS",
+                "GIT_SSH",
+                "GIT_SSH_COMMAND",
+                "GCM_INTERACTIVE",
+            ] {
+                std::env::remove_var(name);
+            }
         }
         home
     });
@@ -87,18 +99,17 @@ impl Repo {
     }
 }
 
+/// `path` as a shell script writes it: git's sh takes forward slashes on Windows too.
+pub fn slashes(path: &Path) -> String {
+    path.to_str().unwrap().replace('\\', "/")
+}
+
 /// An alias that runs a shell which announces itself on stderr and then waits for
 /// `release` to exist, or its directory to go. The shell is a child of git, as `upload-pack` or a remote helper
 /// is during a fetch.
 pub fn blocking_alias(release: &Path) -> String {
-    // git runs aliases with its own sh, which takes forward slashes on Windows too.
-    let dir = release
-        .parent()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .replace('\\', "/");
-    let release = release.to_str().unwrap().replace('\\', "/");
+    let dir = slashes(release.parent().unwrap());
+    let release = slashes(release);
     format!(
         "alias.block=!echo waiting >&2; while [ ! -f '{release}' ] && [ -d '{dir}' ]; do sleep 0.05; done; \
          echo released >&2"
