@@ -14,6 +14,9 @@ run at least one test, so a misspelt filter can't pass as red. A break that does
 proves nothing, and neither does a run that hangs. The file is restored whatever happens,
 Ctrl-C included.
 
+It ends with one summary line: red, still green, unproven (didn't compile, ran no tests, or
+hung) and not tried.
+
 Exit status: 0 if every break went red, 1 if any didn't, 2 if a break couldn't be tried.
 """
 
@@ -54,9 +57,10 @@ def run(test, timeout):
 
 
 def first_failure(output):
-    """The line that says why the test failed, for the report."""
-    found = re.search(r"panicked at [^\n]*\n([^\n]*)", output)
-    return found.group(1)[:100] if found else ""
+    """The line that says why the test failed, for the report. The last panic, because a test
+    can catch a panic on purpose before the one that fails it."""
+    found = re.findall(r"panicked at [^\n]*\n([^\n]*)", output)
+    return found[-1][:100] if found else ""
 
 
 def restoring(path, original):
@@ -125,15 +129,19 @@ def main():
         parser.error("no breaks to try")
 
     known_green = set()
-    worst = 0
+    counts = {RED: 0, GREEN: 0, "unproven": 0, "ERROR": 0}
     for item in breaks:
         status, detail = try_break(item, args.timeout, known_green)
         print(f"{status:12} {item['name']}  {detail}".rstrip(), flush=True)
-        if status == "ERROR":
-            worst = 2
-        elif status != RED:
-            worst = max(worst, 1)
-    sys.exit(worst)
+        counts[status if status in counts else "unproven"] += 1
+    # Last, so a filtered view of the lines above still shows a break that wasn't tried.
+    print(
+        f"summary: {counts[RED]} red, {counts[GREEN]} still green, "
+        f"{counts['unproven']} unproven, {counts['ERROR']} not tried"
+    )
+    if counts["ERROR"]:
+        sys.exit(2)
+    sys.exit(0 if counts[RED] == len(breaks) else 1)
 
 
 if __name__ == "__main__":
