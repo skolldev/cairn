@@ -48,6 +48,12 @@ jobs:
         run: ./scripts/test-check-test-gates.sh
       - name: No check-then-create gates in tests
         run: ./scripts/check-test-gates.sh
+      - name: Git floor guard self-test (deliberate drift must fail)
+        run: ./scripts/test-check-git-floor.sh
+      - name: The git floor is the git tests run against
+        run: ./scripts/check-git-floor.sh
+      - name: git-matrix.sh self-test
+        run: ./scripts/test-git-matrix.sh
       - name: seen-red.py self-test
         run: ./scripts/test-seen-red.sh
       - name: Cache the small fixture
@@ -208,13 +214,13 @@ jobs:
         run: bash ./scripts/check-test-processes.sh
 
   # The oldest supported git is a tested claim: every test that runs git runs against
-  # git 2.23 itself. Linux, because building an old git from source is quickest there; the
+  # the oldest git itself. Linux, because building an old git from source is quickest there; the
   # runner's resolution there is simply the first git on PATH.
   oldest-git:
-    name: git tests against git 2.23
+    name: git tests against the oldest git
     runs-on: ubuntu-latest
     env:
-      GIT_VERSION: 2.23.0
+      GIT_VERSION: 2.37.0
     steps:
       - uses: actions/checkout@v5
       - name: Install toolchain from rust-toolchain.toml
@@ -225,7 +231,7 @@ jobs:
         with:
           path: ~/git-${{ env.GIT_VERSION }}
           key: git-${{ env.GIT_VERSION }}-${{ runner.os }}-${{ hashFiles('scripts/oldest-git.sh') }}
-      # Made with the runner's own git, before 2.23 goes on PATH: 2.23 is built without
+      # Made with the runner's own git, before it goes on PATH: it is built without
       # curl, so it can't clone the small fixture over HTTPS.
       - name: Cache the small fixture
         uses: actions/cache@v4
@@ -242,7 +248,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends libz-dev
           ./scripts/oldest-git.sh "$GIT_VERSION" "$HOME/git-$GIT_VERSION" >> "$GITHUB_PATH"
       # The runner itself, and the Repo service's reads. cairn-app's tests run git too, but
-      # building GPUI here isn't worth it: run those on 2.23 locally (CODING_STANDARDS.md).
+      # building GPUI here isn't worth it: run those on it locally (CODING_STANDARDS.md).
       - name: runner and Repo service tests
         env:
           CAIRN_EXPECT_GIT_VERSION: ${{ env.GIT_VERSION }}

@@ -8,14 +8,13 @@ use crate::JobState;
 
 /// `git -c fetch.writeCommitGraph=true fetch --all --prune --progress`. `output` sees what
 /// git writes as it writes it, and `stop` kills git. The commit-graph keeps repos opened
-/// in Cairn fast without a separate Job; git before 2.24 doesn't know the setting and
-/// ignores it.
+/// in Cairn fast without a separate Job.
 ///
 /// `--progress` makes git report progress although its stderr isn't a terminal, but only
 /// a fetch that talks to the remote itself honours it. `--all` hands each remote to a
-/// sub-fetch that git starts without `--progress`, unless there is just one remote and git
-/// is 2.37 or newer. So a repo with several remotes, or any repo on older git, shows no
-/// progress reports, though it still shows everything else git and the remote write.
+/// sub-fetch that git starts without `--progress`, unless there is just one remote. So a
+/// repo with several remotes shows no progress reports, though it still shows everything
+/// else git and the remote write.
 pub(crate) fn fetch(workdir: &Path, stop: &Stop, output: &mut dyn FnMut(&[u8])) -> JobState {
     run(
         workdir,
