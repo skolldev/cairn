@@ -4,7 +4,7 @@ Both OSes put a shim on `PATH` that costs a few milliseconds a call: about 8 ms 
 
 - **Windows:** the real binary is `Git\<environment>\bin\git.exe`, beside the `cmd` and `bin` shims, or found through `git --exec-path`. The environment was `mingw64` when #12 measured and #17 was written. Current Git for Windows ships `ucrt64`, and ARM builds ship `clangarm64`. The runner accepts all three, and its test does too.
 - **macOS:** the first git on `PATH` that isn't `/usr/bin/git`, such as Homebrew's, or else what `xcrun --find git` names. A machine with no Command Line Tools gets a not-found error, not a spawn failure.
-- **Elsewhere:** the first git on `PATH`. The git 2.23 CI job runs on Linux and relies on this.
+- **Elsewhere:** the first git on `PATH`. The oldest-git CI job runs on Linux and relies on this.
 
 ## Consequences
 

@@ -56,12 +56,12 @@ fn a_missing_git_is_not_found_rather_than_a_spawn_failure() {
 
 #[cfg(unix)]
 #[test]
-fn a_git_older_than_2_23_is_refused() {
+fn a_git_older_than_the_minimum_is_refused() {
     use std::os::unix::fs::PermissionsExt;
     // Real old gits aren't installable everywhere; this stands in for `git --version` only.
     let dir = tempfile::tempdir().unwrap();
     let old = dir.path().join("git");
-    std::fs::write(&old, "#!/bin/sh\necho 'git version 2.22.5'\n").unwrap();
+    std::fs::write(&old, "#!/bin/sh\necho 'git version 2.36.6'\n").unwrap();
     std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let err = Git::at(&old).unwrap_err();
@@ -71,15 +71,15 @@ fn a_git_older_than_2_23_is_refused() {
             path: old.clone(),
             version: GitVersion {
                 major: 2,
-                minor: 22,
-                patch: 5
+                minor: 36,
+                patch: 6
             },
         }
     );
     assert_eq!(
         err.to_string(),
         format!(
-            "Cairn needs git 2.23.0 or newer, but {} is git 2.22.5",
+            "Cairn needs git 2.37.0 or newer, but {} is git 2.36.6",
             old.display()
         )
     );

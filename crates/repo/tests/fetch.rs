@@ -50,25 +50,18 @@ fn a_fetch_streams_progress_and_ends_with_a_refs_only_refresh() {
     });
     let job = seen.job(&JobKind::Fetch).unwrap().clone();
     assert_eq!(job.state, JobState::Done(Ok(())), "{job:?}");
-    // Progress reports come only with --progress, because stderr isn't a terminal. Before
-    // 2.37, `--all` fetches even a lone remote in a sub-fetch that doesn't get --progress.
-    let installed = cairn_write::Git::shared().unwrap().version();
-    if installed >= version(2, 37) {
-        assert!(job.output.contains("Counting objects"), "{}", job.output);
-    }
+    // Progress reports come only with --progress, because stderr isn't a terminal.
+    assert!(job.output.contains("Counting objects"), "{}", job.output);
     assert_eq!(
         git(&f.repo, &["rev-parse", &format!("origin/{}", f.branch)]).trim(),
         f.new
     );
 
-    // git 2.24 introduced fetch.writeCommitGraph; older git ignores it.
-    if installed >= version(2, 24) {
-        assert!(!graph_before, "the clone already had a commit-graph");
-        assert!(
-            commit_graph_exists(&f.repo),
-            "the fetch wrote no commit-graph"
-        );
-    }
+    assert!(!graph_before, "the clone already had a commit-graph");
+    assert!(
+        commit_graph_exists(&f.repo),
+        "the fetch wrote no commit-graph"
+    );
 
     // Nothing marks a refresh that was never queued, so this waits. A refresh is queued
     // before the outcome is published, so a status refresh would publish within this
@@ -93,14 +86,6 @@ fn current_branch(repo: &Path) -> String {
         .unwrap()
         .trim()
         .to_owned()
-}
-
-fn version(major: u32, minor: u32) -> cairn_write::GitVersion {
-    cairn_write::GitVersion {
-        major,
-        minor,
-        patch: 0,
-    }
 }
 
 #[test]

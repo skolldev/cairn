@@ -65,7 +65,7 @@ When speed, absence of bloat and git fidelity conflict, speed wins. A feature th
 - The UI thread never touches git.
 - Anything that mutates the repo is done by the `git` CLI. Porcelain is never reimplemented.
 - Tokens never appear in remote URLs, arguments, logs or `.git/config`.
-- Minimum git version is 2.23.
+- Minimum git version is 2.37.
 - Windows parity is required. Every phase gate and budget applies to both OSes, and GPUI failing on Windows is a no-go for GPUI.
 
 **Not in the MVP:** PRs, issue trackers, provider avatars, a built-in conflict editor, an interactive rebase UI, drag-and-drop merge or rebase, and submodule or LFS management UI.

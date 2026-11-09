@@ -10,7 +10,7 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 | `ready-for-human`          | `ready-for-human`    | Requires human implementation            |
 | `wontfix`                  | `wontfix`            | Will not be actioned                     |
 
-Before applying `ready-for-agent`, check every git command the issue names against `docs/git-versions.md`: argument order, and whether git 2.23 can do it.
+Before applying `ready-for-agent`, check every git command the issue names against `docs/git-versions.md`: argument order, and whether git 2.37 can do it.
 
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
 

@@ -17,7 +17,7 @@ newest_released() {
     sed 's|.*refs/tags/v||' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
 }
 
-versions="${CAIRN_GIT_VERSIONS:-2.23.0 $(newest_released)}"
+versions="${CAIRN_GIT_VERSIONS:-2.37.0 $(newest_released)}"
 [ "$#" -gt 0 ] || set -- -p cairn-write -p cairn-repo -p cairn-budget -p cairn-app \
   --features cairn-app/measure --no-fail-fast
 

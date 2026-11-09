@@ -88,10 +88,10 @@ impl Git {
 }
 
 impl GitVersion {
-    /// The oldest git Cairn runs: `switch` and `restore` arrived in 2.23.
+    /// The oldest git Cairn runs: from 2.37, a fetch of a lone remote shows progress (ADR 0007).
     pub const MINIMUM: GitVersion = GitVersion {
         major: 2,
-        minor: 23,
+        minor: 37,
         patch: 0,
     };
 
@@ -244,7 +244,7 @@ mod tests {
             GitVersion::parse("git version 2.45.1.windows.1"),
             Some(v(2, 45, 1))
         );
-        assert_eq!(GitVersion::parse("git version 2.23.0"), Some(v(2, 23, 0)));
+        assert_eq!(GitVersion::parse("git version 2.37.0"), Some(v(2, 37, 0)));
         assert_eq!(GitVersion::parse("git version 3.0"), Some(v(3, 0, 0)));
         assert_eq!(GitVersion::parse("hello"), None);
     }
@@ -256,8 +256,8 @@ mod tests {
             minor,
             patch,
         };
-        assert!(v(2, 22, 9) < GitVersion::MINIMUM);
-        assert!(v(2, 23, 0) >= GitVersion::MINIMUM);
-        assert!(v(2, 100, 0) > v(2, 23, 0));
+        assert!(v(2, 36, 9) < GitVersion::MINIMUM);
+        assert!(v(2, 37, 0) >= GitVersion::MINIMUM);
+        assert!(v(2, 100, 0) > v(2, 37, 0));
     }
 }
