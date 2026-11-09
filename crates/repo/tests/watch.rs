@@ -75,9 +75,10 @@ fn a_newer_status_read_stops_the_running_one_instead_of_waiting_for_it() {
 #[test]
 fn quick_refreshes_of_one_slot_publish_only_newer_generations_and_never_a_stopped_read() {
     let (dir, repo) = small_fixture_clone();
-    // Every Unstaged read takes a while (git runs the filter many times per read), so most
-    // newer reads arrive while one is running and stop it.
-    common::install_slow_clean_filter(&repo, dir.path(), "sleep 0.02\n");
+    // Every Unstaged read takes a while (one filter run of 0.3s), so most newer reads
+    // arrive while one is running and stop it. With the `is_current` check in
+    // `Reads::submit` removed, this goes red at 0.3s but stays green at 0.02s.
+    common::install_slow_clean_filter(&repo, dir.path(), "sleep 0.3\n");
     let harness = Harness::start();
     // A fresh service numbers the Unstaged Slot's reads 1, 2, 3, ... one per Open. The
     // watcher may add refreshes of its own, so later generations can be larger.
@@ -170,7 +171,7 @@ fn status_keeps_publishing_while_external_changes_keep_arriving() {
     common::assert_filesystem_events_available(&repo);
     // Each Unstaged read takes far longer than the gap between two writes, so a new event
     // always arrives while a read runs.
-    common::install_slow_clean_filter(&repo, dir.path(), "sleep 0.02\n");
+    common::install_slow_clean_filter(&repo, dir.path(), "sleep 0.3\n");
     let harness = Harness::start();
     let opened = open(&harness, &repo);
 

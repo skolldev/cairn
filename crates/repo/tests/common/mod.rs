@@ -631,7 +631,10 @@ pub fn lock_files(dir: &Path) -> Vec<PathBuf> {
 
 /// Makes README.md stat-dirty and gives it a clean filter that runs `before` and then
 /// passes the content through. Each Unstaged read then runs the filter, through
-/// `hash-object`, inside the git it can stop.
+/// `hash-object`, inside the git it can stop. Once per read: the attribute is anchored to
+/// the top-level README.md. Unanchored, it would also match the fixture's other README
+/// files, which `diff-files` filters while they're racily clean after the clone
+/// (`docs/git-versions.md`), a count that depends on the clock.
 pub fn install_slow_clean_filter(repo: &Path, scratch: &Path, before: &str) {
     let script = scratch.join("slow-clean.sh");
     std::fs::write(&script, format!("{before}cat\n")).unwrap();
@@ -643,7 +646,11 @@ pub fn install_slow_clean_filter(repo: &Path, scratch: &Path, before: &str) {
             &format!("sh '{}'", slash(&script)),
         ],
     );
-    std::fs::write(repo.join(".git/info/attributes"), "README.md filter=slow\n").unwrap();
+    std::fs::write(
+        repo.join(".git/info/attributes"),
+        "/README.md filter=slow\n",
+    )
+    .unwrap();
     touch(&repo.join("README.md"));
 }
 
