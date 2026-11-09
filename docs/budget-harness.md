@@ -42,7 +42,7 @@ The machine, OS, git version and path, Rust version, Cairn's commit (and whether
 The `measure` build's probe writes a line for each painted frame with what the views hold and the time, on one clock shared by the whole machine. The harness finds the first frame showing the expected state, then asks the OS when that frame reached the screen. Paint timers read healthy while a screen is frozen (zed#61469), so a paint time never ends a sample.
 
 - **macOS: Metal's presented times.** GPUI doesn't expose them, so the probe hooks the two getters that hand it drawables, as the #9 spike did.
-- **Windows: PresentMon**, tracing the process from before it starts, so that Launch needs no in-process stand-in. The frame is the first `Present()` after the paint that reached the screen.
+- **Windows: PresentMon**, tracing the process and `dwm.exe` from before the process starts, so that Launch needs no in-process stand-in. The frame is the first `Present()` after the paint, and it reaches the screen in DWM's next flip, as [below](#how-a-windows-frame-gets-its-screen-time).
 
 ### Limits to read the numbers with
 
@@ -55,7 +55,7 @@ The `measure` build's probe writes a line for each painted frame with what the v
 ## Windows
 
 1. Set the primary display to 120 Hz.
-2. Get the PresentMon 2.x console exe, and set `CAIRN_PRESENTMON` to it or pass `--presentmon`. Admin isn't needed if your account is in Performance Log Users.
+2. Get the PresentMon 2.6.0 console exe, and set `CAIRN_PRESENTMON` to it or pass `--presentmon`. Other versions name their CSV columns differently, and a missing column stops the run. Admin isn't needed if your account is in Performance Log Users.
 3. Run the commands above from Git Bash.
 
 `scripts/budget.sh run` then records a PresentMon trace around each run, Launch included.
@@ -74,14 +74,26 @@ If it fails, run without changing anything first and record that, then see #13 o
 
 It also runs on macOS, which is not the gate.
 
-### Not yet run on Windows
+### What a real trace showed
 
-The harness was written on a Mac, so nothing has run on the Windows PC yet, and the PresentMon CSV test follows the column table in PresentMon's README rather than a real trace. Expect fixes on the first run, and check these against the trace:
+Checked on the Windows PC with PresentMon 2.6.0, whose default CSV differs from its README's column table:
 
-- The CSV has `ProcessID`, `CPUStartQPC`, `MsCPUBusy` and `DisplayLatency` under `--qpc_time`. A missing column stops the run rather than reading as no frames.
-- `--process_name` picks up a process that starts after the session does. A launch missing from the trace stops the run.
-- Present time as `CPUStartQPC` + `MsCPUBusy`, and screen time as `CPUStartQPC` + `DisplayLatency`.
-- `--terminate_existing_session` ends the running PresentMon so that it writes its CSV.
+- Present time is `TimeInQPC`, which equals `CPUStartQPC` + `MsCPUBusy` in every row, and each Present follows its paint. Screen time is `TimeInQPC` + `MsUntilDisplayed`. `DisplayLatency` exists only under `--v2_metrics`. A missing column stops the run rather than reading as no frames.
+- `--process_name` picks up a process that starts after the session does, and `--terminate_existing_session` ends the running PresentMon so that it writes its CSV.
+
+### How a Windows frame gets its screen time
+
+PresentMon reports almost no frame of GPUI's default swapchain as displayed. GPUI draws through DirectComposition, and every frame reads `NA`, even in a foreground window drawing without stopping (0 of 826). So a frame gets the screen time of **DWM's first flip on its display presented at or after the frame's `Present()`**. Where PresentMon has its own time for a frame, that wins.
+
+- **Scored against PresentMon's own times.** With `GPUI_DISABLE_DIRECT_COMPOSITION=1`, the same binary draws through an HWND swapchain, whose frames PresentMon does time (825 of 826). There the rule was within 0.5 ms for 786 of 849 frames while animating and 33 of 34 while idle. It never read early, and read at most 3.63 ms late. Matching on DWM's CPU start instead read a whole frame late, every time.
+- **Compared end to end.** One run of 8 samples each way, as medians on the default path and then on HWND: Launch 129 and 130 ms, Local write Job 77 and 80 ms, `git switch` 573 and 585 ms. Setting that variable stays a check to repeat by hand, not something a harness run does.
+- **DWM has one chain per display.** The display is the chain that flips soonest after Cairn's `Present()`s across the session: the wrong one read about 2,100 ms where the right one read 20 ms. Another display that flips busily during a run, such as one playing a video, could be picked instead, which is one more reason not to use the machine during a run.
+
+### Limits of a Windows number
+
+- **A frame DWM dropped isn't known.** DWM's flip says the desktop changed, not that it held this frame. The check above is what supports the rule.
+- **Launch's first frame is worked out, not reported.** PresentMon writes no row for a swapchain's first `Present()`, so its time is the first row's minus `MsBetweenPresents`, and no own time exists to score that against. GPUI shows the window before its first paint, so the frame has a window to appear in. Without this, Launch read about 70 ms later, because it timed a later frame.
+- **A run's last frame has no row either,** because PresentMon writes a row only once the next `Present()` arrives. A sample ending on it has no time, which stops the run rather than giving a number.
 
 ## Recommended, not gating: Instruments on macOS scrolling
 

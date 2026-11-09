@@ -229,6 +229,8 @@ impl Recorder {
         let child = spawn::tool(&exe)?
             .arg("--process_name")
             .arg(name)
+            // Its flips say when a DirectComposition frame reached the screen.
+            .args(["--process_name", crate::presented::DWM])
             .arg("--output_file")
             .arg(&csv)
             .args(["--session_name", PRESENTMON_SESSION])

@@ -2,6 +2,8 @@
 //!
 //! All times are nanoseconds on [`crate::clock`], which every process on a machine shares.
 
+use std::collections::{BTreeMap, HashSet};
+
 /// A record of a process's presented frames.
 pub trait PresentSource {
     /// When the screen first showed a frame whose paint ended at `paint_ns`.
@@ -82,18 +84,57 @@ impl PresentSource for MetalTrace {
     }
 }
 
-/// One row of a PresentMon CSV.
+/// One Present() of a process's in a PresentMon CSV.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Row {
     pid: u32,
     /// When the process called Present().
     present_ns: u64,
-    /// When the frame reached the screen. `None` for a frame PresentMon reports as "NA".
+    /// When the frame reached the screen. `None` if nothing in the trace shows it did.
     displayed_ns: Option<u64>,
 }
 
-/// PresentMon's trace, on Windows. Written with `--qpc_time`, so frames are on the same clock
-/// as everything else.
+/// One frame of DWM's that reached the screen.
+#[derive(Clone, Copy, Debug)]
+struct Flip {
+    present_ns: u64,
+    screen_ns: u64,
+}
+
+/// The process that composes the desktop.
+pub const DWM: &str = "dwm.exe";
+
+/// The first of `flips`, sorted by time, that holds a frame presented at `present_ns`.
+fn flip_after(flips: &[Flip], present_ns: u64) -> Option<&Flip> {
+    flips.get(flips.partition_point(|flip| flip.present_ns < present_ns))
+}
+
+/// DWM's flips on the display `rows` are on: the chain that flips soonest after them. DWM has one
+/// chain per display, and the others flip seconds late or not at all when they're idle.
+fn flips_of_display<'a>(chains: &'a BTreeMap<&str, Vec<Flip>>, rows: &[Row]) -> Option<&'a [Flip]> {
+    let median_wait = |flips: &[Flip]| {
+        let mut waits: Vec<u64> = rows
+            .iter()
+            .map(|row| {
+                flip_after(flips, row.present_ns)
+                    .map_or(u64::MAX, |flip| flip.present_ns - row.present_ns)
+            })
+            .collect();
+        waits.sort_unstable();
+        waits.get(waits.len() / 2).copied().unwrap_or(u64::MAX)
+    };
+    chains
+        .values()
+        .min_by_key(|flips| median_wait(flips))
+        .map(Vec::as_slice)
+}
+
+/// PresentMon's trace of Cairn and DWM, on Windows. Written with `--qpc_time`, so frames are on
+/// the same clock as everything else.
+///
+/// PresentMon reports no frame of a DirectComposition swapchain, which is what GPUI draws through,
+/// as displayed. Those frames reach the screen in DWM's next flip on their display, so that's the
+/// time they get. PresentMon's own time wins where it has one.
 #[derive(Clone, Debug, Default)]
 pub struct PresentMonTrace {
     rows: Vec<Row>,
@@ -103,6 +144,7 @@ impl PresentMonTrace {
     /// Parses a CSV whose QPC ticks run at `ticks_per_second`. A CSV without the columns is an
     /// error, so that a format change can't read as a window that never presented.
     pub fn parse(csv: &str, ticks_per_second: u64) -> Result<Self, String> {
+        let csv = csv.strip_prefix('\u{feff}').unwrap_or(csv);
         let mut lines = csv.lines();
         let header: Vec<&str> = lines
             .next()
@@ -116,13 +158,15 @@ impl PresentMonTrace {
                 .position(|h| *h == name)
                 .ok_or_else(|| format!("the PresentMon CSV has no {name} column: {header:?}"))
         };
+        let application = column("Application")?;
         let pid = column("ProcessID")?;
-        let start = column("CPUStartQPC")?;
-        let busy = column("MsCPUBusy")?;
-        let latency = column("DisplayLatency")?;
+        let chain = column("SwapChainAddress")?;
+        let present = column("TimeInQPC")?;
+        let between_presents = column("MsBetweenPresents")?;
+        let until_displayed = column("MsUntilDisplayed")?;
 
-        let ms_to_ns = |ms: f64| (ms * 1e6) as u64;
-        let mut rows = Vec::new();
+        let mut chains: BTreeMap<&str, Vec<Flip>> = BTreeMap::new();
+        let mut timed = Vec::new();
         for line in lines.filter(|line| !line.trim().is_empty()) {
             let fields: Vec<&str> = line.split(',').map(str::trim).collect();
             let field = |index: usize| {
@@ -131,37 +175,69 @@ impl PresentMonTrace {
                     .copied()
                     .ok_or_else(|| format!("a PresentMon row is too short: {line}"))
             };
-            let number = |index: usize| {
-                let text = field(index)?;
-                text.parse::<f64>()
-                    .map_err(|_| format!("not a number in a PresentMon row, {text:?}: {line}"))
+            // Milliseconds as nanoseconds, or `None` where PresentMon has "NA".
+            let ms_as_ns = |index: usize| match field(index)? {
+                "NA" => Ok(None),
+                text => text
+                    .parse::<f64>()
+                    .map(|ms| Some((ms * 1e6) as u64))
+                    .map_err(|_| format!("not a number in a PresentMon row, {text:?}: {line}")),
             };
-            let start_ticks: u64 = field(start)?
+            let present_ticks: u64 = field(present)?
                 .parse()
                 .map_err(|_| format!("not a QPC value in a PresentMon row: {line}"))?;
-            let start_ns = crate::clock::ticks_to_ns(start_ticks, ticks_per_second);
-            rows.push(Row {
+            let present_ns = crate::clock::ticks_to_ns(present_ticks, ticks_per_second);
+            let displayed_ns = ms_as_ns(until_displayed)?.map(|until| present_ns + until);
+
+            if field(application)?.eq_ignore_ascii_case(DWM) {
+                if let Some(screen_ns) = displayed_ns {
+                    chains.entry(field(chain)?).or_default().push(Flip {
+                        present_ns,
+                        screen_ns,
+                    });
+                }
+                continue;
+            }
+            let row = Row {
                 pid: field(pid)?
                     .parse()
                     .map_err(|_| format!("not a process id in a PresentMon row: {line}"))?,
-                present_ns: start_ns + ms_to_ns(number(busy)?),
-                displayed_ns: match field(latency)? {
-                    "NA" => None,
-                    _ => Some(start_ns + ms_to_ns(number(latency)?)),
-                },
-            });
+                present_ns,
+                displayed_ns,
+            };
+            timed.push((row, ms_as_ns(between_presents)?));
+        }
+        timed.sort_by_key(|(row, _)| row.present_ns);
+
+        // PresentMon writes no row for a swapchain's first Present(), but the next row says how
+        // long before it that was.
+        let mut seen = HashSet::new();
+        let mut rows = Vec::with_capacity(timed.len());
+        for (row, between_ns) in timed {
+            if seen.insert(row.pid)
+                && let Some(between_ns) = between_ns
+            {
+                rows.push(Row {
+                    present_ns: row.present_ns.saturating_sub(between_ns),
+                    displayed_ns: None,
+                    ..row
+                });
+            }
+            rows.push(row);
         }
         rows.sort_by_key(|row| row.present_ns);
-        Ok(Self { rows })
-    }
 
-    /// When the screen showed this process's first frame.
-    pub fn first_presented_of(&self, pid: u32) -> Option<u64> {
-        self.rows
-            .iter()
-            .filter(|row| row.pid == pid)
-            .filter_map(|row| row.displayed_ns)
-            .min()
+        for chain in chains.values_mut() {
+            chain.sort_by_key(|flip| flip.present_ns);
+        }
+        if let Some(flips) = flips_of_display(&chains, &rows) {
+            for row in &mut rows {
+                row.displayed_ns = row
+                    .displayed_ns
+                    .or_else(|| flip_after(flips, row.present_ns).map(|flip| flip.screen_ns));
+            }
+        }
+        Ok(Self { rows })
     }
 
     /// The same trace, narrowed to one process.
