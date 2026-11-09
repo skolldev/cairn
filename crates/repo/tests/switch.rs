@@ -197,23 +197,47 @@ fn a_timed_out_snapshot_wait_does_not_wait_for_a_blocked_local_write() {
             .is_some_and(|job| job.output.contains("hook waiting on other"))
     });
 
+    // Only a backstop, so a regression fails instead of hanging: nothing else releases the hook
+    // until the service is gone. The marker below is what proves the drop didn't wait.
+    let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
     let release_later = release.clone();
     let watchdog = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        std::fs::write(release_later, "").unwrap();
+        if cancelled
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .is_err()
+        {
+            std::fs::write(release_later, "").unwrap();
+        }
     });
-    let start = std::time::Instant::now();
     let timed_out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         harness.drain_until_with_timeout(std::time::Duration::from_millis(100), |_| false)
     }));
     assert!(timed_out.is_err());
     drop(harness);
-    let elapsed = start.elapsed();
+
+    // Seen red: with `drain_until_with_timeout`'s Force quit removed, the drop waits until the
+    // backstop releases the hook, and this fails.
+    // Marker: the hook is still blocked once the drop has returned. Its `end` line can only
+    // follow `release`, which nothing has written yet unless the backstop fired.
+    let log_after_drop = std::fs::read_to_string(&log).unwrap();
+    let backstop_fired = release.exists();
+    let _ = cancel.send(());
     watchdog.join().unwrap();
     assert!(
-        elapsed < std::time::Duration::from_secs(1),
-        "a timed-out test waited {elapsed:?} for the blocked write"
+        !backstop_fired && !log_after_drop.contains("end other"),
+        "the drop waited for the blocked write: {log_after_drop:?}"
     );
+
+    // Control: releasing the hook lets it end, so it really was blocked until then.
+    std::fs::write(&release, "").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !std::fs::read_to_string(&log).unwrap().contains("end other") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the released hook never ended"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 #[test]
