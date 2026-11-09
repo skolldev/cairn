@@ -648,6 +648,8 @@ fn assert_an_external_switch_refreshes_refs_and_status(workdir: &Path) {
 
     git(workdir, &["switch", "--quiet", "elsewhere"]);
 
+    // The status Slots wait for any newer Snapshot, not a state: a switch to the same
+    // commit leaves status as it was. Nothing else in the worktree changes meanwhile.
     let mut seen = Seen::default();
     seen.until(&harness, |seen| {
         let on_elsewhere = seen.all.iter().any(|s| match s {
@@ -658,35 +660,33 @@ fn assert_an_external_switch_refreshes_refs_and_status(workdir: &Path) {
             }
             _ => false,
         });
-        let newer = |slot: fn(&Snapshot) -> Option<(&Path, Generation)>, after: Generation| {
-            seen.all
-                .iter()
-                .filter_map(slot)
-                .any(|(w, g)| w == workdir && g > after)
+        let refreshed = |slot: StatusSlot, opened: Generation| {
+            seen.all.iter().any(|s| {
+                status_generation(s, slot).is_some_and(|(w, g)| w == workdir && g > opened)
+            })
         };
         on_elsewhere
-            && newer(
-                |s| match s {
-                    Snapshot::Staged(s) => Some((&s.workdir, s.generation)),
-                    _ => None,
-                },
-                opened.staged,
-            )
-            && newer(
-                |s| match s {
-                    Snapshot::Unstaged(s) => Some((&s.workdir, s.generation)),
-                    _ => None,
-                },
-                opened.unstaged,
-            )
-            && newer(
-                |s| match s {
-                    Snapshot::Untracked(s) => Some((&s.workdir, s.generation)),
-                    _ => None,
-                },
-                opened.untracked,
-            )
+            && refreshed(StatusSlot::Staged, opened.staged)
+            && refreshed(StatusSlot::Unstaged, opened.unstaged)
+            && refreshed(StatusSlot::Untracked, opened.untracked)
     });
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatusSlot {
+    Staged,
+    Unstaged,
+    Untracked,
+}
+
+/// The workdir and generation of `snapshot`, if it is from `slot`.
+fn status_generation(snapshot: &Snapshot, slot: StatusSlot) -> Option<(&Path, Generation)> {
+    match (snapshot, slot) {
+        (Snapshot::Staged(s), StatusSlot::Staged)
+        | (Snapshot::Unstaged(s), StatusSlot::Unstaged) => Some((&s.workdir, s.generation)),
+        (Snapshot::Untracked(s), StatusSlot::Untracked) => Some((&s.workdir, s.generation)),
+        _ => None,
+    }
 }
 
 #[test]
@@ -698,7 +698,7 @@ fn a_git_switch_in_a_linked_worktree_refreshes_refs_and_status() {
 #[test]
 fn a_git_switch_in_a_submodule_refreshes_refs_and_status() {
     let (_dir, repo) = small_fixture_clone();
-    // git 2.38.1 stopped cloning local submodules by default; older git ignores the key.
+    // Since git 2.38.1 a submodule can't clone from a local path unless this allows it.
     git(
         &repo,
         &[

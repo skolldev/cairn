@@ -19,6 +19,7 @@ Check the newest tag as well as the oldest supported one when a test leans on gi
 | Behaviour | Since | Where it shows | Checked in |
 |---|---|---|---|
 | `fetch --all` with one remote fetches it directly | 2.37 | why 2.37 is the minimum: the fetch honours `--progress`. Before 2.37 even a lone remote goes through a sub-fetch | `builtin/fetch.c` at 2.36 and 2.37: "do not do fetch_multiple() of one" |
+| `submodule add` from a local path needs `protocol.file.allow=always` | 2.38.1 | the default for `file` dropped from always to user, so the submodule's clone is refused. `git -c protocol.file.allow=always submodule add` works on every version. See `a_git_switch_in_a_submodule_refreshes_refs_and_status` | `get_protocol_config` in `transport.c` at 2.37.0 and 2.38.1 |
 
 ## Gotchas in every version
 

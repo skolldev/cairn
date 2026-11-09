@@ -112,7 +112,7 @@ impl GitDirs {
     /// no read can either, so `<root>/.git` is as good a guess as any.
     fn resolve(workdir: &Path, root: &Path) -> Self {
         let (own, common) = match cairn_read::Repo::open(workdir) {
-            Ok(repo) => repo.git_dirs(),
+            Ok(repo) => (repo.git_dir(), repo.common_dir()),
             Err(e) => {
                 tracing::warn!(error = %e, "couldn't find the git dir; guessing `.git`");
                 let guess = root.join(".git");
@@ -126,23 +126,24 @@ impl GitDirs {
         }
     }
 
-    /// Where `path` lies in git's directories, relative to the one it is in, and whether
-    /// that is the common dir of a linked worktree. `None` outside both.
-    fn locate<'p>(&self, path: &'p Path) -> Option<(&'p Path, Shared)> {
-        // The own dir first: a linked worktree's lies inside the common dir.
+    /// Which of git's directories `path` lies in, and where in it. `None` outside both.
+    fn locate<'p>(&self, path: &'p Path) -> Option<(Dir, &'p Path)> {
+        // The own dir first: a linked worktree's lies inside the common dir, and outside
+        // a linked worktree the two are the same.
         if let Ok(inside) = path.strip_prefix(&self.own) {
-            return Some((inside, Shared::No));
+            return Some((Dir::Own, inside));
         }
         let inside = path.strip_prefix(&self.common).ok()?;
-        Some((inside, Shared::Yes))
+        Some((Dir::Common, inside))
     }
 }
 
-/// Whether a path lies in the common dir of a linked worktree, as opposed to its own dir.
+/// Which of [`GitDirs`] a path lies in.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Shared {
-    No,
-    Yes,
+enum Dir {
+    Own,
+    /// A linked worktree's common dir, outside its own dir.
+    Common,
 }
 
 fn external_change(reads: &Reads, workdir: &Path, what: Refresh) {
@@ -187,7 +188,7 @@ fn classify_path(
     dirs: &GitDirs,
     skips: &mut impl FnMut(&Path) -> bool,
 ) -> Option<Refresh> {
-    let Some((inside, shared)) = dirs.locate(path) else {
+    let Some((dir, inside)) = dirs.locate(path) else {
         // Anything else under the worktree is a file git may track or list as untracked,
         // unless it is ignored and untracked.
         let relative = path.strip_prefix(root).ok()?;
@@ -201,7 +202,7 @@ fn classify_path(
     match (parts.next()?.to_str()?, parts.next()) {
         // In a linked worktree's common dir these belong to the main worktree, and each
         // linked worktree's own dir sits under `worktrees/`, which matches nothing below.
-        ("HEAD" | "index" | "FETCH_HEAD", None) if shared == Shared::Yes => None,
+        ("HEAD" | "index" | "FETCH_HEAD", None) if dir == Dir::Common => None,
         // HEAD moving changes what the index is compared with.
         ("HEAD", None) => Some(Refresh::RefsAndStatus),
         ("index", None) => Some(Refresh::Status),
@@ -226,8 +227,8 @@ fn classify_path(
 /// excludes and config git reads, or any `.gitignore`.
 fn changes_filter(path: &Path, root: &Path, dirs: &GitDirs) -> bool {
     match dirs.locate(path) {
-        Some((inside, shared)) => {
-            (inside == Path::new("index") && shared == Shared::No)
+        Some((dir, inside)) => {
+            (inside == Path::new("index") && dir == Dir::Own)
                 || inside == Path::new("config")
                 || inside == Path::new("info/exclude")
         }
