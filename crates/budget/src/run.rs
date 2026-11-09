@@ -513,12 +513,15 @@ fn held_key_run(config: &Config, sandbox: &Sandbox) -> Result<HeldKeyRun, String
         .filter(|f| in_hold(f.paint_ns))
         .map(|f| f.unstaged)
         .collect();
+    let repeats: Vec<u64> = trace
+        .keys()
+        .iter()
+        .filter(|(ns, held)| *held && in_hold(*ns))
+        .map(|(ns, _)| *ns)
+        .collect();
     Ok(HeldKeyRun {
-        held_keys: trace
-            .keys()
-            .iter()
-            .filter(|(ns, held)| *held && in_hold(*ns))
-            .count(),
+        held_keys: repeats.len(),
+        longest_key_silence_ms: largest_gap_ms(&repeats, start, end),
         notifies: match (answers.first(), answers.last()) {
             (Some(first), Some(last)) => last - first,
             _ => 0,

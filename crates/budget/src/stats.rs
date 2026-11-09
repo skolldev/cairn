@@ -131,6 +131,9 @@ pub fn judge(budget: &Budget, runs: &[Vec<f64>]) -> Summary {
 pub const HELD_KEY_GAP_FLOOR_MS: f64 = 50.0;
 /// zed#61469 was reported after 5 to 30 held keys, so a run needs at least this many.
 pub const MIN_HELD_KEYS: usize = 30;
+/// The longest a held key may go without a repeat. Past this it was let go: Windows' slowest
+/// repeat rate is about 2 Hz, and its longest delay before repeats restart is 1 s.
+pub const MAX_KEY_SILENCE_MS: f64 = 1_000.0;
 
 /// One run of the held-key test.
 #[derive(Clone, Debug, PartialEq)]
@@ -141,6 +144,8 @@ pub struct HeldKeyRun {
     pub notifies: u64,
     /// The longest the screen went without a presented frame during the hold.
     pub largest_gap_ms: f64,
+    /// The longest the hold went without a repeat reaching the window, up to its end.
+    pub longest_key_silence_ms: f64,
 }
 
 /// Judges the held-key test: worst of three runs, as the Floor says.
@@ -161,6 +166,15 @@ pub fn judge_held_key(runs: &[HeldKeyRun]) -> Summary {
     } else if largest > HELD_KEY_GAP_FLOOR_MS {
         Verdict::Miss(format!(
             "a {largest:.1} ms gap between presented frames, floor {HELD_KEY_GAP_FLOOR_MS} ms"
+        ))
+    } else if let Some(run) = runs
+        .iter()
+        // Only after the freeze check: a frozen window gets no keys either, and that's a Miss.
+        .find(|r| r.longest_key_silence_ms > MAX_KEY_SILENCE_MS)
+    {
+        Verdict::Invalid(format!(
+            "a run's key went quiet for {:.0} ms, so it wasn't held for the whole hold",
+            run.longest_key_silence_ms
         ))
     } else {
         Verdict::Pass

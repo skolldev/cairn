@@ -130,14 +130,55 @@ fn the_harness_budgets_are_the_plans() {
 }
 
 mod held_key {
-    use cairn_budget::stats::{HELD_KEY_GAP_FLOOR_MS, HeldKeyRun, Verdict, judge_held_key};
+    use cairn_budget::stats::{
+        HELD_KEY_GAP_FLOOR_MS, HeldKeyRun, MAX_KEY_SILENCE_MS, Verdict, judge_held_key,
+    };
 
     fn run(held_keys: usize, notifies: u64, largest_gap_ms: f64) -> HeldKeyRun {
         HeldKeyRun {
             held_keys,
             notifies,
             largest_gap_ms,
+            longest_key_silence_ms: 33.3,
         }
+    }
+
+    #[test]
+    fn a_key_let_go_early_proves_nothing_about_the_rest_of_the_hold() {
+        let good = run(300, 500, 16.7);
+        // Enough repeats to count, then let go: the screen was never tried for the rest.
+        let released = HeldKeyRun {
+            longest_key_silence_ms: MAX_KEY_SILENCE_MS + 1.0,
+            ..run(30, 500, 16.7)
+        };
+        let summary = judge_held_key(&[good.clone(), released, good]);
+        assert!(
+            matches!(summary.verdict, Verdict::Invalid(_)),
+            "{summary:?}"
+        );
+    }
+
+    #[test]
+    fn a_freeze_that_also_silences_the_key_still_misses() {
+        // A frozen window gets no keys either, so silence must not excuse the freeze this tests.
+        let good = run(300, 500, 16.7);
+        let frozen = HeldKeyRun {
+            longest_key_silence_ms: 2_000.0,
+            ..run(300, 500, 2_000.0)
+        };
+        let summary = judge_held_key(&[good.clone(), frozen, good]);
+        assert!(matches!(summary.verdict, Verdict::Miss(_)), "{summary:?}");
+    }
+
+    #[test]
+    fn a_key_quiet_for_just_the_allowance_still_passes() {
+        let good = run(300, 500, 16.7);
+        let slow_repeat = HeldKeyRun {
+            longest_key_silence_ms: MAX_KEY_SILENCE_MS,
+            ..good.clone()
+        };
+        let summary = judge_held_key(&[good.clone(), slow_repeat, good]);
+        assert_eq!(summary.verdict, Verdict::Pass);
     }
 
     #[test]
