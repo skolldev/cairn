@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use cairn_repo::Intent;
 use gpui::{Modifiers, TestAppContext, px, size};
 
-use crate::testing::{App, Release, block_until, git, hermetic, open, post_checkout_hook, slash};
+use crate::testing::{
+    App, Release, block_until, git, hermetic, open, post_checkout_hook, slash, slow_remote,
+};
 
 /// How long a test waits when nothing marks what must not happen. A close that exits
 /// does so well within this: `closing_with_nothing_running_exits_without_asking` is the
@@ -49,21 +51,7 @@ fn fixture() -> Fixture {
         block_until(&release, dir.path())
     );
     post_checkout_hook(&repo, &block);
-    let wrapper = dir.path().join("slow-remote.sh");
-    std::fs::write(&wrapper, format!("{block}exec git \"$@\"\n")).unwrap();
-    for (key, command) in [
-        ("remote.origin.uploadpack", "upload-pack"),
-        ("remote.origin.receivepack", "receive-pack"),
-    ] {
-        git(
-            &repo,
-            &[
-                "config",
-                key,
-                &format!("sh '{}' {command}", slash(&wrapper)),
-            ],
-        );
-    }
+    slow_remote(&repo, dir.path(), &block);
     Fixture {
         repo,
         remote,
@@ -124,6 +112,11 @@ impl App<'_> {
     /// Sends `intent` and waits until git is blocked and the Job's Snapshot reached the view.
     fn start_blocked(&mut self, intent: Intent, f: &Fixture) {
         self.send(intent);
+        self.wait_until_blocked(f);
+    }
+
+    /// Waits until git is blocked and the Job's Snapshot reached the view.
+    fn wait_until_blocked(&mut self, f: &Fixture) {
         self.until("the Job is blocked and shown", |app| {
             f.blocked.exists()
                 && app.workspace.read_with(app.cx, |workspace, cx| {
@@ -305,7 +298,9 @@ fn stopping_the_push_when_asked_exits_and_nothing_reaches_the_remote(cx: &mut Te
 fn closing_during_a_fetch_doesnt_ask(cx: &mut TestAppContext) {
     let f = fixture();
     let mut app = open(cx, Some(&f.repo));
-    app.start_blocked(Intent::Fetch, &f);
+    app.draw();
+    app.click("toolbar:fetch");
+    app.wait_until_blocked(&f);
 
     app.close();
     // Seen red: treating every Network Job as a push asks here.

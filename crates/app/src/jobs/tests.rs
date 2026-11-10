@@ -46,25 +46,6 @@ fn open_on_main<'a>(cx: &'a mut TestAppContext, repo: &Path) -> App<'a> {
     app
 }
 
-impl App<'_> {
-    fn banner(&mut self) -> Option<Banner> {
-        self.workspace
-            .read_with(self.cx, |workspace, cx| workspace.jobs.read(cx).banner())
-    }
-
-    /// The kind and state of every Job the window has seen, oldest first.
-    fn jobs_seen(&mut self) -> Vec<(JobKind, JobState)> {
-        self.workspace.read_with(self.cx, |workspace, cx| {
-            workspace
-                .jobs
-                .read(cx)
-                .seen()
-                .map(|job| (job.kind.clone(), job.state.clone()))
-                .collect()
-        })
-    }
-}
-
 fn switch(branch: &str) -> JobKind {
     JobKind::Switch {
         branch: branch.to_owned(),

@@ -6,6 +6,7 @@
 //! bridge. `RUST_LOG` filters the `tracing` output (default `info`).
 
 mod bridge;
+mod fetch;
 #[cfg(debug_assertions)]
 mod frame_overlay;
 mod jobs;
@@ -31,7 +32,7 @@ use gpui::{
 };
 
 use bridge::Bridge;
-use jobs::{JobsView, StashAndSwitch};
+use jobs::{JobsView, StashAndSwitch, StopJob};
 use quit::QuitView;
 use recent::{OpenRecent, Place, RecentRepos, RecentView};
 use refs_view::{RefsView, SwitchTo};
@@ -46,9 +47,13 @@ struct Workspace {
     recent: Entity<RecentView>,
     /// An Open has been sent. Until then, the window shows the empty state.
     opened: bool,
+    /// Holds focus when nothing inside the window does, so that the window's shortcuts
+    /// still reach it: with nothing focused, GPUI dispatches keys to no element.
+    focus: gpui::FocusHandle,
     _bridge: Entity<Bridge>,
     _switch_to: gpui::Subscription,
     _stash_and_switch: gpui::Subscription,
+    _stop_job: gpui::Subscription,
     _open_recent: gpui::Subscription,
     #[cfg(debug_assertions)]
     frame_clock: Option<std::rc::Rc<frame_overlay::FrameClock>>,
@@ -83,6 +88,9 @@ impl Workspace {
         let stash_and_switch = cx.subscribe(&jobs, |workspace, _, StashAndSwitch(intent), _| {
             workspace.service.send(intent.clone());
         });
+        let stop_job = cx.subscribe(&jobs, |workspace, _, StopJob(id), _| {
+            workspace.service.send(Intent::Stop(*id));
+        });
         // The window stays open until the Repo service says it has quit, and the bridge then
         // exits the app. Deferred, so that a question isn't asked inside the platform's callback.
         window.on_window_should_close(cx, {
@@ -110,6 +118,8 @@ impl Workspace {
                 cx,
             )
         });
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
         let opened = path.is_some();
         if let Some(path) = path {
             service.send(Intent::Open(path));
@@ -124,9 +134,11 @@ impl Workspace {
             jobs,
             recent,
             opened,
+            focus,
             _bridge: bridge,
             _switch_to: switch_to,
             _stash_and_switch: stash_and_switch,
+            _stop_job: stop_job,
             _open_recent: open_recent,
             #[cfg(debug_assertions)]
             frame_clock: frame_overlay::FrameClock::enabled().then(Default::default),
@@ -150,6 +162,15 @@ impl Workspace {
             }
         })
         .detach();
+    }
+
+    /// Fetches every remote, while a repository is open and no fetch is queued or running.
+    fn fetch(&mut self, cx: &mut Context<Self>) {
+        if !self.opened || self.jobs.read(cx).fetching() {
+            return;
+        }
+        self.jobs.update(cx, |jobs, _| jobs.record_fetch_sent());
+        self.service.send(Intent::Fetch);
     }
 
     /// Opens the repository at `path`. It joins the recent list only once it has opened.
@@ -204,7 +225,11 @@ impl Render for Workspace {
                     } else {
                         "Open Recent ▾"
                     }),
-            );
+            )
+            .child(fetch::button(
+                self.opened,
+                cx.listener(|this, _, _, cx| this.fetch(cx)),
+            ));
         let content = if self.opened {
             div()
                 .flex_1()
@@ -240,6 +265,8 @@ impl Render for Workspace {
         };
         #[allow(unused_mut)]
         let mut root = div()
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &fetch::Fetch, _, cx| this.fetch(cx)))
             .size_full()
             .relative()
             .flex()
@@ -311,6 +338,7 @@ fn main() {
         #[cfg(feature = "measure")]
         measure::mark(cairn_budget::probe::Mark::Launched);
         gpui_component::init(cx);
+        fetch::bind_keys(cx);
         gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(900.), px(700.)), cx)),
