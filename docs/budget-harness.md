@@ -34,6 +34,7 @@ The machine, OS, git version and path, Rust version, Cairn's commit (and whether
 - **Statistic:** latency passes at p95 by nearest rank, over at least 20 samples per run, worst of three runs, with the worst sample recorded. Launch passes on its row's own statistic, median and none over, in each run. Its p95 is recorded too.
 - **Warm cache:** each run throws away three samples first, and each Launch run one launch: warm means the binary has run since boot. Opens with a cold file cache are recorded only, and this doesn't measure them.
 - **Real Cairn:** a release build of the real binary, with the `measure` feature, which `scripts/budget.sh` turns on and no shipped build has. A debug build is refused. Each run is a new process.
+- **The switch:** the two branches differ in one tracked file, `budget-dir/tracked.txt`, beside an untracked `budget-dir/keep` that the sandbox keeps on both. Untracked lists `budget-dir/` on one branch and `budget-dir/keep` on the other, so the switch flips it through the index alone, and `.gitignore` is the same on both branches. A `.gitignore` change would make Untracked read everything, which is not what a switch costs (#54).
 - **Fixtures:** samples run in a throwaway clone, so the fixtures stay untouched. A Budget's named fixture is checked, and never replaced by another: the run stops if it's missing, or if the kernel has no commit-graph.
 - **git:** an empty user and system config, for the harness and Cairn, as in the tests, so that a machine's `core.fsmonitor` can't change a number.
 

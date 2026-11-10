@@ -223,9 +223,10 @@ fn classify_path(
         // In a linked worktree's common dir these belong to the main worktree, and each
         // linked worktree's own dir sits under `worktrees/`, which matches nothing below.
         ("HEAD" | "index" | "FETCH_HEAD", None) if dir == Dir::Common => None,
-        // HEAD moving changes what the index is compared with.
-        ("HEAD", None) => Some(Refresh::RefsAndStatus),
-        ("index", None) => Some(Refresh::Status),
+        // HEAD moving changes what the index is compared with. Unstaged and Untracked read only
+        // what the index changed, if anything (#54).
+        ("HEAD", None) => Some(Refresh::RefsAndIndex(Touched::default())),
+        ("index", None) => Some(Refresh::Index(Touched::default())),
         ("packed-refs" | "FETCH_HEAD", None) => Some(Refresh::Refs),
         // Stashes are listed from the stash reflog, which `git stash drop` rewrites alone.
         ("logs", Some(refs)) if refs == "refs" && parts.next().is_some_and(|p| p == "stash") => {
@@ -236,7 +237,7 @@ fn classify_path(
         ("info", Some(exclude)) if exclude == "exclude" => Some(Refresh::Status),
         ("config", None) => Some(Refresh::RefsAndStatus),
         // A local branch may be the one HEAD names, as after `git reset --soft`.
-        ("refs", Some(kind)) if kind == "heads" => Some(Refresh::RefsAndStatus),
+        ("refs", Some(kind)) if kind == "heads" => Some(Refresh::RefsAndIndex(Touched::default())),
         ("refs", Some(_)) => Some(Refresh::Refs),
         // objects/, the other logs, hooks/ and the rest change nothing shown.
         _ => None,

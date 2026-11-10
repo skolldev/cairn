@@ -23,8 +23,9 @@ pub use cairn_core::{ChangeKind, FileChange, Head, Oid, RefEntry, RefName, Refs,
 use cairn_write::{StartGate, Stop};
 use scheduler::{JobContext, JobQueue, Lane, Qos, Running, Slot};
 
-/// Interactive lane workers. Enough for the Read Jobs one click starts to run side by side.
-const INTERACTIVE_THREADS: usize = 2;
+/// Interactive lane workers. Enough for the Read Jobs one click or one `git switch` starts to
+/// run side by side: Refs, Staged, Unstaged and Untracked (#54).
+const INTERACTIVE_THREADS: usize = 4;
 /// Background lane workers. One history walk at a time is all it has to run so far.
 const BACKGROUND_THREADS: usize = 1;
 
@@ -615,6 +616,19 @@ enum Refresh {
     /// Files in the worktree changed, and nothing in git's own directories did. HEAD vs index
     /// can't change, so only Unstaged and Untracked are read, narrowed to these files.
     Worktree(Touched),
+    /// The index or HEAD changed, and maybe these files. Staged is read in full, and Unstaged
+    /// and Untracked only for these files and the entries the index changed (#54).
+    Index(Touched),
+    /// [`Refs`](Refresh::Refs) and [`Index`](Refresh::Index).
+    RefsAndIndex(Touched),
+}
+
+/// How far a [`Refresh`] reads status, from least to most.
+enum StatusRead {
+    None,
+    Worktree(Touched),
+    Index(Touched),
+    Full,
 }
 
 /// Worktree files an External change touched.
@@ -634,22 +648,47 @@ impl Refresh {
             Refresh::Status => "status",
             Refresh::RefsAndStatus => "refs_and_status",
             Refresh::Worktree(_) => "worktree",
+            Refresh::Index(_) => "index",
+            Refresh::RefsAndIndex(_) => "refs_and_index",
+        }
+    }
+
+    /// Whether it reads refs, and how far it reads status.
+    fn parts(self) -> (bool, StatusRead) {
+        match self {
+            Refresh::Refs => (true, StatusRead::None),
+            Refresh::Status => (false, StatusRead::Full),
+            Refresh::RefsAndStatus => (true, StatusRead::Full),
+            Refresh::Worktree(t) => (false, StatusRead::Worktree(t)),
+            Refresh::Index(t) => (false, StatusRead::Index(t)),
+            Refresh::RefsAndIndex(t) => (true, StatusRead::Index(t)),
         }
     }
 
     /// Everything either refreshes.
     fn union(self, other: Self) -> Self {
-        match (self, other) {
-            (Refresh::Worktree(mut a), Refresh::Worktree(b)) => {
-                a.paths.extend(b.paths);
-                a.excludes |= b.excludes;
-                Refresh::Worktree(a)
-            }
-            (Refresh::Worktree(_), Refresh::Status) | (Refresh::Status, Refresh::Worktree(_)) => {
-                Refresh::Status
-            }
-            (a, b) if a == b => a,
-            _ => Refresh::RefsAndStatus,
+        let ((refs_a, a), (refs_b, b)) = (self.parts(), other.parts());
+        let both = |mut a: Touched, b: Touched| {
+            a.paths.extend(b.paths);
+            a.excludes |= b.excludes;
+            a
+        };
+        let status = match (a, b) {
+            (StatusRead::Full, _) | (_, StatusRead::Full) => StatusRead::Full,
+            (StatusRead::None, x) | (x, StatusRead::None) => x,
+            (StatusRead::Worktree(a), StatusRead::Worktree(b)) => StatusRead::Worktree(both(a, b)),
+            (StatusRead::Index(a) | StatusRead::Worktree(a), StatusRead::Index(b))
+            | (StatusRead::Index(a), StatusRead::Worktree(b)) => StatusRead::Index(both(a, b)),
+        };
+        match (refs_a || refs_b, status) {
+            (true, StatusRead::None) => Refresh::Refs,
+            (false, StatusRead::Full) => Refresh::Status,
+            (true, StatusRead::Full) => Refresh::RefsAndStatus,
+            (false, StatusRead::Worktree(t)) => Refresh::Worktree(t),
+            (false, StatusRead::Index(t)) => Refresh::Index(t),
+            // Nothing reads refs and only the worktree, so this reads Staged too.
+            (true, StatusRead::Worktree(t) | StatusRead::Index(t)) => Refresh::RefsAndIndex(t),
+            (false, StatusRead::None) => unreachable!("every Refresh reads something"),
         }
     }
 }
@@ -690,6 +729,11 @@ impl Reads {
                 Refresh::Refs => self.refresh_refs(path, asked),
                 Refresh::Status => self.refresh_status(path, asked),
                 Refresh::Worktree(touched) => self.refresh_worktree(path, touched, asked),
+                Refresh::Index(touched) => self.refresh_index(path, touched, asked),
+                Refresh::RefsAndIndex(touched) => {
+                    self.refresh_refs(path, asked);
+                    self.refresh_index(path, touched, asked);
+                }
             }
         } else {
             tracing::debug!(path = %path.display(), "repository no longer open; refresh skipped");
@@ -732,6 +776,17 @@ impl Reads {
             self.untracked_narrowed.everything();
         }
         self.submit_unstaged_and_untracked(path, asked);
+    }
+
+    /// Reads Staged again in full, and Unstaged and Untracked narrowed to the files an
+    /// External change touched and the entries the index changed.
+    fn refresh_index(&self, path: &Path, touched: Touched, asked: Asked) {
+        self.submit(&self.staged_slot, path, asked, read_staged, |p| {
+            &mut p.staged
+        });
+        self.unstaged_narrowed.index();
+        self.untracked_narrowed.index();
+        self.refresh_worktree(path, touched, asked);
     }
 
     fn submit_unstaged_and_untracked(&self, path: &Path, asked: Asked) {
@@ -835,32 +890,49 @@ fn read_untracked(
 ) -> Result<Vec<RepoPath>, String> {
     let (scope, reading) = narrowed.begin(path);
     let within = match scope {
-        narrow::Scope::Unchanged(last) => {
+        narrow::Scope::Unchanged { last, index } => {
             record_scope(Some(0));
             let result = Ok(last);
-            reading.finish(&result);
+            reading.finish(&result, Some(index));
             return result;
         }
         narrow::Scope::Everything => None,
-        narrow::Scope::Paths { last, paths } => Some((last, paths)),
+        narrow::Scope::Paths {
+            last,
+            before,
+            paths,
+        } => Some((last, before, paths)),
     };
     let mut changed_only = None;
+    let mut read_against = None;
     let result = mode.read(path, job, fallback::untracked, || {
-        let repo = cairn_read::Repo::open(path).map_err(|e| e.message().to_owned())?;
-        let read = match &within {
-            None => repo.untracked(job.gix_interrupt()),
-            Some((last, paths)) => {
+        let message = |e: cairn_read::ReadError| e.message().to_owned();
+        let repo = cairn_read::Repo::open(path).map_err(message)?;
+        // Loaded after the read took its changes: an index write after this lands in the next
+        // read's changes. The walk reads against this same load.
+        let index = repo.index().map_err(message)?;
+        let narrowed_to = within.and_then(|(last, before, paths)| {
+            let tracked = index.changes_since(&before).tracked;
+            narrow::paths_with(paths, tracked).map(|paths| (last, before, paths))
+        });
+        let read = match &narrowed_to {
+            None => repo.untracked_in(&index, job.gix_interrupt()),
+            Some((last, before, paths)) => {
                 let changed: Vec<&[u8]> = paths.iter().map(Vec::as_slice).collect();
-                let read = repo.untracked_within(job.gix_interrupt(), last, &changed);
+                let read =
+                    repo.untracked_within(job.gix_interrupt(), &index, before, last, &changed);
                 // Only gix narrows: the fallback, after a failure here too, reads everything.
                 changed_only = read.is_ok().then_some(paths.len());
                 read
             }
         };
-        read.map_err(|e| e.message().to_owned())
+        if read.is_ok() {
+            read_against = Some(index);
+        }
+        read.map_err(message)
     });
     record_scope(changed_only);
-    reading.finish(&result);
+    reading.finish(&result, read_against);
     result
 }
 
@@ -874,22 +946,48 @@ fn read_unstaged(
     narrowed: &narrow::Narrowed<FileChange>,
 ) -> Result<Vec<FileChange>, String> {
     let (scope, reading) = narrowed.begin(path);
-    let result = match scope {
-        narrow::Scope::Everything => {
+    if let narrow::Scope::Unchanged { last, index } = scope {
+        record_scope(Some(0));
+        let result = Ok(last);
+        reading.finish(&result, Some(index));
+        return result;
+    }
+    // Loaded after the read took its changes and before `diff-files` reads the index, so an
+    // index write after this always lands in the next read's changes. Without it the next
+    // read reads everything.
+    let index = cairn_read::Repo::open(path)
+        .and_then(|repo| repo.index())
+        .inspect_err(|e| tracing::debug!(error = %e, "couldn't load the index"))
+        .ok();
+    let narrowed_to = match (scope, &index) {
+        (
+            narrow::Scope::Paths {
+                last,
+                before,
+                paths,
+            },
+            Some(index),
+        ) => narrow::paths_with(paths, index.changes_since(&before).entries)
+            .map(|paths| (last, paths)),
+        _ => None,
+    };
+    let result = match narrowed_to {
+        None => {
             record_scope(None);
             status::unstaged(path, job.cli_stop())
         }
-        narrow::Scope::Unchanged(last) => {
+        // The index changed no entry, as when HEAD moved alone, and no worktree path changed.
+        Some((last, paths)) if paths.is_empty() => {
             record_scope(Some(0));
             Ok(last)
         }
-        narrow::Scope::Paths { last, paths } => {
+        Some((last, paths)) => {
             record_scope(Some(paths.len()));
             let paths: Vec<&[u8]> = paths.iter().map(Vec::as_slice).collect();
             status::unstaged_within(path, job.cli_stop(), &last, &paths)
         }
     };
-    reading.finish(&result);
+    reading.finish(&result, index);
     result
 }
 

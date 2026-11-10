@@ -9,9 +9,16 @@ pub const BRANCH_A: &str = "budget-a";
 pub const BRANCH_B: &str = "budget-b";
 /// A tracked file that a save changes.
 pub const SAVED: &str = "budget-saved.txt";
-/// A file in the worktree, untracked on [`BRANCH_A`] and ignored on [`BRANCH_B`]. A switch leaves
-/// the Staged and Unstaged lists as they were, so this is what shows that status caught up.
-pub const KEEP: &str = "budget.keep";
+/// An untracked file in the worktree on both branches. [`BRANCH_B`] tracks [`TRACKED`] beside it,
+/// so Untracked lists it as [`KEEP_DIR`] on [`BRANCH_A`] and as itself on [`BRANCH_B`]. A switch
+/// leaves the Staged and Unstaged lists as they were, so this is what shows that status caught
+/// up. It changes through the index alone: `.gitignore` is the same on both branches, because a
+/// `.gitignore` change makes Untracked read everything (#54).
+pub const KEEP: &str = "budget-dir/keep";
+/// How Untracked lists [`KEEP`] where nothing beside it is tracked.
+pub const KEEP_DIR: &str = "budget-dir/";
+/// The file [`BRANCH_B`] tracks beside [`KEEP`].
+pub const TRACKED: &str = "budget-dir/tracked.txt";
 
 const SAVED_CLEAN: &str = "as committed\n";
 const SAVED_DIRTY: &str = "as committed\nand changed by a save\n";
@@ -71,20 +78,16 @@ impl Sandbox {
         )?;
 
         local_write(&repo, ["switch", "--quiet", "-c", BRANCH_B])?;
-        let ignore = repo.join(".gitignore");
-        let mut ignored = std::fs::read_to_string(&ignore).unwrap_or_default();
-        if !ignored.is_empty() && !ignored.ends_with('\n') {
-            ignored.push('\n');
-        }
-        ignored.push_str(&format!("/{KEEP}\n"));
-        std::fs::write(&ignore, ignored).map_err(|e| e.to_string())?;
-        local_write(&repo, ["add", "--", ".gitignore"])?;
+        std::fs::create_dir(repo.join(KEEP_DIR)).map_err(|e| e.to_string())?;
+        std::fs::write(repo.join(TRACKED), "tracked\n").map_err(|e| e.to_string())?;
+        local_write(&repo, ["add", "--", TRACKED])?;
         local_write(
             &repo,
             ["commit", "--quiet", "--no-verify", "-m", "budget: b"],
         )?;
 
         local_write(&repo, ["switch", "--quiet", BRANCH_A])?;
+        std::fs::create_dir_all(repo.join(KEEP_DIR)).map_err(|e| e.to_string())?;
         std::fs::write(repo.join(KEEP), "kept\n").map_err(|e| e.to_string())?;
         Ok(Self {
             _dir: dir,
@@ -95,6 +98,11 @@ impl Sandbox {
 
     pub fn repo(&self) -> &Path {
         &self.repo
+    }
+
+    /// The entry Untracked lists for [`KEEP`] once `branch` is checked out.
+    pub fn untracked_on(branch: &str) -> &'static str {
+        if branch == BRANCH_B { KEEP } else { KEEP_DIR }
     }
 
     /// The commit the fixture itself was at.
