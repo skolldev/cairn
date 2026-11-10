@@ -950,6 +950,19 @@ fn read_unstaged(
     narrowed: &narrow::Narrowed<FileChange>,
 ) -> Result<Vec<FileChange>, String> {
     let (scope, reading) = narrowed.begin(path);
+    // Loaded after the read took its changes and before `diff-files` reads the index, so an
+    // index write after this always lands in the next read's changes. Without it the next
+    // read reads everything.
+    let load = || {
+        let index = cairn_read::Repo::open(path)
+            .and_then(|repo| repo.index())
+            .inspect_err(|e| tracing::debug!(error = %e, "couldn't load the index"))
+            .ok();
+        if index.is_some() {
+            record_index(IndexUse::Loaded);
+        }
+        index
+    };
     let (index, narrowed_to) = match scope {
         narrow::Scope::Unchanged { last, index } => {
             record_scope(Some(0));
@@ -971,32 +984,20 @@ fn read_unstaged(
             record_index(IndexUse::Kept);
             (Some(before), Some((last, paths)))
         }
-        scope => {
-            // Loaded after the read took its changes and before `diff-files` reads the index,
-            // so an index write after this always lands in the next read's changes. Without it
-            // the next read reads everything.
-            let index = cairn_read::Repo::open(path)
-                .and_then(|repo| repo.index())
-                .inspect_err(|e| tracing::debug!(error = %e, "couldn't load the index"))
-                .ok();
-            if index.is_some() {
-                record_index(IndexUse::Loaded);
-            }
-            let narrowed_to = match (scope, &index) {
-                (
-                    narrow::Scope::Paths {
-                        last,
-                        before,
-                        paths,
-                        ..
-                    },
-                    Some(index),
-                ) => narrow::paths_with(paths, index.changes_since(&before).entries)
-                    .map(|paths| (last, paths)),
-                _ => None,
-            };
+        narrow::Scope::Paths {
+            last,
+            before,
+            paths,
+            index_changed: true,
+        } => {
+            let index = load();
+            let narrowed_to = index.as_ref().and_then(|index| {
+                narrow::paths_with(paths, index.changes_since(&before).entries)
+                    .map(|paths| (last, paths))
+            });
             (index, narrowed_to)
         }
+        narrow::Scope::Everything => (load(), None),
     };
     let result = match narrowed_to {
         None => {
