@@ -11,10 +11,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use cairn_repo::{Head, Intent, Oid, RefsSnapshot, Snapshot};
-use common::{
-    Harness, Release, Seen, SlowRemote, git, install_slow_clean_filter, open, rev_list_order,
-    slow_remote, wait_for_file,
-};
+use common::{Harness, Release, Seen, SlowRemote, git, open, rev_list_order, slow_remote};
 
 /// A repository whose next walk blocks in the slow remote until `release` exists. The ref
 /// `refs/held/walk` points at a local tag of a commit only the remote has, and the repository
@@ -83,38 +80,89 @@ fn on_branch(refs: &RefsSnapshot, branch: &str) -> bool {
     })
 }
 
-/// Both Interactive workers would be needed to fail this: one Read Job held in a clean filter
-/// takes the first, and a Read Job that strayed from the Background lane would take the second.
-/// An Interactive read must still answer, with the walk still blocked.
+/// Installs a `core.fsmonitor` hook that, once `armed` exists, logs each run to `log` and
+/// blocks until `release` exists. Then it answers that anything may have changed, so git checks
+/// everything as it would without a hook.
+///
+/// Read-only git runs the hook only once the index carries the fsmonitor extension, which this
+/// writes. Then every `diff-files`, `diff-index --cached` and `status` runs it once, and the
+/// commands a CLI refs read runs (`for-each-ref`, `symbolic-ref`, `rev-parse`, `stash list`)
+/// and `git branch` never do. Checked on git 2.37.0 and 2.39.3.
+fn install_blocking_fsmonitor(
+    repo: &Path,
+    scratch: &Path,
+    armed: &Path,
+    log: &Path,
+    release: &Path,
+) {
+    let hook = scratch.join("fsmonitor.sh");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nif [ -d '{armed}' ]; then\necho run >> '{log}'\n{wait}fi\nprintf 'token\\0/\\0'\n",
+            armed = common::slash(armed),
+            log = common::slash(log),
+            wait = common::wait_for_release(release),
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(repo, &["config", "core.fsmonitor", &common::slash(&hook)]);
+    git(repo, &["update-index", "--fsmonitor"]);
+}
+
+/// Waits until `log` shows `runs` runs of a hook, each a git that is now blocked in it.
+fn wait_for_runs(log: &Path, runs: usize, what: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while wrapper_runs(log) < runs {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what}: {} of {runs} runs",
+            wrapper_runs(log)
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Every Interactive worker would be needed to fail this: three Read Jobs held in an fsmonitor
+/// hook take three of the four, and a Read Job that strayed from the Background lane would take
+/// the last. An Interactive read must still answer, with the walk still blocked.
+///
+/// The repository is a partial clone, so every read runs the git CLI: Staged, Unstaged and
+/// Untracked (`git status`) all read the index, and a refs read never does.
 #[test]
-fn a_long_walk_doesnt_delay_an_interactive_read_even_with_a_worker_already_busy() {
+fn a_long_walk_doesnt_delay_an_interactive_read_even_with_the_other_workers_busy() {
     let f = held_walk();
     common::assert_filesystem_events_available(&f.repo);
-    let filter_started = f.dir.path().join("filter-started");
-    let filter_release = f.dir.path().join("filter-release");
+    let armed = f.dir.path().join("fsmonitor-armed");
+    let hook_log = f.dir.path().join("fsmonitor.log");
+    let hook_release = f.dir.path().join("fsmonitor-release");
+    install_blocking_fsmonitor(&f.repo, f.dir.path(), &armed, &hook_log, &hook_release);
     let harness = Harness::start();
     let _release_walk = Release(&f.release);
-    let _release_filter = Release(&filter_release);
+    let _release_hook = Release(&hook_release);
     open(&harness, &f.repo);
 
     let walk = harness.service.walk_history();
     wait_for_wrapper_runs(&f.log, 1);
 
-    // Only the first read to run the filter blocks. Status and Unstaged can both run it at once.
-    install_slow_clean_filter(
-        &f.repo,
-        f.dir.path(),
-        &common::block_first_run(&filter_started, &filter_release),
+    // `info/exclude` reads Staged, Unstaged and Untracked again in full, and each blocks.
+    std::fs::create_dir(&armed).unwrap();
+    std::fs::write(f.repo.join(".git/info/exclude"), "wake-the-watcher\n").unwrap();
+    wait_for_runs(
+        &hook_log,
+        3,
+        "Staged, Unstaged and Untracked held in the hook",
     );
-    std::fs::write(f.repo.join("wake-the-watcher"), "").unwrap();
-    wait_for_file(&filter_started);
 
     git(&f.repo, &["branch", "made-while-walking"]);
     let mut seen = Seen::default();
-    // Seen red: the refs Slot on the Background lane, which queues this read behind the walk.
-    // The history Slot on the Interactive lane went red too while that lane had 2 workers,
-    // because the walk and the blocked filter left it none. With 4 (#54) that stays green, so
-    // this no longer shows which lane the walk runs on.
+    // Seen red twice: the refs Slot on the Background lane, which queues this read behind the
+    // walk, and the history Slot on the Interactive lane, which leaves it no worker.
     seen.until(&harness, |seen| {
         seen.all.iter().any(|s| match s {
             Snapshot::Refs(r) => on_branch(r, "made-while-walking"),
