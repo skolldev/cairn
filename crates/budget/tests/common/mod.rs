@@ -52,3 +52,16 @@ pub fn git_read(repo: &Path, args: &[&str]) -> String {
     assert!(out.status.success(), "git {args:?}: {}", out.stderr_text());
     String::from_utf8(out.stdout).expect("git output is UTF-8")
 }
+
+/// `git` in `repo`, as a Local write Job runs it, for setup such as `git config`.
+pub fn git_write(repo: &Path, args: &[&str]) {
+    hermetic();
+    let out = cairn_write::Git::shared()
+        .expect("a usable git is installed")
+        .run(
+            &cairn_write::Invocation::new(cairn_write::JobClass::LocalWrite, repo)
+                .args(args.iter().copied()),
+        )
+        .expect("git runs");
+    assert!(out.status.success(), "git {args:?}: {}", out.stderr_text());
+}
