@@ -111,6 +111,21 @@ fn answer(output: Output) -> Result<Option<Output>, String> {
     }
 }
 
+/// The error when both HEAD commands answer "no" (#77). `-q` usually leaves their stderr
+/// empty, so the error says what that means, then adds whatever either did print.
+fn neither_branch_nor_commit(symbolic: &Output, target: &Output) -> String {
+    let mut error = "HEAD names neither a branch nor a commit".to_owned();
+    for output in [symbolic, target] {
+        let stderr = output.stderr_text();
+        let stderr = stderr.trim();
+        if !stderr.is_empty() {
+            error.push('\n');
+            error.push_str(stderr);
+        }
+    }
+    error
+}
+
 fn run(path: &Path, stop: &Stop, args: &[&str]) -> Result<Output, String> {
     run_raw(path, stop, args)?
         .success()
@@ -186,7 +201,7 @@ pub(super) fn refs(path: &Path, stop: &Stop) -> Result<Refs, String> {
     }
     let symbolic = run_raw(path, stop, &["symbolic-ref", "-q", "HEAD"])?;
     let target = run_raw(path, stop, &["rev-parse", "-q", "--verify", "HEAD"])?;
-    let rev_parse_error = target.stderr_text().into_owned();
+    let neither_error = neither_branch_nor_commit(&symbolic, &target);
     let target = answer(target)?
         .map(|target| Oid::from_hex(String::from_utf8_lossy(&target.stdout).trim().to_owned()));
     let head = match (answer(symbolic)?, target) {
@@ -195,7 +210,7 @@ pub(super) fn refs(path: &Path, stop: &Stop) -> Result<Refs, String> {
             target,
         },
         (None, Some(target)) => Head::Detached { target },
-        (None, None) => return Err(rev_parse_error),
+        (None, None) => return Err(neither_error),
     };
     let stash = run(path, stop, &["stash", "list", "--format=%H%x00%gs"])?;
     let stashes = stash

@@ -1,13 +1,20 @@
-//! The CLI Refs read when git fails, rather than answers "no", as it works out HEAD (#61).
+//! The CLI Refs read when git fails, or answers "no" to both questions, as it works out HEAD
+//! (#61, #77).
 //!
 //! No repository on disk makes just one of `symbolic-ref -q HEAD` and `rev-parse -q --verify
 //! HEAD` fail: a config write racing between the two does. So this test binary's git is a
 //! wrapper ahead of the real one on `PATH`. When an argument names a repository holding
 //! `.git/cairn-fail-<subcommand>`, it has the real git include that file, a broken config,
-//! for that subcommand only. It finds the repository by the marker, not by where the runner
-//! puts `-C`.
-//! Real git still fails, with its own exit code and error. Unix only: the wrapper is a shell
-//! script, and Windows resolves a `git.exe`.
+//! for that subcommand only. Real git still fails, with its own exit code and error.
+//!
+//! Nor does any repository make both answer "no": a detached HEAD on a missing object makes
+//! rev-parse succeed, and a malformed `ref:` makes symbolic-ref exit 128 or git reject the
+//! repository. Only a race or a misbehaving git does. So a repository holding
+//! `.git/cairn-no-<subcommand>` has the wrapper answer "no" without running git: exit 1,
+//! printing the marker's contents to stderr (often nothing, as `-q` would).
+//!
+//! The wrapper finds the repository by the marker, not by where the runner puts `-C`. Unix
+//! only: the wrapper is a shell script, and Windows resolves a `git.exe`.
 
 #![cfg(unix)]
 
@@ -32,6 +39,8 @@ for arg; do
     for dir; do
       broken="$dir/.git/cairn-fail-$arg"
       [ -f "$broken" ] && exec git -c include.path="$broken" "$@"
+      no="$dir/.git/cairn-no-$arg"
+      [ -f "$no" ] && { cat "$no" >&2; exit 1; }
     done
     break
     ;;
@@ -100,4 +109,51 @@ fn a_rev_parse_that_fails_publishes_gits_error_not_an_unborn_branch() {
     assert!(control.status.success(), "symbolic-ref still answers");
     let refs = open_refs(&repo);
     assert_eq!(refs.result.as_ref().map(|r| &r.head), Err(&error));
+}
+
+/// A clone that reads refs through git, whose `symbolic-ref` and `rev-parse` both answer "no",
+/// printing `stderr` for each: HEAD names neither a branch nor a commit (#77).
+fn answering_no(stderr: [&str; 2]) -> (tempfile::TempDir, std::path::PathBuf) {
+    wrapped_git();
+    let (dir, repo) = small_fixture_clone();
+    git(&repo, &["config", "core.safecrlf", "true"]);
+    for (subcommand, stderr) in ["symbolic-ref", "rev-parse"].into_iter().zip(stderr) {
+        std::fs::write(
+            repo.join(".git").join(format!("cairn-no-{subcommand}")),
+            stderr,
+        )
+        .unwrap();
+    }
+    for args in [
+        &["symbolic-ref", "-q", "HEAD"][..],
+        &["rev-parse", "-q", "--verify", "HEAD"],
+    ] {
+        let no = git_output(&repo, args);
+        assert_eq!(no.status.code(), Some(1), "git answers no: {args:?}");
+    }
+    (dir, repo)
+}
+
+#[test]
+fn when_both_head_commands_answer_no_the_error_says_head_is_neither_a_branch_nor_a_commit() {
+    let (_dir, repo) = answering_no(["", ""]);
+    let refs = open_refs(&repo);
+    let error = refs.result.as_ref().map(|r| &r.head).unwrap_err();
+    assert!(
+        error.contains("HEAD names neither a branch nor a commit"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn when_both_head_commands_answer_no_the_error_includes_what_each_printed() {
+    let (_dir, repo) = answering_no(["symbolic-ref said this\n", "rev-parse said that\n"]);
+    let refs = open_refs(&repo);
+    let error = refs.result.as_ref().map(|r| &r.head).unwrap_err();
+    assert!(
+        error.contains("HEAD names neither a branch nor a commit"),
+        "{error:?}"
+    );
+    assert!(error.contains("symbolic-ref said this"), "{error:?}");
+    assert!(error.contains("rev-parse said that"), "{error:?}");
 }
