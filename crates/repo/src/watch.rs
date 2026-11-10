@@ -53,7 +53,7 @@ pub(crate) fn start(workdir: &Path, reads: Weak<Reads>) -> Option<Watcher> {
             Err(e) => {
                 // A lost event could hide any change, so read everything again.
                 tracing::warn!(error = %e, "watcher error; refreshing everything");
-                external_change(&reads, &workdir, Refresh::RefsAndStatus);
+                external_change(&reads, &workdir, Refresh::RefsAndStatus, &[]);
                 return;
             }
         };
@@ -70,8 +70,8 @@ pub(crate) fn start(workdir: &Path, reads: Weak<Reads>) -> Option<Watcher> {
             filter.rebuild();
         }
         let skips = |relative: &Path| filter.skips(relative);
-        if let Some(what) = classify(&event, &handler_root, &handler_dirs, skips) {
-            external_change(&reads, &workdir, what);
+        if let Some((what, kept)) = classify(&event, &handler_root, &handler_dirs, skips) {
+            external_change(&reads, &workdir, what, &kept);
         }
     };
     let mut inner = match notify::recommended_watcher(handler) {
@@ -147,26 +147,30 @@ enum Dir {
     Common,
 }
 
-fn external_change(reads: &Reads, workdir: &Path, what: Refresh) {
-    let span = tracing::info_span!("external_change", path = %workdir.display());
+/// `kept` are the event's paths that asked for `what`, as notify reported them: none for a
+/// lost event. The span records them only when a subscriber is installed, so a test can tell
+/// which change started which refresh.
+fn external_change(reads: &Reads, workdir: &Path, what: Refresh, kept: &[&Path]) {
+    let span = tracing::info_span!("external_change", path = %workdir.display(), paths = ?kept);
     let _entered = span.enter();
     reads.refresh_if_open(workdir, what, &span);
 }
 
-/// The Slots one event can change, or `None` for an event that changes nothing Cairn shows.
-/// `skips` says whether a change at a worktree path, relative to `root`, can't change status.
-fn classify(
-    event: &Event,
+/// The Slots one event can change, and the event's paths that can change them, or `None` for
+/// an event that changes nothing Cairn shows. `skips` says whether a change at a worktree
+/// path, relative to `root`, can't change status.
+fn classify<'e>(
+    event: &'e Event,
     root: &Path,
     dirs: &GitDirs,
     mut skips: impl FnMut(&Path) -> bool,
-) -> Option<Refresh> {
+) -> Option<(Refresh, Vec<&'e Path>)> {
     // Reads open files too. Seeing them would make every refresh trigger the next.
     if matches!(event.kind, EventKind::Access(_)) {
         return None;
     }
     if event.need_rescan() {
-        return Some(Refresh::RefsAndStatus);
+        return Some((Refresh::RefsAndStatus, Vec::new()));
     }
     // A directory's own changes, such as the timestamps Windows reports when a read walks
     // it, mean nothing to git: a file added, removed or changed inside reports its own
@@ -175,12 +179,18 @@ fn classify(
         event.kind,
         EventKind::Modify(ModifyKind::Any | ModifyKind::Metadata(_))
     );
-    event
+    let mut kept = Vec::new();
+    let what = event
         .paths
         .iter()
         .filter(|path| !(directory_only && path.is_dir()))
-        .filter_map(|path| classify_path(path, root, dirs, &mut skips))
-        .reduce(Refresh::union)
+        .filter_map(|path| {
+            let what = classify_path(path, root, dirs, &mut skips)?;
+            kept.push(path.as_path());
+            Some(what)
+        })
+        .reduce(Refresh::union)?;
+    Some((what, kept))
 }
 
 fn classify_path(
