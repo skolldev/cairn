@@ -28,7 +28,7 @@ The machine, OS, git version and path, Rust version, Cairn's commit (and whether
 | --- | --- | --- | --- |
 | External change, file saved | just before the harness writes the file | first presented frame listing it in Unstaged, or no longer listing it | Linux kernel (`linux-graph`) |
 | External change, `git switch` | when the `git switch` the harness ran has exited | first presented frame with the new HEAD, the flipped Untracked list and a newer answer from every status Slot | Linux kernel (`linux-graph`) |
-| Intent to UI, Local write Job | just before Cairn sends `Intent::Switch` | as for `git switch` | small (`ripgrep`) |
+| Intent to UI, Local write Job | where a double-click on a branch's row starts the switch, just before the sidebar asks for `Intent::Switch` | as for `git switch` | small (`ripgrep`) |
 | Launch | just before the harness starts the process | the process's first presented frame | small (`ripgrep`), opened from the command line |
 
 - **Statistic:** latency passes at p95 by nearest rank, over at least 20 samples per run, worst of three runs, with the worst sample recorded. Launch passes on its row's own statistic, median and none over, in each run. Its p95 is recorded too.
@@ -48,7 +48,7 @@ The `measure` build's probe writes a line for each painted frame with what the v
 
 - **On macOS, the measured window draws all the time.** In an idle window, and for the first few frames after one, Metal reports a presented time of 0 even for a window on screen, so there is nothing to time. The harness keeps the window drawing. A real window that has been idle also has to wake its display link, up to about one refresh, and this doesn't include it. On Windows the window stays idle, as a real one does.
 - **Launch on macOS is an upper bound,** for the same reason: the first frames report 0, so the first frame with a time can be some frames after the first one shown. It is the same method as the 239 ms in the plan.
-- **The Intent starts where Cairn sends it,** so input latency before it isn't counted. Cairn has no Commit yet, so the Local write Job is a switch.
+- **The Intent starts where a double-click on the branch's row starts it** (`RefsView::switch_to`), so the harness measures the same path as the user's double-click, but not the input latency before it. Cairn has no Commit yet, so the Local write Job is a switch.
 - **External `git switch` starts when git exits,** as the plan's row says, because git's own time on the kernel isn't Cairn's to spend. A frame can reach the screen before that, which counts as 0 ms.
 - **There's no graph yet.** The External change row names the graph too. Nothing shows one until Phase 2, and when it does the expected state has to include it.
 

@@ -7,6 +7,7 @@
 mod bridge;
 #[cfg(debug_assertions)]
 mod frame_overlay;
+mod jobs;
 #[cfg(feature = "measure")]
 mod measure;
 mod quit;
@@ -28,8 +29,9 @@ use gpui::{
 };
 
 use bridge::Bridge;
+use jobs::JobsView;
 use quit::QuitView;
-use refs_view::RefsView;
+use refs_view::{RefsView, SwitchTo};
 use status_view::StatusView;
 
 struct Workspace {
@@ -37,7 +39,9 @@ struct Workspace {
     refs: Entity<RefsView>,
     status: Entity<StatusView>,
     quit: Entity<QuitView>,
+    jobs: Entity<JobsView>,
     _bridge: Entity<Bridge>,
+    _switch_to: gpui::Subscription,
     #[cfg(debug_assertions)]
     frame_clock: Option<std::rc::Rc<frame_overlay::FrameClock>>,
     #[cfg(feature = "measure")]
@@ -59,6 +63,10 @@ impl Workspace {
         let refs = cx.new(|cx| RefsView::new(window, cx));
         let status = cx.new(|_| StatusView::default());
         let quit = cx.new(|_| QuitView::new(service.clone(), exit));
+        let jobs = cx.new(|_| JobsView::default());
+        let switch_to = cx.subscribe(&refs, |workspace, _, SwitchTo(branch), _| {
+            workspace.service.send(Intent::Switch(branch.clone()));
+        });
         // The window stays open until the Repo service says it has quit, and the bridge then
         // exits the app. Deferred, so that a question isn't asked inside the platform's callback.
         window.on_window_should_close(cx, {
@@ -75,9 +83,12 @@ impl Workspace {
             Bridge::new(
                 service.clone(),
                 woken,
-                refs.clone(),
-                status.clone(),
-                quit.clone(),
+                bridge::Views {
+                    refs: refs.clone(),
+                    status: status.clone(),
+                    quit: quit.clone(),
+                    jobs: jobs.clone(),
+                },
                 window,
                 cx,
             )
@@ -90,7 +101,9 @@ impl Workspace {
             refs,
             status,
             quit,
+            jobs,
             _bridge: bridge,
+            _switch_to: switch_to,
             #[cfg(debug_assertions)]
             frame_clock: frame_overlay::FrameClock::enabled().then(Default::default),
             #[cfg(feature = "measure")]
@@ -153,6 +166,7 @@ impl Render for Workspace {
             .text_size(px(13.))
             .child(header)
             .child(self.quit.clone())
+            .child(self.jobs.clone())
             .child(
                 div()
                     .flex_1()

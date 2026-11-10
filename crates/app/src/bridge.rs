@@ -12,6 +12,7 @@ use std::time::Duration;
 use cairn_repo::{Generation, RepoService, Snapshot};
 use gpui::{Context, Entity, Task, Window};
 
+use crate::jobs::JobsView;
 use crate::quit::QuitView;
 use crate::refs_view::RefsView;
 use crate::status_view::StatusView;
@@ -20,11 +21,20 @@ use crate::status_view::StatusView;
 /// long, so a window that is drawing always drains on its frames.
 const FRAMELESS_DRAIN: Duration = Duration::from_millis(100);
 
+/// The entities that show Snapshots.
+pub struct Views {
+    pub refs: Entity<RefsView>,
+    pub status: Entity<StatusView>,
+    pub quit: Entity<QuitView>,
+    pub jobs: Entity<JobsView>,
+}
+
 pub struct Bridge {
     service: Arc<RepoService>,
     refs: Entity<RefsView>,
     status: Entity<StatusView>,
     quit: Entity<QuitView>,
+    jobs: Entity<JobsView>,
     /// The newest generation shown, per Slot. Generations of different Slots are unrelated.
     refs_shown: Option<Generation>,
     staged_shown: Option<Generation>,
@@ -40,9 +50,12 @@ impl Bridge {
     pub fn new(
         service: Arc<RepoService>,
         woken: async_channel::Receiver<()>,
-        refs: Entity<RefsView>,
-        status: Entity<StatusView>,
-        quit: Entity<QuitView>,
+        Views {
+            refs,
+            status,
+            quit,
+            jobs,
+        }: Views,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -62,6 +75,7 @@ impl Bridge {
             refs,
             status,
             quit,
+            jobs,
             refs_shown: None,
             staged_shown: None,
             unstaged_shown: None,
@@ -136,9 +150,11 @@ impl Bridge {
                         });
                     }
                 }
-                // The shell shows Jobs only while a Quit waits on them.
+                // The banner shows the newest Job; a waiting Quit reads them on its own.
                 Snapshot::Job(job) => {
-                    self.quit.update(cx, |view, cx| view.record_job(job, cx));
+                    self.quit
+                        .update(cx, |view, cx| view.record_job(job.clone(), cx));
+                    self.jobs.update(cx, |view, cx| view.record_job(job, cx));
                 }
                 Snapshot::Quit => self.quit.update(cx, |view, cx| view.exit(cx)),
                 Snapshot::Untracked(untracked) => {

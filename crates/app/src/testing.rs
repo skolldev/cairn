@@ -9,7 +9,10 @@ use std::time::{Duration, Instant};
 
 use cairn_repo::Intent;
 use cairn_write::{Git, Invocation, JobClass};
-use gpui::{Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
+use gpui::{
+    Bounds, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, TestAppContext,
+    VisualTestContext,
+};
 
 use crate::Workspace;
 
@@ -124,6 +127,31 @@ impl App<'_> {
             .unwrap_or_else(|| panic!("{selector} isn't drawn"));
         self.cx
             .simulate_click(bounds.center(), Modifiers::default());
+        self.cx.run_until_parked();
+        self.draw();
+    }
+
+    /// Two clicks, as the platform reports a double-click: the second carries a count of 2.
+    pub fn double_click(&mut self, selector: &str) {
+        let position = self
+            .bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} isn't drawn"))
+            .center();
+        for click_count in [1, 2] {
+            self.cx.simulate_event(MouseDownEvent {
+                position,
+                modifiers: Modifiers::default(),
+                button: MouseButton::Left,
+                click_count,
+                first_mouse: false,
+            });
+            self.cx.simulate_event(MouseUpEvent {
+                position,
+                modifiers: Modifiers::default(),
+                button: MouseButton::Left,
+                click_count,
+            });
+        }
         self.cx.run_until_parked();
         self.draw();
     }

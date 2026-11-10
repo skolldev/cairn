@@ -69,6 +69,16 @@ impl Row {
         }
     }
 
+    /// The short name of the local branch it stands for, if it is one.
+    pub fn local_branch(&self) -> Option<String> {
+        match self {
+            Row::Ref { name, .. } if name.as_str().starts_with("refs/heads/") => {
+                Some(name.short().to_owned())
+            }
+            _ => None,
+        }
+    }
+
     /// Whether clicking it opens or closes something.
     pub fn toggles(&self) -> bool {
         matches!(self, Row::Section { .. } | Row::Folder { .. })
@@ -152,6 +162,11 @@ impl Tree {
             ],
             current,
         }
+    }
+
+    /// The branch HEAD is on, if it is on one.
+    pub fn current(&self) -> Option<&RefName> {
+        self.current.as_ref()
     }
 
     /// The rows to draw. `closed` holds the ids of closed sections and folders, and is
