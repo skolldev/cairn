@@ -1,3 +1,5 @@
 /target/
 /scripts/gpui-guard-fixture/target/
 /budget-results/
+/retros/
+/.claude/worktrees/
