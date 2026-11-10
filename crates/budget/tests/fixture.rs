@@ -3,14 +3,17 @@
 
 mod common;
 
-use cairn_budget::fixture::{BRANCH_A, BRANCH_B, KEEP, SAVED, Sandbox};
+use cairn_budget::fixture::{BRANCH_A, BRANCH_B, KEEP, KEEP_DIR, SAVED, Sandbox, TRACKED};
 use common::{git_read, small_fixture};
 
 fn untracked(repo: &std::path::Path) -> Vec<String> {
-    git_read(repo, &["ls-files", "--others", "--exclude-standard"])
-        .lines()
-        .map(str::to_owned)
-        .collect()
+    git_read(
+        repo,
+        &["ls-files", "--others", "--exclude-standard", "--directory"],
+    )
+    .lines()
+    .map(str::to_owned)
+    .collect()
 }
 
 #[test]
@@ -24,19 +27,28 @@ fn switching_branches_flips_the_untracked_list_and_moves_head() {
     );
     assert_eq!(
         untracked(repo),
-        [KEEP],
-        "on {BRANCH_A} the file is untracked"
+        [KEEP_DIR],
+        "on {BRANCH_A} nothing beside the file is tracked"
     );
+    assert_eq!(Sandbox::untracked_on(BRANCH_A), KEEP_DIR);
 
     sandbox.switch(BRANCH_B).unwrap();
     assert_eq!(
         git_read(repo, &["symbolic-ref", "--short", "HEAD"]).trim(),
         BRANCH_B
     );
-    assert!(untracked(repo).is_empty(), "on {BRANCH_B} it is ignored");
+    // Seen red: with BRANCH_B tracking its file outside the directory, here; with it changing
+    // `.gitignore` too, in the diff below.
+    assert_eq!(untracked(repo), [KEEP], "on {BRANCH_B} a file beside it is");
+    assert_eq!(Sandbox::untracked_on(BRANCH_B), KEEP);
+    assert_eq!(
+        git_read(repo, &["diff", "--name-only", BRANCH_A, BRANCH_B]).trim(),
+        TRACKED,
+        "the index flips it, and `.gitignore` is the same on both"
+    );
 
     sandbox.switch(BRANCH_A).unwrap();
-    assert_eq!(untracked(repo), [KEEP], "and back");
+    assert_eq!(untracked(repo), [KEEP_DIR], "and back");
     assert!(
         git_read(repo, &["status", "--porcelain", "--untracked-files=no"]).is_empty(),
         "a switch leaves the worktree clean"

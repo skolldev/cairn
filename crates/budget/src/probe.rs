@@ -181,12 +181,8 @@ pub enum Expect {
     /// A file save: a newer Unstaged lists, or no longer lists, this path.
     Unstaged { path: String, listed: bool },
     /// A branch switch: HEAD is on the branch, every status Slot has answered since the
-    /// baseline, and Untracked shows the flip that switching to this branch causes.
-    Switched {
-        branch: String,
-        untracked: String,
-        listed: bool,
-    },
+    /// baseline, and Untracked lists the entry that switching to this branch flips it to.
+    Switched { branch: String, untracked: String },
 }
 
 impl Expect {
@@ -198,16 +194,12 @@ impl Expect {
             Expect::Unstaged { path, listed } => {
                 frame.unstaged > baseline.unstaged && has(&frame.unstaged_paths, path) == *listed
             }
-            Expect::Switched {
-                branch,
-                untracked,
-                listed,
-            } => {
+            Expect::Switched { branch, untracked } => {
                 frame.head.as_deref() == Some(branch)
                     && frame.staged > baseline.staged
                     && frame.unstaged > baseline.unstaged
                     && frame.untracked > baseline.untracked
-                    && has(&frame.untracked_paths, untracked) == *listed
+                    && has(&frame.untracked_paths, untracked)
             }
         }
     }

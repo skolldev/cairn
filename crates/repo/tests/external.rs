@@ -131,7 +131,8 @@ fn status_matches_git_after_each_kind_of_external_change() {
     }
     wait_for_git(&harness, &repo, &mut shown, "a burst of writes");
 
-    // The index changes too: everything is read again, and still matches.
+    // The index changes too: only the entries it changed are read again (#54), and still
+    // matches.
     git(&repo, &["add", "--", "crates/new.rs", "README.md"]);
     wait_for_git(&harness, &repo, &mut shown, "an index write");
     write(&repo, "crates/new.rs", "changed after staging\n");
@@ -228,4 +229,96 @@ fn a_file_saved_outside_the_service_does_not_read_staged_again() {
         reopened > Some(marker + 1),
         "the index write was read: {reopened:?}"
     );
+}
+
+#[test]
+fn status_matches_git_after_each_kind_of_index_write() {
+    let (_dir, repo) = small_fixture_clone();
+    common::assert_filesystem_events_available(&repo);
+    let commit = |message: &str| git(&repo, &["commit", "-q", "--no-verify", "-am", message]);
+    git(&repo, &["switch", "-q", "-c", "home"]);
+    // A branch that tracks a file in a directory that is all untracked on `home`, as the
+    // Budget harness's switch does.
+    git(&repo, &["switch", "-q", "-c", "side"]);
+    write(&repo, "side-dir/tracked.txt", "tracked\n");
+    git(&repo, &["add", "--", "side-dir/tracked.txt"]);
+    commit("side");
+    // A branch whose README conflicts with `home`'s.
+    git(&repo, &["switch", "-q", "-c", "theirs", "home"]);
+    write(&repo, "README.md", "theirs\n");
+    commit("theirs");
+    git(&repo, &["switch", "-q", "home"]);
+    write(&repo, "README.md", "ours\n");
+    commit("ours");
+    write(&repo, "side-dir/keep", "kept\n");
+
+    let harness = Harness::start();
+    harness.service.send(Intent::Open(repo.clone()));
+    let mut shown = Shown::default();
+    wait_for_git(&harness, &repo, &mut shown, "the Open");
+
+    // Seen red: this passed before index writes were narrowed (#54), so each narrowing was
+    // broken in turn. With Unstaged ignoring the entries the index changed, `git add` goes red.
+    // With Untracked ignoring the paths it tracks or stops tracking, or taking a region's
+    // ancestor by the new index alone, the `git add` in an untracked directory does. With a
+    // tracked file found by the old index alone, the `git rm --cached` of a committed file does.
+    write(&repo, "README.md", "saved outside Cairn\n");
+    wait_for_git(&harness, &repo, &mut shown, "a tracked file saved");
+    git(&repo, &["add", "--", "README.md"]);
+    wait_for_git(&harness, &repo, &mut shown, "git add");
+
+    write(&repo, "fresh/a.txt", "a\n");
+    write(&repo, "fresh/b.txt", "b\n");
+    wait_for_git(&harness, &repo, &mut shown, "an untracked directory");
+    git(&repo, &["add", "--", "fresh/a.txt"]);
+    wait_for_git(
+        &harness,
+        &repo,
+        &mut shown,
+        "git add of a file in an untracked directory",
+    );
+    git(&repo, &["rm", "-q", "--cached", "--", "fresh/a.txt"]);
+    wait_for_git(&harness, &repo, &mut shown, "git rm --cached");
+    git(&repo, &["rm", "-q", "--cached", "--", "COPYING"]);
+    wait_for_git(
+        &harness,
+        &repo,
+        &mut shown,
+        "git rm --cached of a committed file",
+    );
+    git(&repo, &["reset", "-q"]);
+    wait_for_git(&harness, &repo, &mut shown, "git reset");
+
+    git(&repo, &["checkout", "--", "README.md"]);
+    wait_for_git(&harness, &repo, &mut shown, "git checkout of a file");
+    git(&repo, &["switch", "-q", "side"]);
+    wait_for_git(
+        &harness,
+        &repo,
+        &mut shown,
+        "a switch that tracks a file in an untracked directory",
+    );
+    git(&repo, &["switch", "-q", "home"]);
+    wait_for_git(&harness, &repo, &mut shown, "the switch back");
+
+    // A full read listed the conflicted path twice too, `U` then `M`, until Unstaged kept
+    // only the `U` record, as `git status` does.
+    let merge = common::git_output(&repo, &["merge", "--no-edit", "theirs"]);
+    assert!(!merge.status.success(), "the merge conflicts");
+    wait_for_git(&harness, &repo, &mut shown, "a merge with conflicts");
+    git(&repo, &["merge", "--abort"]);
+    wait_for_git(&harness, &repo, &mut shown, "the merge aborted");
+
+    git(&repo, &["symbolic-ref", "HEAD", "refs/heads/unborn"]);
+    wait_for_git(&harness, &repo, &mut shown, "an unborn HEAD");
+    git(&repo, &["rm", "-q", "--cached", "--", "README.md"]);
+    wait_for_git(
+        &harness,
+        &repo,
+        &mut shown,
+        "git rm --cached on an unborn branch",
+    );
+    git(&repo, &["symbolic-ref", "HEAD", "refs/heads/home"]);
+    git(&repo, &["reset", "-q"]);
+    wait_for_git(&harness, &repo, &mut shown, "back on a branch, reset");
 }
