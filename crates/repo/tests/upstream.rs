@@ -10,7 +10,7 @@ use std::sync::Arc;
 use cairn_repo::{Count, CountsSnapshot, Intent, RefEntry, RefName, Refs, Snapshot};
 use common::{
     Harness, Release, SlowRemote, git, git_read, git_runs, open_refs, refs_of, slow_remote,
-    wait_for_wrapper_runs,
+    tag_needing_the_remote, wait_for_wrapper_runs,
 };
 
 /// A repository `copy` cloned from `origin`, whose local branches cover each kind of upstream:
@@ -393,40 +393,17 @@ fn a_refs_refresh_that_moves_no_oid_counts_nothing_and_a_moved_branch_alone_is_r
 }
 
 /// A clone of the small fixture whose branch `held` tracks `refs/held/up` (`branch.held.remote
-/// = .`), which points at a local tag of the commit only the slow remote has. The clone is a
-/// partial clone, so counting `held` makes `git rev-list` fetch that commit to peel the tag,
-/// and blocks in the remote's wrapper until `release` exists. A tag and not a missing parent,
-/// because newer git no longer fetches a parent during a walk (`docs/git-versions.md`), as
-/// `held_walk` in `lanes.rs` found. Outside `refs/heads/`, `refs/remotes/` and `refs/tags/`,
-/// because `%(*objectname)` in a Refs read through git peels every tag it lists, and would
-/// fetch too. Status never peels it.
+/// = .`), a tag that only the slow remote can peel (`tag_needing_the_remote`). Counting `held`
+/// blocks in the remote's wrapper until `release` exists. Refs reads and status never peel it.
 fn held_count() -> SlowRemote {
     let f = slow_remote();
-    git(
-        &f.remote,
-        &["config", "uploadpack.allowAnySHA1InWant", "true"],
-    );
-    git(&f.remote, &["config", "uploadpack.allowFilter", "true"]);
-    let tag = format!(
-        "object {}\ntype commit\ntag held\ntagger Cairn Test <test@cairn.invalid> 1700000000 +0000\n\nneeds the remote\n",
-        f.new
-    );
-    let file = f.dir.path().join("tag-object");
-    std::fs::write(&file, tag).unwrap();
-    let tag = git(
-        &f.repo,
-        &["hash-object", "-t", "tag", "-w", file.to_str().unwrap()],
-    );
-    git(&f.repo, &["update-ref", "refs/held/up", tag.trim()]);
+    tag_needing_the_remote(&f, "refs/held/up");
     git(
         &f.repo,
         &["branch", "--quiet", "--no-track", "held", &f.old],
     );
     git(&f.repo, &["config", "branch.held.remote", "."]);
     git(&f.repo, &["config", "branch.held.merge", "refs/held/up"]);
-    git(&f.repo, &["config", "core.repositoryFormatVersion", "1"]);
-    git(&f.repo, &["config", "extensions.partialClone", "origin"]);
-    git(&f.repo, &["config", "remote.origin.promisor", "true"]);
     f
 }
 
@@ -443,28 +420,19 @@ fn a_count_held_in_git_never_delays_a_refs_snapshot() {
     wait_for_wrapper_runs(&f.log, 1);
 
     // The count is held until `release` exists, so the Refs Snapshot showing this branch
-    // arrives while it is. Not `drain_until`: its Force quit on a timeout would wait for
-    // whatever holds the count, so a failing run would hang. This one releases the count
-    // before it fails.
+    // arrives while it is.
     git(&f.repo, &["branch", "--no-track", "other"]);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let mut seen = Vec::new();
-    while !seen.iter().filter_map(refs_of).any(|r| {
-        r.result.as_ref().is_ok_and(|refs| {
-            refs.local
-                .iter()
-                .any(|b| b.name.as_str() == "refs/heads/other")
+    // Seen red: holding the counter's lock across `git rev-list`, which the Refs read then
+    // waits on.
+    let seen = harness.drain_until_releasing(&f.release, |s| {
+        refs_of(s).is_some_and(|r| {
+            r.result.as_ref().is_ok_and(|refs| {
+                refs.local
+                    .iter()
+                    .any(|b| b.name.as_str() == "refs/heads/other")
+            })
         })
-    }) {
-        if std::time::Instant::now() > deadline {
-            std::fs::write(&f.release, "").unwrap();
-            // Seen red: holding the counter's lock across `git rev-list`, which the Refs read
-            // then waits on.
-            panic!("no Refs Snapshot while a count was held; drained: {seen:?}");
-        }
-        seen.extend(harness.service.drain());
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    });
     assert!(
         counts_run(&f.repo)
             .iter()

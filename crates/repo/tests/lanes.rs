@@ -13,35 +13,15 @@ use std::time::Duration;
 use cairn_repo::{Head, Intent, Oid, RefsSnapshot, Snapshot};
 use common::{
     Harness, Release, Seen, SlowRemote, git, open, rev_list_order, slow_remote,
-    wait_for_wrapper_runs, wrapper_runs,
+    tag_needing_the_remote, wait_for_wrapper_runs, wrapper_runs,
 };
 
 /// A repository whose next walk blocks in the slow remote until `release` exists. The ref
-/// `refs/held/walk` points at a local tag of a commit only the remote has, and the repository
-/// is a partial clone, so `git rev-list --all` fetches the commit to peel the tag. Refs reads
-/// list only branches and tags, so they never touch it. A tag and not a commit's missing parent,
-/// because newer git no longer fetches a parent during a walk (`docs/git-versions.md`).
+/// `refs/held/walk` is a tag that only the slow remote can peel (`tag_needing_the_remote`), and
+/// `git rev-list --all` peels it. Refs reads list only branches and tags, so they never touch it.
 fn held_walk() -> SlowRemote {
     let f = slow_remote();
-    git(
-        &f.remote,
-        &["config", "uploadpack.allowAnySHA1InWant", "true"],
-    );
-    git(&f.remote, &["config", "uploadpack.allowFilter", "true"]);
-    let tag = format!(
-        "object {}\ntype commit\ntag held\ntagger Cairn Test <test@cairn.invalid> 1700000000 +0000\n\nneeds the remote\n",
-        f.new
-    );
-    let file = f.dir.path().join("tag-object");
-    std::fs::write(&file, tag).unwrap();
-    let tag = git(
-        &f.repo,
-        &["hash-object", "-t", "tag", "-w", file.to_str().unwrap()],
-    );
-    git(&f.repo, &["update-ref", "refs/held/walk", tag.trim()]);
-    git(&f.repo, &["config", "core.repositoryFormatVersion", "1"]);
-    git(&f.repo, &["config", "extensions.partialClone", "origin"]);
-    git(&f.repo, &["config", "remote.origin.promisor", "true"]);
+    tag_needing_the_remote(&f, "refs/held/walk");
     f
 }
 
