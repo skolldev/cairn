@@ -6,7 +6,9 @@
 //! `.git/cairn-fail-<subcommand>`, it has the real git include that file, a broken config,
 //! for that subcommand only. It finds the repository by the marker, not by where the runner
 //! puts `-C`.
-//! Real git still fails, with its own exit code and error. Unix only: the wrapper is a shell
+//! A repository holding `.git/cairn-no-<subcommand>` instead has that subcommand answer "no":
+//! exit 1, printing the marker's contents (often nothing, as `-q` would) to stderr.
+//! Otherwise real git still fails, with its own exit code and error. Unix only: the wrapper is a shell
 //! script, and Windows resolves a `git.exe`.
 
 #![cfg(unix)]
@@ -32,6 +34,8 @@ for arg; do
     for dir; do
       broken="$dir/.git/cairn-fail-$arg"
       [ -f "$broken" ] && exec git -c include.path="$broken" "$@"
+      no="$dir/.git/cairn-no-$arg"
+      [ -f "$no" ] && { cat "$no" >&2; exit 1; }
     done
     break
     ;;
@@ -100,4 +104,51 @@ fn a_rev_parse_that_fails_publishes_gits_error_not_an_unborn_branch() {
     assert!(control.status.success(), "symbolic-ref still answers");
     let refs = open_refs(&repo);
     assert_eq!(refs.result.as_ref().map(|r| &r.head), Err(&error));
+}
+
+/// A clone that reads refs through git, whose `symbolic-ref` and `rev-parse` both answer "no",
+/// printing `stderr` for each: HEAD names neither a branch nor a commit (#77).
+fn answering_no(stderr: [&str; 2]) -> (tempfile::TempDir, std::path::PathBuf) {
+    wrapped_git();
+    let (dir, repo) = small_fixture_clone();
+    git(&repo, &["config", "core.safecrlf", "true"]);
+    for (subcommand, stderr) in ["symbolic-ref", "rev-parse"].into_iter().zip(stderr) {
+        std::fs::write(
+            repo.join(".git").join(format!("cairn-no-{subcommand}")),
+            stderr,
+        )
+        .unwrap();
+    }
+    for args in [
+        &["symbolic-ref", "-q", "HEAD"][..],
+        &["rev-parse", "-q", "--verify", "HEAD"],
+    ] {
+        let no = git_output(&repo, args);
+        assert_eq!(no.status.code(), Some(1), "git answers no: {args:?}");
+    }
+    (dir, repo)
+}
+
+#[test]
+fn when_both_head_commands_answer_no_the_error_says_head_is_neither_a_branch_nor_a_commit() {
+    let (_dir, repo) = answering_no(["", ""]);
+    let refs = open_refs(&repo);
+    let error = refs.result.as_ref().map(|r| &r.head).unwrap_err();
+    assert!(
+        error.contains("HEAD names neither a branch nor a commit"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn when_both_head_commands_answer_no_the_error_includes_what_each_printed() {
+    let (_dir, repo) = answering_no(["symbolic-ref said this\n", "rev-parse said that\n"]);
+    let refs = open_refs(&repo);
+    let error = refs.result.as_ref().map(|r| &r.head).unwrap_err();
+    assert!(
+        error.contains("HEAD names neither a branch nor a commit"),
+        "{error:?}"
+    );
+    assert!(error.contains("symbolic-ref said this"), "{error:?}");
+    assert!(error.contains("rev-parse said that"), "{error:?}");
 }
