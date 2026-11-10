@@ -21,6 +21,11 @@ fn hermetic() {
             std::env::set_var("HOME", home.path());
             std::env::set_var("XDG_CONFIG_HOME", home.path().join(".config"));
             std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+            // The runner keeps a user's own askpass (ADR 0008), so a developer's, such as the
+            // `GIT_ASKPASS` VS Code's terminal sets, would change what the tests see.
+            std::env::remove_var("SSH_ASKPASS");
+            std::env::remove_var("SSH_ASKPASS_REQUIRE");
+            std::env::remove_var("GIT_ASKPASS");
         }
         home
     });
@@ -91,18 +96,28 @@ impl Repo {
 /// `release` to exist, or its directory to go. The shell is a child of git, as `upload-pack` or a remote helper
 /// is during a fetch.
 pub fn blocking_alias(release: &Path) -> String {
-    // git runs aliases with its own sh, which takes forward slashes on Windows too.
-    let dir = release
-        .parent()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .replace('\\', "/");
-    let release = release.to_str().unwrap().replace('\\', "/");
+    let dir = forward_slashes(release.parent().unwrap());
+    let release = forward_slashes(release);
     format!(
         "alias.block=!echo waiting >&2; while [ ! -f '{release}' ] && [ -d '{dir}' ]; do sleep 0.05; done; \
          echo released >&2"
     )
+}
+
+/// `path` as git's own sh takes it, which is forward slashes on Windows too.
+pub fn forward_slashes(path: &Path) -> String {
+    path.to_str().unwrap().replace('\\', "/")
+}
+
+/// The `SSH_ASKPASS` named in `env`, output with one `NAME=value` per line.
+pub fn ssh_askpass_in(env: &str) -> Option<&str> {
+    env.lines().find_map(|l| l.strip_prefix("SSH_ASKPASS="))
+}
+
+/// Whether `path` is the `cairn-askpass` this test binary was built with.
+pub fn is_cairns_askpass(path: &str) -> bool {
+    let built = std::fs::canonicalize(env!("CARGO_BIN_EXE_cairn-askpass")).unwrap();
+    std::fs::canonicalize(path).ok() == Some(built)
 }
 
 /// Creates the release file when dropped, so a failing test never leaves a shell waiting.

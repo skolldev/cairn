@@ -145,7 +145,8 @@ fn git_command(program: &Path) -> Command {
 /// run the helper and add a line to git's error. An empty `GIT_ASKPASS` stops that, unless the
 /// user set one. It also stops git asking a `core.askPass` from config (ADR 0008's known gap).
 fn refuse_ssh_prompts(cmd: &mut Command) {
-    let unset = |name| std::env::var_os(name).is_none();
+    // An empty value names no program and no mode, so there is no choice of the user's to keep.
+    let unset = |name| std::env::var_os(name).is_none_or(|value| value.is_empty());
     if unset("SSH_ASKPASS") {
         cmd.env("SSH_ASKPASS", askpass::helper());
     }

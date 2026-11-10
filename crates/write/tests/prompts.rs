@@ -1,20 +1,19 @@
 //! A Job never waits on a Prompt Cairn can't show (ADR 0008).
 //!
 //! Some tests here set variables in this process's environment, which every git the runner
-//! starts inherits. So every test in this file holds [`one_at_a_time`] while git runs.
+//! starts inherits. So every test in this file takes [`one_at_a_time`] first, and holds it
+//! until it has finished with git and the environment.
 
 mod common;
 
-use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use cairn_write::{Invocation, JobClass, RunError, Stop};
-use common::{Repo, git};
+use common::{Repo, forward_slashes, git, is_cairns_askpass, ssh_askpass_in};
 
 /// Far longer than `ssh` takes to refuse a Prompt.
 const HANG: Duration = Duration::from_secs(30);
@@ -24,7 +23,8 @@ fn one_at_a_time() -> MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Sets `vars` in this process's environment until dropped, then removes them again.
+/// Sets `vars` in this process's environment, as a user's shell would, until dropped. The
+/// hermetic config has removed every variable set here, so removing it again restores it.
 struct UserEnv {
     names: Vec<&'static str>,
     _one: MutexGuard<'static, ()>,
@@ -35,8 +35,9 @@ impl UserEnv {
         let one = one_at_a_time();
         git(); // The hermetic config is in place before anything here touches the environment.
         for (name, value) in vars {
-            // SAFETY: every test in this binary holds `one_at_a_time` while git runs, so no
-            // other thread reads the environment meanwhile.
+            // SAFETY: every test in this binary holds `one_at_a_time` from its start, so no
+            // other test thread reads the environment meanwhile. The only threads that
+            // outlive a test are `refusing_http_remote`'s servers, which never read it.
             unsafe { std::env::set_var(name, value) };
         }
         Self {
@@ -55,16 +56,16 @@ impl Drop for UserEnv {
     }
 }
 
-/// What a Network Job did: its exit code, or `None` if it outlasted [`HANG`] and was stopped.
+/// How a Network Job ended: its exit code, or `None` if it outlasted [`HANG`] and was stopped.
 #[derive(Debug)]
-struct Ended {
+struct JobEnd {
     exit: Option<i32>,
     stderr: String,
     took: Duration,
 }
 
 /// Runs `args` as a Network Job in `repo`, stopping it if it outlasts [`HANG`].
-fn network(repo: &Repo, args: &[&str]) -> Ended {
+fn run_network_job(repo: &Repo, args: &[&str]) -> JobEnd {
     let stop = Stop::new();
     let finished = Arc::new(AtomicBool::new(false));
     let watchdog = std::thread::spawn({
@@ -94,69 +95,97 @@ fn network(repo: &Repo, args: &[&str]) -> Ended {
         Err(RunError::Stopped { stderr }) => (None, String::from_utf8_lossy(&stderr).into_owned()),
         Err(other) => panic!("git didn't run: {other}"),
     };
-    Ended { exit, stderr, took }
-}
-
-fn slashes(path: &Path) -> String {
-    path.to_str().unwrap().replace('\\', "/")
+    JobEnd { exit, stderr, took }
 }
 
 /// `program` meeting GitHub's host key for the first time, which it asks whether to trust.
-/// Needs GitHub's port 22. No key is offered: `ssh` stops at the question.
-fn ssh_meeting_an_unknown_host(program: &str, null: &str) -> Ended {
-    let _one = one_at_a_time();
+/// Needs GitHub's port 22. No key is offered: `ssh` stops at the question. The caller holds
+/// [`one_at_a_time`].
+fn ssh_meeting_an_unknown_host(program: &str, null: &str) -> JobEnd {
     let repo = Repo::new();
     let dir = tempfile::tempdir().unwrap();
-    let known_hosts = slashes(&dir.path().join("known_hosts"));
+    let known_hosts = forward_slashes(&dir.path().join("known_hosts"));
     let command = format!(
         "core.sshCommand='{program}' -F {null} -o UserKnownHostsFile='{known_hosts}' \
          -o GlobalKnownHostsFile={null} -o IdentitiesOnly=yes -o IdentityAgent=none \
          -o ConnectTimeout=10 -o StrictHostKeyChecking=ask"
     );
-    let ended = network(
+    run_network_job(
         &repo,
         &["-c", &command, "ls-remote", "git@github.com:git/git.git"],
-    );
-    println!("RESULT {program}: {ended:?}");
-    ended
+    )
 }
 
 #[track_caller]
-fn assert_refused_with_ssh_s_own_words(ended: &Ended) {
+fn assert_refused_with_ssh_s_own_words(end: &JobEnd) {
+    assert!(end.exit.is_some(), "the Job waited on a Prompt: {end:?}");
+    assert!(end.took < Duration::from_secs(15), "{end:?}");
     assert!(
-        ended.exit.is_some(),
-        "the Job waited on a Prompt: {ended:?}"
+        end.stderr.starts_with("Host key verification failed."),
+        "{end:?}"
     );
-    assert!(ended.took < Duration::from_secs(15), "{ended:?}");
+}
+
+#[cfg(windows)]
+const WINDOWS_SSH: &str = "C:/Windows/System32/OpenSSH/ssh.exe";
+
+#[cfg(windows)]
+fn windows_ssh_meeting_an_unknown_host() -> JobEnd {
     assert!(
-        ended.stderr.starts_with("Host key verification failed."),
-        "{ended:?}"
+        std::path::Path::new(WINDOWS_SSH).exists(),
+        "this test needs Windows' OpenSSH client"
     );
+    ssh_meeting_an_unknown_host(WINDOWS_SSH, "NUL")
 }
 
 /// Windows' own `ssh.exe` waited, silently, until stopped (#44).
 #[cfg(windows)]
 #[test]
 fn windows_ssh_refuses_an_unknown_host_instead_of_waiting() {
-    const WINDOWS_SSH: &str = "C:/Windows/System32/OpenSSH/ssh.exe";
-    assert!(
-        Path::new(WINDOWS_SSH).exists(),
-        "this test needs Windows' OpenSSH client"
-    );
-    let ended = ssh_meeting_an_unknown_host(WINDOWS_SSH, "NUL");
-    assert_refused_with_ssh_s_own_words(&ended);
+    let _one = one_at_a_time();
+    let end = windows_ssh_meeting_an_unknown_host();
+    assert_refused_with_ssh_s_own_words(&end);
+}
+
+/// The helper is started from wherever the app is, which on Windows can be a path with spaces
+/// and backslashes. Here it is a copy of `cairn-askpass` at such a path, named the way a user's
+/// own askpass is.
+#[cfg(windows)]
+#[test]
+fn windows_ssh_starts_the_helper_from_a_path_with_spaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let spaced = dir.path().join("Program Files").join("Cairn App");
+    std::fs::create_dir_all(&spaced).unwrap();
+    let helper = spaced.join("cairn askpass.exe");
+    std::fs::copy(env!("CARGO_BIN_EXE_cairn-askpass"), &helper).unwrap();
+    let missing = spaced.join("missing askpass.exe");
+
+    let started = {
+        let _env = UserEnv::set(&[("SSH_ASKPASS", helper.to_str().unwrap())]);
+        windows_ssh_meeting_an_unknown_host()
+    };
+    assert_refused_with_ssh_s_own_words(&started);
+    // Control: an askpass `ssh` can't start reads differently, so the refusal above came from
+    // the helper.
+    let not_started = {
+        let _env = UserEnv::set(&[("SSH_ASKPASS", missing.to_str().unwrap())]);
+        windows_ssh_meeting_an_unknown_host()
+    };
+    assert_ne!(started.stderr, not_started.stderr, "{not_started:?}");
 }
 
 /// The `ssh` git finds by itself: macOS's, or Git for Windows' own. Run from a terminal, it
 /// would ask there and wait.
 #[test]
 fn the_default_ssh_refuses_an_unknown_host_instead_of_waiting() {
-    let ended = ssh_meeting_an_unknown_host("ssh", "/dev/null");
+    let _one = one_at_a_time();
+    let end = ssh_meeting_an_unknown_host("ssh", "/dev/null");
     // Seen red: with `cairn-askpass` answering `yes`, which shows `ssh` asks it.
-    assert_refused_with_ssh_s_own_words(&ended);
+    assert_refused_with_ssh_s_own_words(&end);
 }
 
-/// An `ssh` command that only reports the askpass variables it was given, and exits.
+/// The askpass variables an `ssh` command is given: it reports them, one per line, and exits.
+/// The caller holds [`one_at_a_time`].
 fn askpass_seen_by_ssh() -> String {
     let repo = Repo::new();
     let dir = tempfile::tempdir().unwrap();
@@ -167,12 +196,12 @@ fn askpass_seen_by_ssh() -> String {
          echo \"SSH_ASKPASS_REQUIRE=$SSH_ASKPASS_REQUIRE\" >&2\nexit 1\n",
     )
     .unwrap();
-    let command = format!("core.sshCommand=sh '{}'", slashes(&script));
-    let ended = network(
+    let command = format!("core.sshCommand=sh '{}'", forward_slashes(&script));
+    run_network_job(
         &repo,
         &["-c", &command, "ls-remote", "ssh://git@cairn.invalid/r.git"],
-    );
-    ended.stderr
+    )
+    .stderr
 }
 
 #[test]
@@ -180,9 +209,9 @@ fn a_user_s_own_ssh_askpass_reaches_ssh_unchanged() {
     let _env = UserEnv::set(&[("SSH_ASKPASS", "/the users/own askpass")]);
     let seen = askpass_seen_by_ssh();
     // Seen red: with the runner setting SSH_ASKPASS whatever the user's environment says.
-    assert!(
-        seen.lines()
-            .any(|l| l == "SSH_ASKPASS=/the users/own askpass"),
+    assert_eq!(
+        ssh_askpass_in(&seen),
+        Some("/the users/own askpass"),
         "{seen}"
     );
     assert!(
@@ -201,21 +230,30 @@ fn a_user_s_own_ssh_askpass_require_reaches_ssh_unchanged() {
         seen.lines().any(|l| l == "SSH_ASKPASS_REQUIRE=prefer"),
         "{seen}"
     );
-    let helper = seen
-        .lines()
-        .find_map(|l| l.strip_prefix("SSH_ASKPASS="))
-        .unwrap_or_default();
-    assert!(is_cairns_helper(OsStr::new(helper)), "{seen}");
+    assert!(
+        ssh_askpass_in(&seen).is_some_and(is_cairns_askpass),
+        "{seen}"
+    );
 }
 
-/// Whether `path` is the `cairn-askpass` this test binary was built with.
-fn is_cairns_helper(path: &OsStr) -> bool {
-    let built = Path::new(env!("CARGO_BIN_EXE_cairn-askpass"));
-    std::fs::canonicalize(path).ok() == std::fs::canonicalize(built).ok()
+/// An empty value names no askpass and no mode, so it is no choice to keep.
+#[test]
+fn an_empty_ssh_askpass_or_require_counts_as_unset() {
+    let _env = UserEnv::set(&[("SSH_ASKPASS", ""), ("SSH_ASKPASS_REQUIRE", "")]);
+    let seen = askpass_seen_by_ssh();
+    // Seen red: with the runner keeping an empty value as the user's choice.
+    assert!(
+        ssh_askpass_in(&seen).is_some_and(is_cairns_askpass),
+        "{seen}"
+    );
+    assert!(
+        seen.lines().any(|l| l == "SSH_ASKPASS_REQUIRE=force"),
+        "{seen}"
+    );
 }
 
 /// A server that refuses every request and asks for Basic auth, as a private remote does.
-/// Returns its URL. It ends with the test binary.
+/// Returns its URL. It ends with the test binary, and never reads the environment.
 fn refusing_http_remote() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!(
@@ -242,36 +280,60 @@ fn refusing_http_remote() -> String {
     url
 }
 
-fn ls_remote_over_https(extra: &[&str]) -> Ended {
+/// `ls-remote` against a remote that wants a username, with no credential helper. Plain HTTP:
+/// git asks for credentials over HTTPS through the same prompt. The caller holds
+/// [`one_at_a_time`].
+fn ls_remote_needing_credentials() -> JobEnd {
     let repo = Repo::new();
     let url = refusing_http_remote();
-    let mut args = vec!["-c", "http.proxy=", "-c", "credential.helper="];
-    args.extend_from_slice(extra);
-    args.extend(["ls-remote", url.as_str()]);
-    network(&repo, &args)
+    run_network_job(
+        &repo,
+        &[
+            "-c",
+            "http.proxy=",
+            "-c",
+            "credential.helper=",
+            "ls-remote",
+            &url,
+        ],
+    )
 }
 
 /// git's own username prompt is refused as it always was. git asks `SSH_ASKPASS` when nothing
-/// else is set, and an askpass that fails adds `error: unable to read askpass response`, so an
-/// unchanged error also shows that Cairn's helper wasn't run.
+/// else is set, and an askpass that fails adds a line to git's error (the control below), so
+/// an unchanged error also shows that Cairn's helper wasn't run.
 #[test]
 fn git_s_own_https_prompt_fails_as_before_without_asking_cairn_s_helper() {
     let _one = one_at_a_time();
-    let ended = ls_remote_over_https(&[]);
-    assert_eq!(ended.exit, Some(128), "{ended:?}");
+    let end = ls_remote_needing_credentials();
+    assert_eq!(end.exit, Some(128), "{end:?}");
     // Seen red: with the runner no longer setting GIT_ASKPASS to empty.
     assert!(
-        ended
-            .stderr
+        end.stderr
             .starts_with("fatal: could not read Username for 'http://127.0.0.1:")
-            && ended.stderr.ends_with("': terminal prompts disabled\n"),
-        "{ended:?}"
+            && end.stderr.ends_with("': terminal prompts disabled\n"),
+        "{end:?}"
+    );
+}
+
+/// The control for the test above: when git does ask Cairn's helper, its error says so.
+#[test]
+fn control_git_asking_cairn_s_helper_adds_a_line_to_its_error() {
+    let helper = env!("CARGO_BIN_EXE_cairn-askpass");
+    let _env = UserEnv::set(&[("GIT_ASKPASS", helper)]);
+    let end = ls_remote_needing_credentials();
+    // Seen red: with `cairn-askpass` answering, which git takes as a username.
+    assert!(
+        end.stderr
+            .starts_with("error: unable to read askpass response from "),
+        "{end:?}"
     );
 }
 
 /// A user's own `GIT_ASKPASS` still answers git's prompts.
 #[test]
 fn a_user_s_own_git_askpass_still_answers_git() {
+    let _one = one_at_a_time();
     let dir = tempfile::tempdir().unwrap();
     let askpass = dir.path().join("askpass.sh");
     std::fs::write(&askpass, "#!/bin/sh\necho asked >&2\necho cairn-user\n").unwrap();
@@ -280,10 +342,11 @@ fn a_user_s_own_git_askpass_still_answers_git() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&askpass, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let askpass = slashes(&askpass);
+    let askpass = forward_slashes(&askpass);
+    drop(_one);
     let _env = UserEnv::set(&[("GIT_ASKPASS", askpass.as_str())]);
-    let ended = ls_remote_over_https(&[]);
+    let end = ls_remote_needing_credentials();
     // Seen red: with the runner setting GIT_ASKPASS to empty whatever the user's environment
     // says.
-    assert!(ended.stderr.starts_with("asked\n"), "{ended:?}");
+    assert!(end.stderr.starts_with("asked\n"), "{end:?}");
 }

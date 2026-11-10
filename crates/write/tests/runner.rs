@@ -3,7 +3,7 @@
 mod common;
 
 use cairn_write::{Invocation, JobClass};
-use common::{Repo, git, local_write, ok, read};
+use common::{Repo, git, is_cairns_askpass, local_write, ok, read, ssh_askpass_in};
 
 #[test]
 fn every_call_turns_on_long_paths() {
@@ -35,21 +35,13 @@ fn git_runs_in_the_c_locale_and_never_prompts() {
 #[test]
 fn every_job_class_refuses_prompts_through_cairns_askpass() {
     let repo = Repo::new();
-    let helper = std::fs::canonicalize(env!("CARGO_BIN_EXE_cairn-askpass")).unwrap();
     for class in [JobClass::Read, JobClass::LocalWrite, JobClass::Network] {
         let out = ok(git()
             .run(&Invocation::new(class, &repo.path).args(["-c", "alias.env=!env", "env"]))
             .unwrap());
         let env = String::from_utf8(out.stdout).unwrap();
-        let askpass = env
-            .lines()
-            .find_map(|l| l.strip_prefix("SSH_ASKPASS="))
-            .unwrap_or_else(|| panic!("{class:?} has no SSH_ASKPASS: {env}"));
-        assert_eq!(
-            std::fs::canonicalize(askpass).ok().as_ref(),
-            Some(&helper),
-            "{class:?}"
-        );
+        let askpass = ssh_askpass_in(&env);
+        assert!(askpass.is_some_and(is_cairns_askpass), "{class:?}: {env}");
         assert!(
             env.lines().any(|l| l == "SSH_ASKPASS_REQUIRE=force"),
             "{class:?}: {env}"
