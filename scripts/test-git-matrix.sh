@@ -10,11 +10,12 @@ work="$(mktemp -d)"
 trap 'rm -rf "${work:?}"' EXIT
 mkdir -p "$work/bin"
 
-# oldest-git.sh skips its build when ~/git-<version> already holds that version.
+# oldest-git.sh skips its build when ~/git-<version> already holds that version, built with curl.
 for version in 9.9.8 9.9.9; do
-  mkdir -p "$work/git-$version/bin"
+  mkdir -p "$work/git-$version/bin" "$work/git-$version/libexec/git-core"
   printf '#!/bin/sh\necho "git version %s"\n' "$version" >"$work/git-$version/bin/git"
-  chmod +x "$work/git-$version/bin/git"
+  : >"$work/git-$version/libexec/git-core/git-remote-http"
+  chmod +x "$work/git-$version/bin/git" "$work/git-$version/libexec/git-core/git-remote-http"
 done
 
 cat >"$work/bin/cargo" <<'EOF'

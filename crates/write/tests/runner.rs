@@ -2,7 +2,8 @@
 
 mod common;
 
-use common::{Repo, local_write, ok, read};
+use cairn_write::{Invocation, JobClass};
+use common::{Repo, git, is_cairns_askpass, local_write, ok, read, ssh_askpass_in};
 
 #[test]
 fn every_call_turns_on_long_paths() {
@@ -27,6 +28,27 @@ fn git_runs_in_the_c_locale_and_never_prompts() {
     let env = String::from_utf8(out.stdout).unwrap();
     assert!(env.lines().any(|l| l == "LC_ALL=C"), "{env}");
     assert!(env.lines().any(|l| l == "GIT_TERMINAL_PROMPT=0"), "{env}");
+}
+
+/// Every Job class, not only Network: a Local write can sign a commit through `ssh-keygen`,
+/// which can ask for a passphrase (ADR 0008).
+#[test]
+fn every_job_class_refuses_prompts_through_cairns_askpass() {
+    let repo = Repo::new();
+    for class in [JobClass::Read, JobClass::LocalWrite, JobClass::Network] {
+        let out = ok(git()
+            .run(&Invocation::new(class, &repo.path).args(["-c", "alias.env=!env", "env"]))
+            .unwrap());
+        let env = String::from_utf8(out.stdout).unwrap();
+        let askpass = ssh_askpass_in(&env);
+        assert!(askpass.is_some_and(is_cairns_askpass), "{class:?}: {env}");
+        assert!(
+            env.lines().any(|l| l == "SSH_ASKPASS_REQUIRE=force"),
+            "{class:?}: {env}"
+        );
+        // git falls back to SSH_ASKPASS for its own prompts unless this is set.
+        assert!(env.lines().any(|l| l == "GIT_ASKPASS="), "{class:?}: {env}");
+    }
 }
 
 /// A stat-dirty file makes `git status` want to refresh the index, which it does through

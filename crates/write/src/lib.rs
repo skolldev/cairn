@@ -7,11 +7,14 @@
 //!
 //! Every call runs as `git -C <repo> -c core.longpaths=true --no-pager [--no-optional-locks]
 //! <args>` with `LC_ALL=C` and `GIT_TERMINAL_PROMPT=0`, so output parses the same everywhere
-//! and git never waits on a prompt. Maintenance stays at git's default (#14).
+//! and git never waits on a prompt. `SSH_ASKPASS` names `cairn-askpass` with
+//! `SSH_ASKPASS_REQUIRE=force`, so neither does `ssh` (ADR 0008). Maintenance stays at git's
+//! default (#14).
 //!
 //! A Network or Read invocation can carry a [`Stop`], which kills git and what it started.
 //! A Local write invocation can pass through a [`StartGate`], which keeps it from starting.
 
+mod askpass;
 mod gate;
 mod resolve;
 mod run;
@@ -120,10 +123,11 @@ impl std::error::Error for RunError {
 }
 
 /// A command for `program` with the environment every git spawn gets: C locale, no
-/// terminal prompts, and on Windows no console window.
+/// terminal prompts, every `ssh` Prompt refused (ADR 0008), and on Windows no console window.
 fn git_command(program: &Path) -> Command {
     let mut cmd = Command::new(program);
     cmd.env("LC_ALL", "C").env("GIT_TERMINAL_PROMPT", "0");
+    refuse_ssh_prompts(&mut cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -131,4 +135,25 @@ fn git_command(program: &Path) -> Command {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
+}
+
+/// Sends every `ssh` and `ssh-keygen` Prompt to `cairn-askpass`, which refuses it, so it fails
+/// with the program's own error instead of waiting where nobody can see it. A user's own
+/// askpass, or their own `SSH_ASKPASS_REQUIRE`, is kept: that Prompt is one they chose.
+///
+/// git falls back to `SSH_ASKPASS` for its own username and password prompts, which would
+/// run the helper and add a line to git's error. An empty `GIT_ASKPASS` stops that, unless the
+/// user set one. It also stops git asking a `core.askPass` from config (ADR 0008's known gap).
+fn refuse_ssh_prompts(cmd: &mut Command) {
+    // An empty value names no program and no mode, so there is no choice of the user's to keep.
+    let unset = |name| std::env::var_os(name).is_none_or(|value| value.is_empty());
+    if unset("SSH_ASKPASS") {
+        cmd.env("SSH_ASKPASS", askpass::helper());
+    }
+    if unset("SSH_ASKPASS_REQUIRE") {
+        cmd.env("SSH_ASKPASS_REQUIRE", "force");
+    }
+    if unset("GIT_ASKPASS") {
+        cmd.env("GIT_ASKPASS", "");
+    }
 }

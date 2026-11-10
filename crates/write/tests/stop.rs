@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use cairn_write::{Invocation, JobClass, RunError, Stop};
-use common::{Release, Repo, blocking_alias, git};
+use common::{Release, Repo, blocking_alias, forward_slashes, git};
 
 #[test]
 fn stopping_a_network_invocation_kills_git_and_what_it_started() {
@@ -64,7 +64,7 @@ fn stopping_kills_git_and_what_it_started(class: JobClass) {
 
 /// An alias that creates `marker`, so a test can tell whether git ran.
 fn marking_alias(marker: &Path) -> String {
-    let marker = marker.to_str().unwrap().replace('\\', "/");
+    let marker = forward_slashes(marker);
     format!("alias.mark=!touch '{marker}'")
 }
 
