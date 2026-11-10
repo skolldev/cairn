@@ -105,7 +105,7 @@ impl Bridge {
                 Snapshot::Refs(refs) => {
                     if newer(&mut self.refs_shown, refs.generation, "refs", &refs.span) {
                         self.refs.update(cx, |view, cx| {
-                            view.set_snapshot(refs);
+                            view.set_snapshot(refs, cx);
                             cx.notify();
                         });
                     }

@@ -1,26 +1,88 @@
-//! The refs Snapshot as plain lists: HEAD, local and remote branches, tags and stashes.
+//! The sidebar: the Refs Snapshot as Local, Remotes, Tags and Stashes, with remote groups,
+//! folders for `/` in names, and a filter box on top. Only the visible rows are laid out, so
+//! a repository with thousands of tags stays responsive with every section open.
 
+mod rows;
+#[cfg(test)]
+mod tests;
+
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[cfg(feature = "measure")]
 use cairn_repo::Refs;
-use cairn_repo::{Generation, Head, RefEntry, RefsSnapshot};
+use cairn_repo::{Generation, Head, RefsSnapshot};
 use gpui::{
-    AnyElement, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window, div,
-    prelude::*, px, rgb,
+    AnyElement, Context, ElementId, Entity, FontWeight, IntoElement, ParentElement, Render,
+    SharedString, Styled, Subscription, Window, div, prelude::*, px, rgb, uniform_list,
 };
+use gpui_component::input::{Input, InputEvent, InputState};
+
+use rows::{Row, Tree};
 
 const DIM: u32 = 0x7d8590;
+const CURRENT: u32 = 0x58a6ff;
+const ROW_HEIGHT: f32 = 22.;
+const INDENT: f32 = 14.;
 
-#[derive(Default)]
 pub struct RefsView {
     snapshot: Option<Arc<RefsSnapshot>>,
     shown: Option<Generation>,
+    /// The Snapshot's refs as a tree, or `None` while there are none to show.
+    tree: Option<Tree>,
+    /// The ids of the sections and folders the user closed. The filter leaves it alone, so
+    /// clearing the filter brings back the state from before.
+    closed: HashSet<String>,
+    filter: Entity<InputState>,
+    rows: Vec<Row>,
+    _filter_changed: Subscription,
 }
 
 impl RefsView {
-    pub fn set_snapshot(&mut self, snapshot: Arc<RefsSnapshot>) {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter"));
+        let filter_changed = cx.subscribe(&filter, |view, _, event, cx| {
+            if let InputEvent::Change = event {
+                view.update_rows(cx);
+                cx.notify();
+            }
+        });
+        Self {
+            snapshot: None,
+            shown: None,
+            tree: None,
+            closed: HashSet::new(),
+            filter,
+            rows: Vec::new(),
+            _filter_changed: filter_changed,
+        }
+    }
+
+    pub fn set_snapshot(&mut self, snapshot: Arc<RefsSnapshot>, cx: &mut Context<Self>) {
+        self.tree = snapshot.result.as_ref().ok().map(Tree::new);
         self.snapshot = Some(snapshot);
+        self.update_rows(cx);
+    }
+
+    fn update_rows(&mut self, cx: &mut Context<Self>) {
+        let filter = self.filter.read(cx).value();
+        self.rows = match &self.tree {
+            Some(tree) => tree.rows(&self.closed, filter.trim()),
+            None => Vec::new(),
+        };
+    }
+
+    /// Opens or closes the section or folder `id`. While the filter is set, everything
+    /// leading to a match is open, and a click changes nothing.
+    fn toggle(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.filter.read(cx).value().trim().is_empty() {
+            return;
+        }
+        if !self.closed.remove(id) {
+            self.closed.insert(id.to_owned());
+        }
+        self.update_rows(cx);
+        cx.notify();
     }
 
     /// Tells the Budget harness what this view shows.
@@ -41,18 +103,17 @@ impl RefsView {
 }
 
 impl Render for RefsView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let body = div()
-            .id("refs")
-            .size_full()
-            .overflow_y_scroll()
-            .p_3()
-            .flex()
-            .flex_col()
-            .gap_3();
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let sidebar = div().size_full().flex().flex_col().child(
+            div()
+                .debug_selector(|| "sidebar:filter".to_owned())
+                .p_2()
+                .child(Input::new(&self.filter).cleanable(true)),
+        );
         let Some(snapshot) = self.snapshot.clone() else {
-            return body.child(
+            return sidebar.child(
                 div()
+                    .px_3()
                     .text_color(rgb(DIM))
                     .child("No repository open. Pass a path on the command line, or use Open."),
             );
@@ -64,67 +125,110 @@ impl Render for RefsView {
         let refs = match &snapshot.result {
             Ok(refs) => refs,
             Err(error) => {
-                return body.child(div().text_color(rgb(0xff7a90)).child(format!(
+                return sidebar.child(div().px_3().text_color(rgb(0xff7a90)).child(format!(
                     "Couldn't open {}: {error}",
                     snapshot.workdir.display()
                 )));
             }
         };
         let head = match &refs.head {
-            Head::Branch {
-                name,
-                target: Some(target),
-            } => {
-                format!("{} at {}", name.short(), target.short(10))
+            Head::Detached { target } => {
+                let short = target.short(10).to_owned();
+                Some(
+                    div()
+                        .debug_selector(|| "sidebar:detached".to_owned())
+                        .child(
+                            div()
+                                .debug_selector(|| format!("sidebar:detached:{short}"))
+                                .child(format!("HEAD detached at {short}")),
+                        ),
+                )
             }
-            Head::Branch { name, target: None } => format!("{} (unborn)", name.short()),
-            Head::Detached { target } => format!("detached at {}", target.short(10)),
+            Head::Branch { name, target: None } => {
+                Some(div().child(format!("{} has no commits yet", name.short())))
+            }
+            Head::Branch { .. } => None,
         };
-        let stashes = refs
-            .stashes
-            .iter()
-            .enumerate()
-            .map(|(i, s)| row(format!("stash@{{{i}}}"), s.message.clone()))
-            .collect();
-        body.child(section("HEAD", vec![row(head, String::new())]))
-            .child(section("Local branches", entries(&refs.local)))
-            .child(section("Remote branches", entries(&refs.remote)))
-            .child(section("Tags", entries(&refs.tags)))
-            .child(section("Stashes", stashes))
+        let list = uniform_list(
+            "sidebar-rows",
+            self.rows.len(),
+            cx.processor(|view, range: std::ops::Range<usize>, _window, cx| {
+                range.map(|ix| view.render_row(ix, cx)).collect::<Vec<_>>()
+            }),
+        )
+        .flex_1()
+        .min_h_0();
+        sidebar
+            .children(head.map(|head| head.px_3().pb_1().text_color(rgb(CURRENT))))
+            .child(list)
     }
 }
 
-fn entries(list: &[RefEntry]) -> Vec<AnyElement> {
-    list.iter()
-        .map(|entry| {
-            let detail = match &entry.symref {
-                Some(symref) => format!("-> {}", symref.short()),
-                None => entry.target.short(10).to_owned(),
-            };
-            row(entry.name.short().to_owned(), detail)
-        })
-        .collect()
-}
-
-fn section(title: &'static str, rows: Vec<AnyElement>) -> impl IntoElement {
-    let count = rows.len();
-    div()
-        .flex()
-        .flex_col()
-        .child(
-            div()
+impl RefsView {
+    fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let row = &self.rows[ix];
+        let id = row.id();
+        let selector = format!("sidebar:{id}");
+        let mut element = div()
+            .id(ElementId::Name(SharedString::from(id.clone())))
+            .debug_selector(|| selector)
+            .h(px(ROW_HEIGHT))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .whitespace_nowrap();
+        element = match row {
+            Row::Section {
+                section,
+                count,
+                open,
+            } => element
                 .text_color(rgb(DIM))
-                .child(SharedString::from(format!("{title} ({count})"))),
-        )
-        .children(rows)
+                .child(chevron(*open))
+                .child(format!("{} ({count})", section.title())),
+            Row::Folder {
+                label, depth, open, ..
+            } => element
+                .pl(indent(*depth))
+                .child(chevron(*open))
+                .child(label.clone()),
+            Row::Ref {
+                name,
+                label,
+                depth,
+                current,
+            } => {
+                let element = element.pl(indent(*depth));
+                if *current {
+                    let marker = format!("sidebar:current:{}", name.as_str());
+                    element
+                        .text_color(rgb(CURRENT))
+                        .font_weight(FontWeight::BOLD)
+                        .child(div().debug_selector(|| marker).child("●"))
+                        .child(label.clone())
+                } else {
+                    element.child(label.clone())
+                }
+            }
+            Row::Stash { index, message } => element
+                .pl(indent(0))
+                .child(format!("stash@{{{index}}}"))
+                .child(div().text_color(rgb(DIM)).child(message.clone())),
+        };
+        if row.toggles() {
+            element = element
+                .cursor_pointer()
+                .on_click(cx.listener(move |view, _, _, cx| view.toggle(&id, cx)));
+        }
+        element.into_any_element()
+    }
 }
 
-fn row(name: String, detail: String) -> AnyElement {
-    div()
-        .debug_selector(|| format!("refs:{name}"))
-        .flex()
-        .gap(px(12.))
-        .child(div().child(name))
-        .child(div().text_color(rgb(DIM)).child(detail))
-        .into_any_element()
+fn indent(depth: usize) -> gpui::Pixels {
+    px(12. + INDENT * (depth + 1) as f32)
+}
+
+fn chevron(open: bool) -> &'static str {
+    if open { "▾" } else { "▸" }
 }
