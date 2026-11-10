@@ -1,15 +1,20 @@
-//! The CLI Refs read when git fails, rather than answers "no", as it works out HEAD (#61).
+//! The CLI Refs read when git fails, or answers "no" to both questions, as it works out HEAD
+//! (#61, #77).
 //!
 //! No repository on disk makes just one of `symbolic-ref -q HEAD` and `rev-parse -q --verify
 //! HEAD` fail: a config write racing between the two does. So this test binary's git is a
 //! wrapper ahead of the real one on `PATH`. When an argument names a repository holding
 //! `.git/cairn-fail-<subcommand>`, it has the real git include that file, a broken config,
-//! for that subcommand only. It finds the repository by the marker, not by where the runner
-//! puts `-C`.
-//! A repository holding `.git/cairn-no-<subcommand>` instead has that subcommand answer "no":
-//! exit 1, printing the marker's contents (often nothing, as `-q` would) to stderr.
-//! Otherwise real git still fails, with its own exit code and error. Unix only: the wrapper is a shell
-//! script, and Windows resolves a `git.exe`.
+//! for that subcommand only. Real git still fails, with its own exit code and error.
+//!
+//! Nor does any repository make both answer "no": a detached HEAD on a missing object makes
+//! rev-parse succeed, and a malformed `ref:` makes symbolic-ref exit 128 or git reject the
+//! repository. Only a race or a misbehaving git does. So a repository holding
+//! `.git/cairn-no-<subcommand>` has the wrapper answer "no" without running git: exit 1,
+//! printing the marker's contents to stderr (often nothing, as `-q` would).
+//!
+//! The wrapper finds the repository by the marker, not by where the runner puts `-C`. Unix
+//! only: the wrapper is a shell script, and Windows resolves a `git.exe`.
 
 #![cfg(unix)]
 

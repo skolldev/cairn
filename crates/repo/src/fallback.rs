@@ -201,7 +201,7 @@ pub(super) fn refs(path: &Path, stop: &Stop) -> Result<Refs, String> {
     }
     let symbolic = run_raw(path, stop, &["symbolic-ref", "-q", "HEAD"])?;
     let target = run_raw(path, stop, &["rev-parse", "-q", "--verify", "HEAD"])?;
-    let neither = neither_branch_nor_commit(&symbolic, &target);
+    let neither_error = neither_branch_nor_commit(&symbolic, &target);
     let target = answer(target)?
         .map(|target| Oid::from_hex(String::from_utf8_lossy(&target.stdout).trim().to_owned()));
     let head = match (answer(symbolic)?, target) {
@@ -210,7 +210,7 @@ pub(super) fn refs(path: &Path, stop: &Stop) -> Result<Refs, String> {
             target,
         },
         (None, Some(target)) => Head::Detached { target },
-        (None, None) => return Err(neither),
+        (None, None) => return Err(neither_error),
     };
     let stash = run(path, stop, &["stash", "list", "--format=%H%x00%gs"])?;
     let stashes = stash
