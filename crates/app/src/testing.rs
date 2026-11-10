@@ -15,6 +15,7 @@ use gpui::{
 };
 
 use crate::Workspace;
+use crate::recent::RecentRepos;
 
 /// Points git at an empty home, once per test binary, so a developer's config can't change
 /// the result. Runs before anything spawns git.
@@ -103,7 +104,17 @@ pub struct App<'a> {
     pub exited: Rc<Cell<bool>>,
 }
 
+/// The window, opening `repo` if given, with a recent list that is never saved.
 pub fn open<'a>(cx: &'a mut TestAppContext, repo: Option<&Path>) -> App<'a> {
+    open_with_recent(cx, repo, None)
+}
+
+/// The window, keeping its recent list in `recent`, as a launch reads it from app data.
+pub fn open_with_recent<'a>(
+    cx: &'a mut TestAppContext,
+    repo: Option<&Path>,
+    recent: Option<PathBuf>,
+) -> App<'a> {
     // Real git runs on the service's threads, so the executor must wait for them.
     cx.executor().allow_parking();
     cx.update(gpui_component::init);
@@ -111,7 +122,13 @@ pub fn open<'a>(cx: &'a mut TestAppContext, repo: Option<&Path>) -> App<'a> {
     let exit = exited.clone();
     let path = repo.map(Path::to_path_buf);
     let (workspace, cx) = cx.add_window_view(move |window, cx| {
-        Workspace::new(path, Rc::new(move |_| exit.set(true)), window, cx)
+        Workspace::new(
+            path,
+            RecentRepos::load(recent),
+            Rc::new(move |_| exit.set(true)),
+            window,
+            cx,
+        )
     });
     App {
         cx,
@@ -140,6 +157,13 @@ impl App<'_> {
     pub fn send(&mut self, intent: Intent) {
         self.workspace
             .read_with(self.cx, |workspace, _| workspace.service.send(intent));
+    }
+
+    /// The recent repositories, as the window lists them.
+    pub fn recent(&mut self) -> Vec<PathBuf> {
+        self.workspace.read_with(self.cx, |workspace, cx| {
+            workspace.recent.read(cx).entries().to_vec()
+        })
     }
 
     /// Draws a frame. The test window draws only when asked, and only a drawn element has
