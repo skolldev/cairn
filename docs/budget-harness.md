@@ -81,7 +81,7 @@ cargo run --release -p cairn-budget -- trace --only launch
 - The first frame painted with every Slot, the frame holding the first drawable Metal gave a presented time to, and that presented time, which is what `run` times.
 - How many frames painted before that frame, and how many drawables Metal gave no time to before it.
 
-Like External change's trace, it explains a number and never gives one: no result file, no verdict, and the Budget, its statistic and which frame ends a sample stay `run`'s. It reads Metal's presented times, so it runs on macOS only, and it needs a binary built with `measure`, as above.
+Like External change's trace, it explains a number and never gives one: no result file, no verdict, and the Budget, its statistic and which frame ends a sample stay `run`'s. It reads Metal's presented times, so it runs on macOS only, and it needs a binary built with `measure`, as above. What it found at `gpui-component =0.9.0`, a font check that costs about 140 ms before the window exists, is in [pins.md](pins.md#gpui-components-font-check-costs-launch-about-140-ms-on-macos).
 
 ## Windows
 
