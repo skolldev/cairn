@@ -14,11 +14,13 @@
 //! CLI (#13), so an index-vs-worktree pass here would only repeat their work.
 
 mod excludes;
+mod index;
 mod refs;
 mod untracked;
 mod walk;
 
 pub use excludes::Excludes;
+pub use index::{Index, IndexChanges};
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -89,19 +91,44 @@ impl Repo {
     /// directory is one entry ending in `/` unless `status.showUntrackedFiles=all`.
     /// Setting `interrupt` ends the walk early with an error.
     pub fn untracked(&self, interrupt: &AtomicBool) -> Result<Vec<RepoPath>, ReadError> {
-        untracked::read(&self.0.to_thread_local(), interrupt)
+        self.untracked_in(&self.index()?, interrupt)
     }
 
-    /// [`untracked`](Self::untracked) again after the worktree changed only at `changed`,
-    /// relative paths with `/` separators, starting from `last`, the list it gave before.
-    /// Only right if the index and the excludes are as they were when `last` was read.
+    /// The index as it is now, or an empty one if there is no index file yet.
+    pub fn index(&self) -> Result<Index, ReadError> {
+        Index::load(&self.0.to_thread_local())
+    }
+
+    /// [`untracked`](Self::untracked), walked against `index`, a load of this repository's.
+    pub fn untracked_in(
+        &self,
+        index: &Index,
+        interrupt: &AtomicBool,
+    ) -> Result<Vec<RepoPath>, ReadError> {
+        untracked::read(&self.0.to_thread_local(), index, interrupt)
+    }
+
+    /// [`untracked_in`](Self::untracked_in) again after the worktree changed only at
+    /// `changed`, relative paths with `/` separators, starting from `last`, the list it gave
+    /// against the index `before`. `changed` must include every path tracked in only one of
+    /// `before` and `index` ([`IndexChanges::tracked`]). Only right if the excludes are as
+    /// they were when `last` was read.
     pub fn untracked_within(
         &self,
         interrupt: &AtomicBool,
+        index: &Index,
+        before: &Index,
         last: &[RepoPath],
         changed: &[&[u8]],
     ) -> Result<Vec<RepoPath>, ReadError> {
-        untracked::read_within(&self.0.to_thread_local(), interrupt, last, changed)
+        untracked::read_within(
+            &self.0.to_thread_local(),
+            interrupt,
+            index,
+            before,
+            last,
+            changed,
+        )
     }
 
     /// Whether [`walk`](Self::walk) can use a commit-graph, as git would. Only then does gix

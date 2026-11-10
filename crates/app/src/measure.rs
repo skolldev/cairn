@@ -42,7 +42,7 @@ pub fn install_frame_source() {
 /// What the harness can ask of the window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
-    /// A Local write Job, sent as the Intent the UI would send.
+    /// A Local write Job, started where a double-click on the branch's row starts it.
     Switch(String),
     Quit,
 }
@@ -146,7 +146,7 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(command) = commands.recv().await {
                 if this
-                    .update(cx, |workspace, _| workspace.measure(command))
+                    .update(cx, |workspace, cx| workspace.measure(command, cx))
                     .is_err()
                 {
                     break;
@@ -156,7 +156,7 @@ impl Workspace {
         .detach();
     }
 
-    pub fn measure(&mut self, command: Command) {
+    pub fn measure(&mut self, command: Command, cx: &mut Context<Self>) {
         let Some(probe) = &self.probe else { return };
         match command {
             Command::Switch(branch) => {
@@ -164,7 +164,7 @@ impl Workspace {
                     ns: clock::now_ns(),
                     branch: branch.clone(),
                 });
-                self.service.send(Intent::Switch(branch));
+                self.refs.update(cx, |refs, cx| refs.switch_to(branch, cx));
             }
             Command::Quit => self.service.send(Intent::Quit),
         }
