@@ -5,84 +5,12 @@
 
 mod common;
 
-use std::collections::BTreeMap;
-use std::sync::{Mutex, OnceLock};
-
+use common::trace::{self, Fields};
 use common::{Harness, Seen, open, small_fixture_clone, unstaged};
-use tracing::field::{Field, Visit};
-use tracing::span::{Attributes, Id, Record};
-use tracing_subscriber::Layer;
-use tracing_subscriber::layer::{Context, SubscriberExt as _};
-use tracing_subscriber::registry::LookupSpan;
-
-/// One closed `read_job` span: its fields as text, by name.
-type Fields = BTreeMap<String, String>;
-
-/// Every `read_job` span closed so far, in the order they closed.
-fn closed() -> &'static Mutex<Vec<Fields>> {
-    static CLOSED: OnceLock<Mutex<Vec<Fields>>> = OnceLock::new();
-    CLOSED.get_or_init(|| {
-        let subscriber = tracing_subscriber::registry().with(ReadJobs);
-        tracing::subscriber::set_global_default(subscriber).expect("one subscriber per binary");
-        Mutex::default()
-    })
-}
-
-struct ReadJobs;
-
-/// The repository a span is about, kept for the `read_job` spans inside it.
-struct Repository(String);
-
-struct Recorder<'a>(&'a mut Fields);
-
-impl Visit for Recorder<'_> {
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.0.insert(field.name().to_owned(), format!("{value:?}"));
-    }
-    fn record_str(&mut self, field: &Field, value: &str) {
-        self.0.insert(field.name().to_owned(), value.to_owned());
-    }
-}
-
-impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for ReadJobs {
-    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
-        let span = ctx.span(id).unwrap();
-        let mut fields = Fields::new();
-        attrs.record(&mut Recorder(&mut fields));
-        if attrs.metadata().name() != "read_job" {
-            // An Intent's or an External change's span names the repository it is about.
-            if let Some(path) = fields.remove("path") {
-                span.extensions_mut().insert(Repository(path));
-            }
-            return;
-        }
-        // Which repository it read: other tests' services run in this binary too.
-        if let Some(parent) = span.parent()
-            && let Some(Repository(path)) = parent.extensions().get::<Repository>()
-        {
-            fields.insert("repository".to_owned(), path.clone());
-        }
-        span.extensions_mut().insert(fields);
-    }
-
-    fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
-        let span = ctx.span(id).unwrap();
-        if let Some(fields) = span.extensions_mut().get_mut::<Fields>() {
-            values.record(&mut Recorder(fields));
-        }
-    }
-
-    fn on_close(&self, id: Id, ctx: Context<'_, S>) {
-        let span = ctx.span(&id).unwrap();
-        if let Some(fields) = span.extensions_mut().remove::<Fields>() {
-            closed().lock().unwrap().push(fields);
-        }
-    }
-}
 
 #[test]
 fn a_file_saved_outside_the_service_traces_narrowed_reads_of_unstaged_and_untracked() {
-    closed();
+    trace::install();
     let (_dir, repo) = small_fixture_clone();
     common::assert_filesystem_events_available(&repo);
     let harness = Harness::start();
@@ -141,10 +69,10 @@ fn a_file_saved_outside_the_service_traces_narrowed_reads_of_unstaged_and_untrac
 fn wait_for_span(matches: impl Fn(&Fields) -> bool) -> Fields {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        if let Some(found) = closed().lock().unwrap().iter().find(|f| matches(f)) {
+        let spans = trace::read_jobs();
+        if let Some(found) = spans.iter().find(|f| matches(f)) {
             return found.clone();
         }
-        let spans = closed().lock().unwrap().clone();
         assert!(
             std::time::Instant::now() < deadline,
             "no such read_job span: {spans:?}"
@@ -155,7 +83,7 @@ fn wait_for_span(matches: impl Fn(&Fields) -> bool) -> Fields {
 
 #[test]
 fn an_open_traces_its_read_jobs_as_open_and_not_pending() {
-    closed();
+    trace::install();
     let (_dir, repo) = small_fixture_clone();
     let harness = Harness::start();
     let opened = open(&harness, &repo);
@@ -167,7 +95,7 @@ fn an_open_traces_its_read_jobs_as_open_and_not_pending() {
             f.get("repository") == Some(&repository)
                 && f.get("slot").map(String::as_str) == Some(slot)
         });
-        closed().lock().unwrap().clone()
+        trace::read_jobs()
     };
     for (slot, generation) in [
         ("refs", opened.refs),

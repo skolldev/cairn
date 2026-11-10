@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use cairn_repo::{ChangesSnapshot, Generation, Head, Intent, RepoPath, Snapshot};
+use common::trace::{self, Fields};
 use common::{Harness, Seen, git, open, slash, small_fixture_clone, unstaged, untracked};
 
 #[test]
@@ -234,9 +235,87 @@ fn status_refreshes_during(
 /// Twenty writes measured about 80 generations.
 const REFRESHED: u64 = 10;
 
-/// The most a [`status_refreshes_during`] gap reaches from the second marker's own events,
-/// when the change itself refreshed nothing.
-const MARKER_ONLY: u64 = 3;
+/// What `change` asked of the watcher in `repo`, between an Untracked marker before it and
+/// one after, as [`status_refreshes_during`] counts it.
+struct During {
+    /// The generation gap between the markers.
+    refreshes: u64,
+    /// Every External change the watcher started for `repo` after the first marker's, up to
+    /// and including the second marker's. The watcher handles events one at a time, in the
+    /// order the OS reported them, so the second marker's External change is the marker for
+    /// an absence: any event `change` caused was handled before it, and started an External
+    /// change here unless the watcher skipped it.
+    changes: Vec<Fields>,
+}
+
+impl During {
+    /// The External changes that named a path ending in `suffix`, such as `build.log` or
+    /// `.git/HEAD`, among the event paths that asked for them.
+    fn naming(&self, suffix: &str) -> Vec<&Fields> {
+        self.changes
+            .iter()
+            .filter(|change| names(change, suffix))
+            .collect()
+    }
+}
+
+/// Whether an `external_change` span names a path ending in `suffix`. Its `paths` are
+/// notify's, formatted as a list, so Windows' `\` separators show doubled. Every
+/// [`changes_during`] waits for the External changes naming its markers, which shows this
+/// reads the paths: seen red with the span recording none.
+fn names(change: &Fields, suffix: &str) -> bool {
+    change
+        .get("paths")
+        .is_some_and(|paths| paths.replace("\\\\", "/").contains(&format!("/{suffix}\"")))
+}
+
+/// [`status_refreshes_during`], which also says which External changes the watcher started
+/// meanwhile. Installs the test binary's subscriber, which the watcher's spans need.
+fn changes_during(
+    seen: &mut Seen,
+    harness: &Harness,
+    repo: &Path,
+    label: &str,
+    change: impl FnOnce(),
+) -> During {
+    trace::install();
+    let (before, after) = (format!("{label}-before.txt"), format!("{label}-after.txt"));
+    let first = untracked_marker(seen, harness, repo, &before);
+    let from = external_change_naming(repo, &before);
+    change();
+    let second = untracked_marker(seen, harness, repo, &after);
+    let to = external_change_naming(repo, &after);
+    let repository = repo.display().to_string();
+    let changes = trace::external_changes()[from + 1..=to]
+        .iter()
+        .filter(|change| change.get("repository") == Some(&repository))
+        .cloned()
+        .collect();
+    During {
+        refreshes: second - first,
+        changes,
+    }
+}
+
+/// Waits for the watcher to start an External change in `repo` for a path ending in
+/// `suffix`, and returns where the first such one lies among [`trace::external_changes`].
+fn external_change_naming(repo: &Path, suffix: &str) -> usize {
+    let repository = repo.display().to_string();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let changes = trace::external_changes();
+        if let Some(at) = changes.iter().position(|change| {
+            change.get("repository") == Some(&repository) && names(change, suffix)
+        }) {
+            return at;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no External change in {repository} named {suffix}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 #[test]
 fn writes_to_an_ignored_untracked_file_refresh_nothing_and_writes_to_an_unignored_one_do() {
@@ -248,23 +327,25 @@ fn writes_to_an_ignored_untracked_file_refresh_nothing_and_writes_to_an_unignore
     open(&harness, &repo);
     let mut seen = Seen::default();
 
-    let ignored = status_refreshes_during(&mut seen, &harness, &repo, "ignored", || {
+    let ignored = changes_during(&mut seen, &harness, &repo, "ignored", || {
         append_repeatedly(&repo.join("build.log"), 20)
     });
     // Control: the same writes to a file git doesn't ignore each ask for a refresh, and each
     // refresh takes a new generation.
-    let control = status_refreshes_during(&mut seen, &harness, &repo, "control", || {
+    let control = changes_during(&mut seen, &harness, &repo, "control", || {
         append_repeatedly(&repo.join("control.txt"), 20)
     });
     assert!(
-        control > REFRESHED,
-        "unignored writes should each refresh: {control} generations"
+        control.refreshes > REFRESHED,
+        "unignored writes should each refresh: {} generations",
+        control.refreshes
     );
-    // Only the second marker's own events refresh. Seen red on Linux (`scripts/linux-tests.sh`):
-    // with no `Access` check before the rebuild trigger, every read's open rebuilds the matcher.
+    // Seen red on Linux (`scripts/linux-tests.sh`): with no `Access` check before the rebuild
+    // trigger, every read's open rebuilds the matcher, and writes during a rebuild refresh.
+    let started = ignored.naming("build.log");
     assert!(
-        ignored <= MARKER_ONLY,
-        "ignored writes refreshed status: {ignored} generations (control: {control})"
+        started.is_empty(),
+        "ignored writes started External changes: {started:?}"
     );
 }
 
@@ -352,13 +433,15 @@ fn a_file_a_removed_pattern_covered_shows_in_untracked_once_written() {
     let mut seen = Seen::default();
     // The matcher reads a `.gitignore` when a lookup first needs it, so this also has it
     // read the pattern before the pattern goes.
-    let ignored = status_refreshes_during(&mut seen, &harness, &repo, "old", || {
+    let ignored = changes_during(&mut seen, &harness, &repo, "old", || {
         append_repeatedly(&repo.join("old.tmp"), 20)
     });
     // Its control is the `new.tmp` writes below, which refresh once the pattern is gone.
+    // Seen red: with `Filter::skips` answering no for every path, the writes refresh.
+    let started = ignored.naming("old.tmp");
     assert!(
-        ignored <= MARKER_ONLY,
-        "the pattern applies: {ignored} generations"
+        started.is_empty(),
+        "the pattern applies, yet the writes started External changes: {started:?}"
     );
 
     std::fs::write(&gitignore, &original).unwrap();
@@ -367,13 +450,14 @@ fn a_file_a_removed_pattern_covered_shows_in_untracked_once_written() {
     });
     // Written after the pattern's removal was seen. A matcher that still held the pattern
     // would skip each write.
-    let refreshes = status_refreshes_during(&mut seen, &harness, &repo, "new", || {
+    let new = changes_during(&mut seen, &harness, &repo, "new", || {
         append_repeatedly(&repo.join("new.tmp"), 20)
     });
     // Seen red: with `Filter::rebuild` returning at once, the old matcher stays.
     assert!(
-        refreshes > REFRESHED,
-        "each write to the no longer ignored file refreshes: {refreshes} generations"
+        new.refreshes > REFRESHED,
+        "each write to the no longer ignored file refreshes: {} generations",
+        new.refreshes
     );
     seen.until(&harness, |seen| {
         untracked_after_shows(seen, &repo, opened.untracked.get(), |p| has(p, "new.tmp"))
@@ -429,15 +513,18 @@ fn a_directory_replaced_without_its_gitignore_stops_skipping_what_that_gitignore
     let harness = Harness::start();
     open(&harness, &repo);
     let mut seen = Seen::default();
-    let ignored = status_refreshes_during(&mut seen, &harness, &repo, "before", || {
+    let ignored = changes_during(&mut seen, &harness, &repo, "before", || {
         append_repeatedly(&sub.join("first.o"), 20)
     });
+    // Its control is the `second.o` writes below, which refresh once `sub/.gitignore` is gone.
+    // Seen red: with `Filter::skips` answering no for every path, the writes refresh.
+    let started = ignored.naming("sub/first.o");
     assert!(
-        ignored <= MARKER_ONLY,
-        "`sub/.gitignore` applies: {ignored} generations"
+        started.is_empty(),
+        "`sub/.gitignore` applies, yet the writes started External changes: {started:?}"
     );
 
-    let refreshes = status_refreshes_during(&mut seen, &harness, &repo, "after", || {
+    let after = changes_during(&mut seen, &harness, &repo, "after", || {
         // The stack keeps what it read for the directories of the last lookup, so the
         // lookup before the move is one inside `sub`, after the marker's at the root.
         append_repeatedly(&sub.join("first.o"), 1);
@@ -449,8 +536,9 @@ fn a_directory_replaced_without_its_gitignore_stops_skipping_what_that_gitignore
     // Seen red: with `Excludes::skips` returning early for a tracked path such as `sub`, the
     // stack keeps the old `sub/.gitignore` and skips these writes.
     assert!(
-        refreshes > REFRESHED,
-        "nothing ignores `sub/*.o` any more: {refreshes} generations"
+        after.refreshes > REFRESHED,
+        "nothing ignores `sub/*.o` any more: {} generations",
+        after.refreshes
     );
 }
 
@@ -770,22 +858,32 @@ fn switches_in_the_main_worktree_refresh_no_status_in_a_linked_one_and_its_own_s
     let mut seen = Seen::default();
 
     // The main worktree's HEAD and index lie in the common dir, which is watched for the
-    // linked worktree's refs and config.
-    let main = status_refreshes_during(&mut seen, &harness, &worktree, "main", || {
-        switches(&repo, "main")
+    // linked worktree's refs and config. On Windows notify watches each directory through a
+    // handle of its own, so the common dir's events need not arrive in order with the
+    // worktree's: a branch made last is a marker from the common dir itself, whose External
+    // change follows every event the switches caused there.
+    let main = changes_during(&mut seen, &harness, &worktree, "main", || {
+        switches(&repo, "main");
+        git(&repo, &["branch", "main-marker"]);
+        external_change_naming(&worktree, "refs/heads/main-marker");
     });
     // Control: the same switches in the linked worktree move its own HEAD, each a refresh.
-    let control = status_refreshes_during(&mut seen, &harness, &worktree, "control", || {
+    let control = changes_during(&mut seen, &harness, &worktree, "control", || {
         switches(&worktree, "linked")
     });
     assert!(
-        control > REFRESHED,
-        "the linked worktree's own switches should each refresh: {control} generations"
+        control.refreshes > REFRESHED,
+        "the linked worktree's own switches should each refresh: {} generations",
+        control.refreshes
     );
     // Seen red: with the common dir's HEAD and index classified as the linked worktree's own,
-    // the main worktree's switches refresh as many generations as the control's.
+    // the main worktree's switches start External changes as the control's do.
+    let started: Vec<_> = ["HEAD", "index"]
+        .iter()
+        .flat_map(|file| main.naming(&format!(".git/{file}")))
+        .collect();
     assert!(
-        main <= MARKER_ONLY,
-        "the main worktree's switches refreshed the linked one: {main} generations (control: {control})"
+        started.is_empty(),
+        "the main worktree's switches refreshed the linked one: {started:?}"
     );
 }
