@@ -235,8 +235,7 @@ jobs:
         with:
           path: ~/git-${{ env.GIT_VERSION }}
           key: git-${{ env.GIT_VERSION }}-${{ runner.os }}-${{ hashFiles('scripts/oldest-git.sh') }}
-      # Made with the runner's own git, before it goes on PATH: it is built without
-      # curl, so it can't clone the small fixture over HTTPS.
+      # Made with the runner's own git, before the oldest git goes on PATH.
       - name: Cache the small fixture
         uses: actions/cache@v4
         with:
@@ -249,7 +248,7 @@ jobs:
       - name: Build git ${{ env.GIT_VERSION }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libz-dev
+          sudo apt-get install -y --no-install-recommends libz-dev libcurl4-openssl-dev
           ./scripts/oldest-git.sh "$GIT_VERSION" "$HOME/git-$GIT_VERSION" >> "$GITHUB_PATH"
       # The runner itself, and the Repo service's reads. cairn-app's tests run git too, but
       # building GPUI here isn't worth it: run those on it locally (CODING_STANDARDS.md).

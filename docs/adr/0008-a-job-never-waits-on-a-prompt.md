@@ -10,6 +10,8 @@ The runner does this for every git run it starts, not only for Network Jobs. Sig
 
 - **A user's own askpass is kept.** If `SSH_ASKPASS` is already set, Cairn leaves it, because that Prompt is one the user can see. Cairn sets `SSH_ASKPASS_REQUIRE=force` unless the user chose a value.
 - **git's own HTTPS prompts don't change.** git falls back to `SSH_ASKPASS` for its username and password prompts. Cairn keeps those exactly as they were: refused under `GIT_TERMINAL_PROMPT=0`, or answered by a credential helper such as Git Credential Manager. The helper serves `ssh` only, until Phase 5 or the step to showing Prompts decides otherwise.
+- **How git is kept apart (#44).** git asks `GIT_ASKPASS`, then `core.askPass`, then `SSH_ASKPASS`, and an askpass that fails adds `error: unable to read askpass response` to git's error. So the runner sets `GIT_ASKPASS` to empty unless the user set it. `ssh` sees only git's environment, so nothing narrower reaches `ssh` alone without rewriting the user's `ssh` command.
+- **The helper is `cairn-askpass`**, a binary of `cairn-write`, found beside the running program or one directory up, where cargo puts test binaries. It takes the Prompt's text as its argument and, for now, exits non-zero with no answer.
 
 ## Considered options
 
@@ -22,4 +24,5 @@ The runner does this for every git run it starts, not only for Network Jobs. Sig
 - A user who types a key passphrase into a terminal each time can't do that inside Cairn until Cairn shows Prompts. A key held in `ssh-agent`, including Windows' OpenSSH agent service, still works, and so does an askpass the user already set.
 - This has to land with or before the first control in the app that starts a Network Job. Until then, nothing in the app can reach a Prompt.
 - That it stops the hang with Windows' `ssh.exe` 9.5p2 is a claim to prove on Windows, not something already measured. A [TortoiseGit report](https://gitlab.com/tortoisegit/tortoisegit/-/issues/3996) says `SSH_ASKPASS_REQUIRE` mitigated the same passphrase hang on Win32-OpenSSH 8.9p1.
+- **A `core.askPass` set only in git config isn't asked inside Cairn**, because the empty `GIT_ASKPASS` comes first. git refuses that prompt with `terminal prompts disabled`, as it does with no askpass at all. A `GIT_ASKPASS` in the user's environment and credential helpers work as before. Chosen on #44 over finding `core.askPass` on every run.
 - **Known gaps, out of scope:** PuTTY's plink and TortoisePlink, which show their own prompt windows, and OpenSSH older than 8.4. The `ssh` programs Cairn meets today are macOS's (9.x), Git for Windows' (10.2) and Windows' own (9.5).
