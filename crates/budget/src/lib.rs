@@ -9,3 +9,4 @@ pub mod report;
 pub mod run;
 pub mod spawn;
 pub mod stats;
+pub mod trace;
