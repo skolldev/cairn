@@ -31,7 +31,7 @@ use gpui::{
 };
 
 use bridge::Bridge;
-use jobs::JobsView;
+use jobs::{JobsView, StashAndSwitch};
 use quit::QuitView;
 use recent::{OpenRecent, Place, RecentRepos, RecentView};
 use refs_view::{RefsView, SwitchTo};
@@ -48,6 +48,7 @@ struct Workspace {
     opened: bool,
     _bridge: Entity<Bridge>,
     _switch_to: gpui::Subscription,
+    _stash_and_switch: gpui::Subscription,
     _open_recent: gpui::Subscription,
     #[cfg(debug_assertions)]
     frame_clock: Option<std::rc::Rc<frame_overlay::FrameClock>>,
@@ -78,6 +79,9 @@ impl Workspace {
         });
         let switch_to = cx.subscribe(&refs, |workspace, _, SwitchTo(branch), _| {
             workspace.service.send(Intent::Switch(branch.clone()));
+        });
+        let stash_and_switch = cx.subscribe(&jobs, |workspace, _, StashAndSwitch(intent), _| {
+            workspace.service.send(intent.clone());
         });
         // The window stays open until the Repo service says it has quit, and the bridge then
         // exits the app. Deferred, so that a question isn't asked inside the platform's callback.
@@ -122,6 +126,7 @@ impl Workspace {
             opened,
             _bridge: bridge,
             _switch_to: switch_to,
+            _stash_and_switch: stash_and_switch,
             _open_recent: open_recent,
             #[cfg(debug_assertions)]
             frame_clock: frame_overlay::FrameClock::enabled().then(Default::default),

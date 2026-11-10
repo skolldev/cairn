@@ -9,6 +9,7 @@ mod fallback;
 mod narrow;
 mod network;
 mod scheduler;
+mod stash;
 mod status;
 mod switch;
 mod watch;
@@ -21,7 +22,7 @@ use std::sync::{Arc, Mutex, mpsc};
 pub use cairn_core::{ChangeKind, FileChange, Head, Oid, RefEntry, RefName, Refs, RepoPath, Stash};
 
 use cairn_write::{StartGate, Stop};
-use scheduler::{JobContext, JobQueue, Lane, Qos, Running, Slot};
+use scheduler::{JobContext, JobQueue, Lane, Qos, QueueHandle, Running, Slot};
 
 /// Interactive lane workers. Enough for the Read Jobs one click or one `git switch` starts to
 /// run side by side: Refs, Staged, Unstaged and Untracked (#54).
@@ -49,6 +50,11 @@ pub enum Intent {
     /// Switch the open repository to this local branch: `git switch`, run as a Local
     /// write Job. It never creates a branch, not even from a remote-tracking one.
     Switch(String),
+    /// Stash and switch: stash the local changes, then switch to this local branch as
+    /// [`Intent::Switch`] does, as two Local write Jobs. The switch starts only if the stash
+    /// succeeded, and not once a Quit has begun. `untracked` stashes untracked files too.
+    /// [`JobSnapshot::stash_and_switch`] says when a failed switch offers this.
+    StashAndSwitch { branch: String, untracked: bool },
     /// Fetch every remote, pruning what they deleted: `git fetch --all --prune`, run as a
     /// Network Job beside any Local write Job.
     Fetch,
@@ -106,6 +112,8 @@ impl JobId {
 pub enum JobKind {
     /// `git switch` to this local branch.
     Switch { branch: String },
+    /// `git stash push`, with `-u` when `untracked`: the first Job of Stash and switch.
+    Stash { untracked: bool },
     /// `git fetch --all --prune`.
     Fetch,
     /// `git push`. Stopping one can leave the user's work unpublished, so `app` asks first.
@@ -116,7 +124,7 @@ impl JobKind {
     /// Whether this is a Local write Job: one a Quit waits for, and that nothing stops.
     pub fn is_local_write(&self) -> bool {
         match self {
-            JobKind::Switch { .. } => true,
+            JobKind::Switch { .. } | JobKind::Stash { .. } => true,
             JobKind::Fetch | JobKind::Push => false,
         }
     }
@@ -151,6 +159,27 @@ pub struct JobSnapshot {
     pub progress: Option<String>,
     /// The span of the Intent this Job answers.
     pub span: tracing::Span,
+    /// The Job whose success started this one, when this is the second Job of an Intent
+    /// made of two, such as the switch of a Stash and switch.
+    pub follows: Option<JobId>,
+}
+
+impl JobSnapshot {
+    /// The Stash and switch this Job offers: only a switch git refused because local
+    /// changes would be overwritten, and not the switch of a Stash and switch. It stashes
+    /// untracked files when git's refusal named any.
+    pub fn stash_and_switch(&self) -> Option<Intent> {
+        let (JobKind::Switch { branch }, JobState::Done(Err(error)), None) =
+            (&self.kind, &self.state, self.follows)
+        else {
+            return None;
+        };
+        let refusal = switch::refusal(error)?;
+        Some(Intent::StashAndSwitch {
+            branch: branch.clone(),
+            untracked: refusal.untracked,
+        })
+    }
 }
 
 /// One Slot's answer: what it read, or why it couldn't.
@@ -184,8 +213,8 @@ pub struct RepoService {
     // Declared before the lane so they drop first: a finishing Job still submits its
     // refresh to the lane.
     writes: JobQueue,
-    /// Every Local write Job's git passes through this. A Force quit closes it.
-    write_gate: StartGate,
+    /// Queues Local write Jobs, from an Intent or from the end of the Job before.
+    write_jobs: Writes,
     network: JobQueue,
     /// Network Jobs that haven't ended, so a Stop Intent can reach them.
     network_jobs: Arc<Mutex<BTreeMap<JobId, Arc<NetworkJob>>>>,
@@ -193,11 +222,32 @@ pub struct RepoService {
     // Dropping a lane joins its threads. Kept as fields for that, not read.
     _interactive: Lane,
     _background: Lane,
-    next_job: AtomicU64,
-    /// Whether a Quit or a Force quit has begun. Held for the whole of each Intent, so no
-    /// Job can be queued behind the markers a Quit waits for.
-    quitting: Mutex<bool>,
+    jobs: Jobs,
 }
+
+/// What every new Job needs, shared with Jobs that start a Job of their own.
+#[derive(Clone)]
+struct Jobs {
+    next: Arc<AtomicU64>,
+    reads: Arc<Reads>,
+    /// Whether a Quit or a Force quit has begun. Held for the whole of each Intent, and while
+    /// a Job starts the Job that follows it, so no Job can be queued behind the markers a
+    /// Quit waits for.
+    quitting: Arc<Mutex<bool>>,
+}
+
+/// Queues Local write Jobs: from an Intent, or from the end of the Job before.
+#[derive(Clone)]
+struct Writes {
+    queue: QueueHandle,
+    /// Every Local write Job's git passes through this. A Force quit closes it.
+    gate: StartGate,
+    jobs: Jobs,
+}
+
+/// The second Job of an Intent made of two: given the Job that succeeded, it queues the next
+/// one in the same repository.
+type Next = Box<dyn FnOnce(&Writes, JobId) + Send>;
 
 /// The Read Job Slots and the outbox, shared with Local write Jobs so they can refresh.
 struct Reads {
@@ -222,36 +272,46 @@ impl RepoService {
     pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Self {
         let interactive = Lane::new("interactive", INTERACTIVE_THREADS, Qos::UserInitiated);
         let background = Lane::new("background", BACKGROUND_THREADS, Qos::Utility);
+        let reads = Arc::new(Reads {
+            refs_slot: Slot::new("refs", &interactive),
+            staged_slot: Slot::new("staged", &interactive),
+            unstaged_slot: Slot::new("unstaged", &interactive),
+            untracked_slot: Slot::new("untracked", &interactive),
+            history_slot: Slot::new("history", &background),
+            unstaged_narrowed: Arc::new(narrow::Narrowed::new()),
+            untracked_narrowed: Arc::new(narrow::Narrowed::new()),
+            outbox: Arc::new(Outbox {
+                pending: Mutex::new(Pending::default()),
+                wake: Box::new(wake),
+            }),
+            open: Mutex::new(None),
+            read_mode: Mutex::new(Arc::new(fallback::ReadMode::default())),
+        });
+        let jobs = Jobs {
+            next: Arc::new(AtomicU64::new(1)),
+            reads: reads.clone(),
+            quitting: Arc::new(Mutex::new(false)),
+        };
+        let writes = JobQueue::new("local-write");
         Self {
             watcher: Mutex::new(None),
-            writes: JobQueue::new("local-write"),
-            write_gate: StartGate::new(),
+            write_jobs: Writes {
+                queue: writes.handle(),
+                gate: StartGate::new(),
+                jobs: jobs.clone(),
+            },
+            writes,
             network: JobQueue::new("network"),
             network_jobs: Arc::default(),
-            reads: Arc::new(Reads {
-                refs_slot: Slot::new("refs", &interactive),
-                staged_slot: Slot::new("staged", &interactive),
-                unstaged_slot: Slot::new("unstaged", &interactive),
-                untracked_slot: Slot::new("untracked", &interactive),
-                history_slot: Slot::new("history", &background),
-                unstaged_narrowed: Arc::new(narrow::Narrowed::new()),
-                untracked_narrowed: Arc::new(narrow::Narrowed::new()),
-                outbox: Arc::new(Outbox {
-                    pending: Mutex::new(Pending::default()),
-                    wake: Box::new(wake),
-                }),
-                open: Mutex::new(None),
-                read_mode: Mutex::new(Arc::new(fallback::ReadMode::default())),
-            }),
+            reads,
             _interactive: interactive,
             _background: background,
-            next_job: AtomicU64::new(1),
-            quitting: Mutex::new(false),
+            jobs,
         }
     }
 
     pub fn send(&self, intent: Intent) {
-        let mut quitting = self.quitting.lock().unwrap();
+        let mut quitting = self.jobs.quitting.lock().unwrap();
         match intent {
             Intent::Quit => {
                 let _span = tracing::info_span!("intent", kind = "quit").entered();
@@ -266,7 +326,7 @@ impl RepoService {
                 self.network.abandon();
                 // After the queues, so that nothing is left to start, and before the Quit, so
                 // that a Job taken off the queue just now can't start git as the app exits.
-                self.write_gate.close();
+                self.write_jobs.gate.close();
                 self.reads.outbox.publish_quit();
             }
             Intent::Open(_) if *quitting => {
@@ -296,12 +356,26 @@ impl RepoService {
             }
             Intent::Switch(branch) => {
                 let span = tracing::info_span!("intent", kind = "switch", branch = %branch);
-                let kind = JobKind::Switch {
-                    branch: branch.clone(),
-                };
-                self.local_write(kind, span, move |workdir, gate, output| {
-                    switch::switch(workdir, &branch, gate, output)
+                self.write_jobs.queue_switch(branch, span, None);
+            }
+            Intent::StashAndSwitch { branch, untracked } => {
+                let span = tracing::info_span!(
+                    "intent",
+                    kind = "stash_and_switch",
+                    branch = %branch,
+                    untracked
+                );
+                let switch_span = span.clone();
+                let next: Next = Box::new(move |writes, stash| {
+                    writes.queue_switch(branch, switch_span, Some(stash));
                 });
+                self.write_jobs.queue(
+                    JobKind::Stash { untracked },
+                    span,
+                    None,
+                    move |workdir, gate, output| stash::stash(workdir, untracked, gate, output),
+                    Some(next),
+                );
             }
             Intent::Fetch => {
                 let span = tracing::info_span!("intent", kind = "fetch");
@@ -416,53 +490,6 @@ impl RepoService {
             .collect()
     }
 
-    /// A publisher for a new Job in the open repository, or `None` after publishing that
-    /// no repository is open.
-    fn new_job(&self, kind: JobKind, span: tracing::Span) -> Option<(JobPublisher, PathBuf)> {
-        let id = JobId(self.next_job.fetch_add(1, Ordering::Relaxed));
-        let workdir = self.reads.open.lock().unwrap().clone();
-        let job = JobPublisher {
-            id,
-            kind,
-            workdir: workdir.clone().unwrap_or_default(),
-            span,
-            outbox: self.reads.outbox.clone(),
-        };
-        match workdir {
-            Some(workdir) => Some((job, workdir)),
-            None => {
-                job.publish(JobState::Done(Err("no repository is open".to_owned())), "");
-                None
-            }
-        }
-    }
-
-    /// Queues a Local write Job that runs `run` in the open repository, publishing its
-    /// state and live output, and then refreshes refs and status whatever the outcome.
-    fn local_write(
-        &self,
-        kind: JobKind,
-        span: tracing::Span,
-        run: impl FnOnce(&Path, &StartGate, &mut dyn FnMut(&[u8])) -> Result<(), String>
-        + Send
-        + 'static,
-    ) {
-        let Some((job, workdir)) = self.new_job(kind, span) else {
-            return;
-        };
-        job.publish(JobState::Queued, "");
-        let reads = self.reads.clone();
-        let gate = self.write_gate.clone();
-        self.writes.push(move || {
-            let _entered =
-                tracing::info_span!(parent: &job.span, "local_write_job", id = job.id.0).entered();
-            job.publish(JobState::Running, "");
-            let (state, output) = job.run(|output| JobState::Done(run(&workdir, &gate, output)));
-            reads.refresh_if_open(&workdir, Refresh::RefsAndStatus, &job.span);
-            job.publish(state, &output);
-        });
-    }
-
     /// Queues a Network Job that runs `run` in the open repository, publishing its state
     /// and live output, and then refreshes refs whatever the outcome, a stop included.
     /// `run` gets the Stop that a Stop Intent uses. A Job stopped while queued never runs,
@@ -473,7 +500,7 @@ impl RepoService {
         span: tracing::Span,
         run: impl FnOnce(&Path, &Stop, &mut dyn FnMut(&[u8])) -> JobState + Send + 'static,
     ) {
-        let Some((publisher, workdir)) = self.new_job(kind, span) else {
+        let Some((publisher, workdir)) = self.jobs.new_job(kind, span, None) else {
             return;
         };
         // Queued is published before a Stop Intent can find the Job, so that a stop's
@@ -507,6 +534,100 @@ impl RepoService {
             network_jobs.lock().unwrap().remove(&id);
             publisher.publish(state, &output);
         });
+    }
+}
+
+impl Jobs {
+    /// A publisher for a new Job in the open repository, or `None` after publishing that
+    /// no repository is open. `follows` is the Job whose success started this one.
+    fn new_job(
+        &self,
+        kind: JobKind,
+        span: tracing::Span,
+        follows: Option<JobId>,
+    ) -> Option<(JobPublisher, PathBuf)> {
+        let id = JobId(self.next.fetch_add(1, Ordering::Relaxed));
+        let workdir = self.reads.open.lock().unwrap().clone();
+        let job = JobPublisher {
+            id,
+            kind,
+            workdir: workdir.clone().unwrap_or_default(),
+            span,
+            follows,
+            outbox: self.reads.outbox.clone(),
+        };
+        match workdir {
+            Some(workdir) => Some((job, workdir)),
+            None => {
+                job.publish(JobState::Done(Err("no repository is open".to_owned())), "");
+                None
+            }
+        }
+    }
+}
+
+impl Writes {
+    /// Queues a switch to `branch`, as the Switch Intent does or as the second Job of a
+    /// Stash and switch.
+    fn queue_switch(&self, branch: String, span: tracing::Span, follows: Option<JobId>) {
+        let kind = JobKind::Switch {
+            branch: branch.clone(),
+        };
+        self.queue(
+            kind,
+            span,
+            follows,
+            move |workdir, gate, output| switch::switch(workdir, &branch, gate, output),
+            None,
+        );
+    }
+
+    /// Queues a Local write Job that runs `run` in the open repository, publishing its
+    /// state and live output, and then refreshes refs and status whatever the outcome. If it
+    /// succeeds, `next` queues the Job that follows it, before its outcome is published.
+    fn queue(
+        &self,
+        kind: JobKind,
+        span: tracing::Span,
+        follows: Option<JobId>,
+        run: impl FnOnce(&Path, &StartGate, &mut dyn FnMut(&[u8])) -> Result<(), String>
+        + Send
+        + 'static,
+        next: Option<Next>,
+    ) {
+        let Some((job, workdir)) = self.jobs.new_job(kind, span, follows) else {
+            return;
+        };
+        job.publish(JobState::Queued, "");
+        let writes = self.clone();
+        self.queue.push(move || {
+            let _entered =
+                tracing::info_span!(parent: &job.span, "local_write_job", id = job.id.0).entered();
+            job.publish(JobState::Running, "");
+            let (state, output) =
+                job.run(|output| JobState::Done(run(&workdir, &writes.gate, output)));
+            writes
+                .jobs
+                .reads
+                .refresh_if_open(&workdir, Refresh::RefsAndStatus, &job.span);
+            if let (Some(next), JobState::Done(Ok(()))) = (next, &state) {
+                writes.start_next(next, &workdir, job.id);
+            }
+            job.publish(state, &output);
+        });
+    }
+
+    /// Runs `next` for the Job `done`, which succeeded in `workdir`, unless that repository
+    /// is no longer open: another Open has named a different one, or a Quit or a Force quit
+    /// has closed it. Decided under the lock each Intent holds, so a Quit either comes first
+    /// and nothing follows, or comes after and waits for the Job `next` queues.
+    fn start_next(&self, next: Next, workdir: &Path, done: JobId) {
+        let _intents = self.jobs.quitting.lock().unwrap();
+        if self.jobs.reads.open.lock().unwrap().as_deref() != Some(workdir) {
+            tracing::debug!("the repository is no longer open; the next Job doesn't start");
+            return;
+        }
+        next(self, done);
     }
 }
 
@@ -559,6 +680,7 @@ struct JobPublisher {
     kind: JobKind,
     workdir: PathBuf,
     span: tracing::Span,
+    follows: Option<JobId>,
     outbox: Arc<Outbox>,
 }
 
@@ -572,6 +694,7 @@ impl JobPublisher {
             output: output.to_owned(),
             progress: last_line(output),
             span: self.span.clone(),
+            follows: self.follows,
         }));
     }
 

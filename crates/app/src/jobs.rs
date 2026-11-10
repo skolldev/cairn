@@ -1,6 +1,7 @@
 //! The Jobs `app` has seen, by [`JobId`], from their Snapshots, and the banner showing the
 //! newest: queued or running with its latest output line, done for a moment, or failed with
-//! git's own words until the user dismisses them or starts another Job.
+//! git's own words until the user dismisses them or starts another Job. A switch git refused
+//! because local changes would be overwritten also offers Stash and switch.
 //!
 //! A Local write Job has no stop button (ADR 0002). Quit and Force quit handle a running one,
 //! and [`QuitView`](crate::quit::QuitView) reads the same Snapshots on its own.
@@ -12,10 +13,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cairn_repo::{JobId, JobKind, JobSnapshot, JobState};
+use cairn_repo::{Intent, JobId, JobKind, JobSnapshot, JobState};
 use gpui::{
-    Context, IntoElement, ParentElement, Render, SharedString, Styled, Task, Window, div,
-    prelude::*, rgb,
+    Context, EventEmitter, IntoElement, ParentElement, Render, SharedString, Styled, Task, Window,
+    div, prelude::*, rgb,
 };
 
 /// How long a Job that ended well stays on screen.
@@ -42,8 +43,15 @@ pub enum Banner {
     Failed {
         title: String,
         error: String,
+        /// The failure offers Stash and switch beside Dismiss.
+        stash_and_switch: bool,
     },
 }
+
+/// The user clicked Stash and switch: send this Intent.
+pub struct StashAndSwitch(pub Intent);
+
+impl EventEmitter<StashAndSwitch> for JobsView {}
 
 #[derive(Default)]
 pub struct JobsView {
@@ -104,6 +112,7 @@ impl JobsView {
             JobState::Done(Err(error)) => Banner::Failed {
                 title,
                 error: error.clone(),
+                stash_and_switch: job.stash_and_switch().is_some(),
             },
         })
     }
@@ -113,6 +122,7 @@ impl JobsView {
 fn title(kind: &JobKind) -> String {
     match kind {
         JobKind::Switch { branch } => format!("git switch {branch}"),
+        JobKind::Stash { .. } => "git stash push".to_owned(),
         JobKind::Fetch => "git fetch".to_owned(),
         JobKind::Push => "git push".to_owned(),
     }
@@ -161,8 +171,20 @@ impl Render for JobsView {
             Banner::Stopped { title } => row
                 .child(div().child(title))
                 .child(line("job:stopped", "Stopped".into()).text_color(rgb(DIM))),
-            Banner::Failed { title, error } => {
-                let id = self.newest().map(|job| job.id);
+            Banner::Failed { title, error, .. } => {
+                let newest = self.newest();
+                let id = newest.map(|job| job.id);
+                let offer = newest.and_then(|job| job.stash_and_switch());
+                let button = |id: &'static str| {
+                    div()
+                        .id(id)
+                        .debug_selector(move || format!("job:{id}"))
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(rgb(0x2a2f37))
+                        .cursor_pointer()
+                };
                 row.child(
                     div()
                         .flex_1()
@@ -177,15 +199,18 @@ impl Render for JobsView {
                                 .text_color(rgb(FAILED)),
                         ),
                 )
+                .children(offer.map(|intent| {
+                    button("stash-and-switch")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(id) = id {
+                                this.hide_through(id, cx);
+                            }
+                            cx.emit(StashAndSwitch(intent.clone()));
+                        }))
+                        .child("Stash and switch")
+                }))
                 .child(
-                    div()
-                        .id("job-dismiss")
-                        .debug_selector(|| "job:dismiss".to_owned())
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .bg(rgb(0x2a2f37))
-                        .cursor_pointer()
+                    button("dismiss")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(id) = id {
                                 this.hide_through(id, cx);
