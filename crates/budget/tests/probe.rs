@@ -93,8 +93,7 @@ fn a_switch_is_shown_once_head_status_and_the_untracked_flip_all_answer() {
     let baseline = frame(10);
     let switched = Expect::Switched {
         branch: "budget-b".to_owned(),
-        untracked: "budget.keep".to_owned(),
-        listed: false,
+        untracked: "budget-dir/keep".to_owned(),
     };
     let done = Frame {
         head: Some("budget-b".to_owned()),
@@ -102,7 +101,7 @@ fn a_switch_is_shown_once_head_status_and_the_untracked_flip_all_answer() {
         staged: 2,
         unstaged: 2,
         untracked: 2,
-        untracked_paths: vec![],
+        untracked_paths: vec!["budget-dir/keep".to_owned()],
         ..frame(20)
     };
     assert!(switched.met_by(&done, &baseline));
@@ -137,9 +136,10 @@ fn a_switch_is_shown_once_head_status_and_the_untracked_flip_all_answer() {
         ),
         (
             Frame {
-                untracked_paths: vec!["budget.keep".to_owned()],
+                untracked_paths: vec!["budget-dir/".to_owned()],
                 ..done.clone()
             },
+            // Seen red: with `met_by` ignoring which entry Untracked lists.
             "Untracked hasn't flipped",
         ),
     ] {

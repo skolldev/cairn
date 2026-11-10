@@ -111,8 +111,10 @@ fn a_long_walk_doesnt_delay_an_interactive_read_even_with_a_worker_already_busy(
 
     git(&f.repo, &["branch", "made-while-walking"]);
     let mut seen = Seen::default();
-    // Seen red twice: the refs Slot on the Background lane, which queues this read behind the
-    // walk, and the history Slot on the Interactive lane, which leaves it no worker.
+    // Seen red: the refs Slot on the Background lane, which queues this read behind the walk.
+    // The history Slot on the Interactive lane went red too while that lane had 2 workers,
+    // because the walk and the blocked filter left it none. With 4 (#54) that stays green, so
+    // this no longer shows which lane the walk runs on.
     seen.until(&harness, |seen| {
         seen.all.iter().any(|s| match s {
             Snapshot::Refs(r) => on_branch(r, "made-while-walking"),
@@ -284,15 +286,13 @@ mod threads {
         // A worker sets its QoS as it starts, so give it the moment that takes.
         let threads = loop {
             let threads = lane_threads();
-            let settled = all_are(
-                &threads,
-                "cairn-interactive-0",
-                libc::qos_class_t::QOS_CLASS_USER_INITIATED,
-            ) && all_are(
-                &threads,
-                "cairn-interactive-1",
-                libc::qos_class_t::QOS_CLASS_USER_INITIATED,
-            ) && all_are(
+            let settled = (0..4).all(|i| {
+                all_are(
+                    &threads,
+                    &format!("cairn-interactive-{i}"),
+                    libc::qos_class_t::QOS_CLASS_USER_INITIATED,
+                )
+            }) && all_are(
                 &threads,
                 "cairn-background-0",
                 libc::qos_class_t::QOS_CLASS_UTILITY,
@@ -323,7 +323,9 @@ mod threads {
             [
                 "cairn-background-0",
                 "cairn-interactive-0",
-                "cairn-interactive-1"
+                "cairn-interactive-1",
+                "cairn-interactive-2",
+                "cairn-interactive-3"
             ]
         );
     }

@@ -125,7 +125,15 @@ fn unstaged_of(
         .map_err(text)?
         .success()
         .map_err(text)?;
-    let raw = parse_raw(&out)?;
+    let mut raw = parse_raw(&out)?;
+    // For an unmerged path `diff-files` writes a `U` record, then one comparing a stage with
+    // the file. `git status` lists the path once, as unmerged.
+    let unmerged: Vec<RepoPath> = raw
+        .iter()
+        .filter(|r| r.status == b'U')
+        .map(|r| r.path.clone())
+        .collect();
+    raw.retain(|r| r.status == b'U' || !unmerged.contains(&r.path));
 
     // Only a same-mode modification of a regular file can be stat-only. git can't hash a
     // symlink's target through `hash-object`, and a submodule's change is its own.

@@ -10,7 +10,7 @@ use std::thread::{JoinHandle, sleep};
 use std::time::{Duration, Instant};
 
 use crate::clock;
-use crate::fixture::{BRANCH_A, BRANCH_B, KEEP, SAVED, Sandbox};
+use crate::fixture::{BRANCH_A, BRANCH_B, SAVED, Sandbox};
 use crate::presented::{MetalTrace, PresentMonTrace, PresentSource, largest_gap_ms};
 use crate::probe::{ANIMATE, ENV, Expect, Frame, Line, Trace};
 use crate::report::{Environment, Row};
@@ -336,9 +336,7 @@ impl Change {
             },
             Change::GitSwitch | Change::IntentSwitch => Expect::Switched {
                 branch: Self::branch(index).to_owned(),
-                untracked: KEEP.to_owned(),
-                // Ignored on BRANCH_B.
-                listed: !forward,
+                untracked: Sandbox::untracked_on(Self::branch(index)).to_owned(),
             },
         }
     }

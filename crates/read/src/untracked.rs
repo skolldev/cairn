@@ -11,44 +11,46 @@ use gix::dir::entry::{Kind, Status};
 use gix::dir::walk::{EmissionMode, delegate::Collect};
 use gix::status::UntrackedFiles;
 
-use crate::{ReadError, err};
+use crate::{Index, ReadError, err};
 
 pub(crate) fn read(
     repo: &gix::Repository,
+    index: &Index,
     interrupt: &AtomicBool,
 ) -> Result<Vec<RepoPath>, ReadError> {
     let Some(mode) = emission_mode(repo)? else {
         return Ok(Vec::new());
     };
-    let index = repo.index_or_empty().map_err(err)?;
-    walk(repo, &index, mode, None::<&[Vec<u8>]>, interrupt)
+    walk(repo, index.state(), mode, None::<&[Vec<u8>]>, interrupt)
 }
 
-/// The list `last` was, after the worktree changed at `changed`, given that the index and the
-/// excludes haven't changed since `last` was read.
+/// The list `last` was, read against the index `before`, after the worktree changed at
+/// `changed` and the index became `index`, given that the excludes haven't changed since.
+/// `changed` must hold every path tracked in only one of `before` and `index`.
 ///
 /// Only what a change can affect is walked again. Whether a directory collapses into one
 /// `dir/` entry depends on whether it holds any tracked file, so a change at `a/b/c` can only
-/// change entries under the child of its deepest ancestor that holds one: with `a/` tracked
-/// and `a/b/` not, that is `a/b`, which may appear, vanish or collapse. Every directory above
-/// keeps its tracked files, so nothing outside the child changes. A tracked file itself is
-/// never listed, so a change to one walks nothing.
+/// change entries under the child of its deepest ancestor that holds one in both indexes:
+/// with `a/` tracked and `a/b/` not, that is `a/b`, which may appear, vanish or collapse.
+/// Every directory above keeps its tracked files, so nothing outside the child changes. A
+/// file tracked in both is never listed, so a change to one walks nothing.
 pub(crate) fn read_within(
     repo: &gix::Repository,
     interrupt: &AtomicBool,
+    index: &Index,
+    before: &Index,
     last: &[RepoPath],
     changed: &[&[u8]],
 ) -> Result<Vec<RepoPath>, ReadError> {
     let Some(mode) = emission_mode(repo)? else {
         return Ok(Vec::new());
     };
-    let index = repo.index_or_empty().map_err(err)?;
-    let regions = regions(&index, changed);
+    let regions = regions(before.state(), index.state(), changed);
     if regions.is_empty() {
         return Ok(last.to_vec());
     }
     let ignore_case = repo.filesystem_options().map_err(err)?.ignore_case;
-    let walked = walk(repo, &index, mode, Some(&regions), interrupt)?;
+    let walked = walk(repo, index.state(), mode, Some(&regions), interrupt)?;
     let mut paths: Vec<RepoPath> = last
         .iter()
         .filter(|p| !regions.iter().any(|r| covers(r, p.as_bytes(), ignore_case)))
@@ -61,15 +63,20 @@ pub(crate) fn read_within(
 }
 
 /// The smallest parts of the worktree whose entries a change at each of `changed` can affect,
-/// none inside another. See [`read_within`].
-fn regions(index: &gix::index::State, changed: &[&[u8]]) -> Vec<Vec<u8>> {
+/// none inside another, when the index went from `before` to `index`. See [`read_within`].
+fn regions(
+    before: &gix::index::State,
+    index: &gix::index::State,
+    changed: &[&[u8]],
+) -> Vec<Vec<u8>> {
     let mut regions: Vec<Vec<u8>> = Vec::new();
     for &path in changed {
         let path = path.strip_suffix(b"/").unwrap_or(path);
         if path.is_empty() {
             continue;
         }
-        // The deepest proper ancestor holding a tracked file; the worktree root always counts.
+        // The deepest proper ancestor holding a tracked file in both indexes; the worktree
+        // root always counts.
         let slashes: Vec<usize> = path
             .iter()
             .enumerate()
@@ -79,15 +86,19 @@ fn regions(index: &gix::index::State, changed: &[&[u8]]) -> Vec<Vec<u8>> {
         let end = slashes
             .iter()
             .rev()
-            .find(|&&i| index.path_is_directory(path[..i].as_bstr()))
+            .find(|&&i| {
+                let dir = path[..i].as_bstr();
+                before.path_is_directory(dir) && index.path_is_directory(dir)
+            })
             .map_or(0, |&i| i + 1);
         let child_end = path[end..]
             .iter()
             .position(|&b| b == b'/')
             .map_or(path.len(), |i| end + i);
         let child = &path[..child_end];
-        let tracked_file =
-            child.len() == path.len() && index.entry_by_path(path.as_bstr()).is_some();
+        let tracked_file = child.len() == path.len()
+            && before.entry_by_path(path.as_bstr()).is_some()
+            && index.entry_by_path(path.as_bstr()).is_some();
         if !tracked_file {
             regions.push(child.to_vec());
         }

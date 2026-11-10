@@ -6,7 +6,7 @@
 mod common;
 
 use common::trace::{self, Fields};
-use common::{Harness, Seen, open, small_fixture_clone, unstaged};
+use common::{Harness, Seen, git, open, small_fixture_clone, unstaged};
 
 #[test]
 fn a_file_saved_outside_the_service_traces_narrowed_reads_of_unstaged_and_untracked() {
@@ -60,6 +60,43 @@ fn a_file_saved_outside_the_service_traces_narrowed_reads_of_unstaged_and_untrac
                 .unwrap();
             assert!(value >= 0.0, "{duration}: {span:?}");
         }
+    }
+}
+
+#[test]
+fn an_index_write_traces_narrowed_reads_of_unstaged_and_untracked() {
+    trace::install();
+    let (_dir, repo) = small_fixture_clone();
+    common::assert_filesystem_events_available(&repo);
+    let harness = Harness::start();
+    let opened = open(&harness, &repo);
+
+    std::fs::write(repo.join("README.md"), "saved outside Cairn\n").unwrap();
+    git(&repo, &["add", "--", "README.md"]);
+    // Gone from Unstaged once the index write is read.
+    let mut seen = Seen::default();
+    seen.until(&harness, |seen| {
+        unstaged(&seen.all).iter().any(|u| {
+            u.generation > opened.unstaged
+                && u.result
+                    .as_ref()
+                    .is_ok_and(|c| c.iter().all(|c| c.path.as_bytes() != b"README.md"))
+        })
+    });
+    for (slot, scope) in [
+        ("staged", None),
+        ("unstaged", Some("paths")),
+        ("untracked", Some("paths")),
+    ] {
+        let span = wait_for_span(|f| {
+            trace::about(f, &repo)
+                && f.get("slot").map(String::as_str) == Some(slot)
+                && f.get("refresh").map(String::as_str) == Some("index")
+        });
+        // Only the entries the index write changed are read again. Staged has no scope: it
+        // is read in full. Seen red: with an index write reading everything, Unstaged's is
+        // `full`.
+        assert_eq!(span.get("scope").map(String::as_str), scope, "{span:?}");
     }
 }
 

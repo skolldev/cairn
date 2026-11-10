@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use cairn_budget::fixture::{BRANCH_A, BRANCH_B, KEEP, SAVED, Sandbox};
+use cairn_budget::fixture::{BRANCH_A, BRANCH_B, KEEP, KEEP_DIR, SAVED, Sandbox};
 use cairn_budget::probe::Line;
 use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
 
@@ -117,7 +117,7 @@ async fn a_frame_reports_what_the_views_hold_after_an_external_change(cx: &mut T
     // Every Slot, because each answers the Open on its own schedule.
     let opened = app.wait_for_frame(|f| {
         f.head.as_deref() == Some(BRANCH_A)
-            && f.untracked_paths.iter().any(|p| p == KEEP)
+            && f.untracked_paths.iter().any(|p| p == KEEP_DIR)
             && f.refs > 0
             && f.staged > 0
             && f.unstaged > 0
@@ -162,7 +162,7 @@ async fn a_switch_intent_is_stamped_and_ends_with_the_flip_on_screen(cx: &mut Te
     assert!(intent_ns > opened.paint_ns);
 
     let switched = app.wait_for_frame(|f| {
-        f.head.as_deref() == Some(BRANCH_B) && !f.untracked_paths.iter().any(|p| p == KEEP)
+        f.head.as_deref() == Some(BRANCH_B) && f.untracked_paths.iter().any(|p| p == KEEP)
     });
     assert!(switched.paint_ns > intent_ns);
 }
