@@ -42,6 +42,10 @@ A Job that talks to a remote. It stops only when the user asks.
 A Job that changes the local repository. Once started it always runs to completion.
 _Avoid_: Write (alone, because a push also writes)
 
+**Prompt**:
+A question that git, or a program git runs such as `ssh`, asks the user before a Job can go on. Cairn either shows it or makes it fail. A Job never waits on one.
+_Avoid_: Dialog, popup (those are Cairn's own windows)
+
 **Quit**:
 Leaving Cairn without risk to the repository: Read Jobs are dropped, Network Jobs stopped, and Local write Jobs run to their end first. It is itself an Intent.
 
