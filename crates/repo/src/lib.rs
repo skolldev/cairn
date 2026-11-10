@@ -564,6 +564,20 @@ impl Jobs {
             }
         }
     }
+
+    /// Runs `start`, which queues the second Job of an Intent made of two after the first
+    /// succeeded in `workdir`, unless that repository is no longer open: another Open has
+    /// named a different one, or a Quit or a Force quit has closed it. Decided under the
+    /// lock each Intent holds, so a Quit either comes first and nothing starts, or comes
+    /// after and waits for the Job `start` queues. Any queue's Job can call it.
+    fn start_next(&self, workdir: &Path, start: impl FnOnce()) {
+        let _intents = self.quitting.lock().unwrap();
+        if self.reads.open.lock().unwrap().as_deref() != Some(workdir) {
+            tracing::debug!("the repository is no longer open; the next Job doesn't start");
+            return;
+        }
+        start();
+    }
 }
 
 impl Writes {
@@ -611,23 +625,11 @@ impl Writes {
                 .reads
                 .refresh_if_open(&workdir, Refresh::RefsAndStatus, &job.span);
             if let (Some(next), JobState::Done(Ok(()))) = (next, &state) {
-                writes.start_next(next, &workdir, job.id);
+                let id = job.id;
+                writes.jobs.start_next(&workdir, || next(&writes, id));
             }
             job.publish(state, &output);
         });
-    }
-
-    /// Runs `next` for the Job `done`, which succeeded in `workdir`, unless that repository
-    /// is no longer open: another Open has named a different one, or a Quit or a Force quit
-    /// has closed it. Decided under the lock each Intent holds, so a Quit either comes first
-    /// and nothing follows, or comes after and waits for the Job `next` queues.
-    fn start_next(&self, next: Next, workdir: &Path, done: JobId) {
-        let _intents = self.jobs.quitting.lock().unwrap();
-        if self.jobs.reads.open.lock().unwrap().as_deref() != Some(workdir) {
-            tracing::debug!("the repository is no longer open; the next Job doesn't start");
-            return;
-        }
-        next(self, done);
     }
 }
 

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use cairn_repo::{Intent, JobKind, JobState, RepoService, Snapshot};
 use common::{
     Harness, Release, Seen, git, git_read, install_blocking_hook, install_slow_clean_filter,
-    is_ended, lock_files, open, slow_remote, small_fixture_clone, wait_for_file,
+    is_ended, lock_files, open, slow_remote, small_fixture_clone, switch_to, wait_for_file,
     wait_until_network_job_is_waiting,
 };
 
@@ -23,12 +23,6 @@ fn is_quit(s: &Snapshot) -> bool {
 
 fn quit_seen(seen: &Seen) -> bool {
     seen.all.iter().any(is_quit)
-}
-
-fn switch_to(branch: &str) -> JobKind {
-    JobKind::Switch {
-        branch: branch.to_owned(),
-    }
 }
 
 fn current_branch(repo: &Path) -> String {

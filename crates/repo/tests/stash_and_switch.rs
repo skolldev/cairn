@@ -3,13 +3,13 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use cairn_repo::{Head, Intent, JobKind, JobSnapshot, JobState, Snapshot};
 use common::{
-    Harness, Release, Seen, block_first_run, git, git_output, git_read, is_ended, open,
-    wait_for_file,
+    Harness, Release, Seen, block_first_run, git, git_output, git_read, is_ended, make_executable,
+    open, refs_of, switch_to, wait_for_file,
 };
 
 /// A repository on `main` with a branch `other`, one commit ahead, that changes `file.txt`
@@ -75,24 +75,8 @@ impl Fixture {
     }
 }
 
-fn make_executable(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-}
-
 fn stash(untracked: bool) -> JobKind {
     JobKind::Stash { untracked }
-}
-
-fn switch(branch: &str) -> JobKind {
-    JobKind::Switch {
-        branch: branch.to_owned(),
-    }
 }
 
 fn stash_and_switch(branch: &str, untracked: bool) -> Intent {
@@ -106,9 +90,9 @@ fn stash_and_switch(branch: &str, untracked: bool) -> Intent {
 fn refused_switch(harness: &Harness, seen: &mut Seen) -> Arc<JobSnapshot> {
     harness.service.send(Intent::Switch("other".to_owned()));
     seen.until(harness, |s| {
-        s.job(&switch("other")).is_some_and(|j| is_ended(j))
+        s.job(&switch_to("other")).is_some_and(|j| is_ended(j))
     });
-    let job = seen.job(&switch("other")).unwrap().clone();
+    let job = seen.job(&switch_to("other")).unwrap().clone();
     assert!(matches!(job.state, JobState::Done(Err(_))), "{job:?}");
     job
 }
@@ -153,25 +137,19 @@ fn a_switch_refused_for_tracked_changes_offers_a_stash_without_untracked_files_t
         jobs(&seen)[1..],
         [
             (stash(false), JobState::Done(Ok(()))),
-            (switch("other"), JobState::Done(Ok(()))),
+            (switch_to("other"), JobState::Done(Ok(()))),
         ]
     );
     assert_eq!(f.head(), "refs/heads/other");
     assert_eq!(f.stashes(), ["On main: WIP on main"]);
     // The stash appears in the refs Snapshot, as the sidebar's Stashes show it.
     seen.until(&harness, |s| {
-        s.all.iter().rev().find_map(refs_of).is_some_and(|refs| {
+        let refs = s.all.iter().rev().find_map(refs_of);
+        refs.and_then(|r| r.result.as_ref().ok()).is_some_and(|refs| {
             refs.stashes.first().is_some_and(|stash| stash.message == "On main: WIP on main")
                 && matches!(&refs.head, Head::Branch { name, .. } if name.as_str() == "refs/heads/other")
         })
     });
-}
-
-fn refs_of(snapshot: &Snapshot) -> Option<&cairn_repo::Refs> {
-    match snapshot {
-        Snapshot::Refs(r) => r.result.as_ref().ok(),
-        _ => None,
-    }
 }
 
 #[test]
@@ -199,7 +177,7 @@ fn a_switch_refused_for_untracked_files_the_branch_tracks_offers_a_stash_with_th
         jobs(&seen)[1..],
         [
             (stash(true), JobState::Done(Ok(()))),
-            (switch("other"), JobState::Done(Ok(()))),
+            (switch_to("other"), JobState::Done(Ok(()))),
         ]
     );
     assert_eq!(f.head(), "refs/heads/other");
@@ -253,10 +231,10 @@ fn a_switch_that_fails_for_another_reason_offers_no_stash_and_switch() {
         .service
         .send(Intent::Switch("no-such-branch".to_owned()));
     seen.until(&harness, |s| {
-        s.job(&switch("no-such-branch"))
+        s.job(&switch_to("no-such-branch"))
             .is_some_and(|j| is_ended(j))
     });
-    let failed = seen.job(&switch("no-such-branch")).unwrap();
+    let failed = seen.job(&switch_to("no-such-branch")).unwrap();
     assert!(matches!(failed.state, JobState::Done(Err(_))), "{failed:?}");
     assert!(failed.stash_and_switch().is_none(), "{failed:?}");
 }
@@ -275,10 +253,10 @@ fn failed_stash_then_marker(harness: &Harness, seen: &mut Seen, marker: &str) ->
     };
     harness.service.send(Intent::Switch(marker.to_owned()));
     seen.until(harness, |s| {
-        s.job(&switch(marker)).is_some_and(|j| is_ended(j))
+        s.job(&switch_to(marker)).is_some_and(|j| is_ended(j))
     });
     let kinds: Vec<_> = jobs(seen).into_iter().map(|(kind, _)| kind).collect();
-    assert_eq!(kinds, [stash(false), switch(marker)], "{:?}", jobs(seen));
+    assert_eq!(kinds, [stash(false), switch_to(marker)], "{:?}", jobs(seen));
     error.clone()
 }
 
@@ -298,14 +276,15 @@ fn a_stash_that_fails_shows_gits_error_and_never_starts_the_switch() {
     // Seen red: with `start_next` called whatever the stash's outcome, a switch to other
     // comes before the marker.
     let error = failed_stash_then_marker(&harness, &mut seen, "clash");
-    // git writes this one to stdout. Seen red: an error from stderr alone is empty.
-    assert_eq!(error, "file.txt: needs merge\n");
+    // git writes this to stdout. Newer git adds `error: could not write index` on stderr
+    // (`docs/git-versions.md`). Seen red: an error from stderr alone lacks it.
+    assert!(error.starts_with("file.txt: needs merge\n"), "{error}");
     assert_eq!(f.head(), "refs/heads/clash");
     assert!(f.stashes().is_empty());
 }
 
 #[test]
-fn a_stash_that_fails_without_a_word_says_how_it_ended() {
+fn a_stash_that_fails_on_a_held_index_lock_says_so_even_when_git_says_nothing() {
     let f = fixture();
     f.edit_tracked();
     let harness = Harness::start();
@@ -315,9 +294,16 @@ fn a_stash_that_fails_without_a_word_says_how_it_ended() {
     let mut seen = Seen::default();
 
     let error = failed_stash_then_marker(&harness, &mut seen, "main");
-    // git says nothing on either stream for a held index lock. Seen red: without the
-    // fallback, the error is empty.
-    assert!(error.starts_with("git stash push failed with "), "{error}");
+    // git 2.37 says nothing on either stream for a held index lock, and newer git names the
+    // lock on stderr (`docs/git-versions.md`). The terminal's own stash tells which this is.
+    // Seen red, on 2.37: without the fallback, the error is empty.
+    let terminal = git_output(&f.repo, &["stash", "push", "-m", "from the terminal"]);
+    assert!(!terminal.status.success());
+    if terminal.stdout.is_empty() && terminal.stderr.is_empty() {
+        assert!(error.starts_with("git stash push failed with "), "{error}");
+    } else {
+        assert!(error.contains("index.lock"), "{error}");
+    }
     assert_eq!(f.head(), "refs/heads/main");
     assert_eq!(
         std::fs::read_to_string(&lock).unwrap(),
@@ -370,7 +356,7 @@ fn with_nothing_left_to_stash_the_switch_still_runs() {
         jobs(&seen),
         [
             (stash(false), JobState::Done(Ok(()))),
-            (switch("other"), JobState::Done(Ok(()))),
+            (switch_to("other"), JobState::Done(Ok(()))),
         ]
     );
     assert_eq!(f.head(), "refs/heads/other");

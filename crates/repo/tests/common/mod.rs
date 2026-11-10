@@ -437,10 +437,24 @@ pub fn install_blocking_hook(repo: &Path, log: &Path, release: &Path) {
     );
     let hook = repo.join(".git/hooks/post-checkout");
     std::fs::write(&hook, script).unwrap();
+    make_executable(&hook);
+}
+
+/// Lets a hook or script run. Windows needs nothing: git runs hooks through its own sh.
+pub fn make_executable(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// The Job a switch to this local branch runs.
+pub fn switch_to(branch: &str) -> JobKind {
+    JobKind::Switch {
+        branch: branch.to_owned(),
     }
 }
 

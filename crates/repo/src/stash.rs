@@ -17,7 +17,7 @@ pub(crate) fn stash(
     output: &mut dyn FnMut(&[u8]),
 ) -> Result<(), String> {
     let git = Git::shared().map_err(|e| e.to_string())?;
-    let message = format!("WIP on {}", leaving(git, workdir)?);
+    let message = format!("WIP on {}", head_name(git, workdir, gate)?);
     let mut args = vec!["stash", "push"];
     if untracked {
         args.push("-u");
@@ -48,10 +48,15 @@ pub(crate) fn stash(
     })
 }
 
-/// The short name of the branch HEAD is on, or HEAD's short sha when it is detached.
-fn leaving(git: &Git, workdir: &Path) -> Result<String, String> {
+/// The short name of the branch HEAD is on, or HEAD's short sha when it is detached: the
+/// name of what the switch leaves. Through `gate` too, so no git starts after a Force quit.
+fn head_name(git: &Git, workdir: &Path, gate: &StartGate) -> Result<String, String> {
     let read = |args: &[&str]| {
-        git.run(&Invocation::new(JobClass::Read, workdir).args(args.iter().copied()))
+        git.run(
+            &Invocation::new(JobClass::Read, workdir)
+                .args(args.iter().copied())
+                .through(gate),
+        )
     };
     // `--quiet` makes a detached HEAD exit 1 with nothing on stderr.
     let branch =
