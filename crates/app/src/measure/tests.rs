@@ -3,7 +3,7 @@
 
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cairn_budget::fixture::{BRANCH_A, BRANCH_B, KEEP, SAVED, Sandbox};
@@ -12,21 +12,7 @@ use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
 
 use super::{Command, Probe};
 use crate::Workspace;
-
-fn hermetic() {
-    static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
-    HOME.get_or_init(|| {
-        let home = tempfile::tempdir().expect("temp home");
-        // SAFETY: inside `OnceLock::get_or_init`, which blocks every other test thread at the
-        // same call until it returns, and nothing spawns git before it.
-        unsafe {
-            std::env::set_var("HOME", home.path());
-            std::env::set_var("XDG_CONFIG_HOME", home.path().join(".config"));
-            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
-        }
-        home
-    });
-}
+use crate::testing::hermetic;
 
 /// A repository with one commit, standing in as the fixture a sandbox is cloned from.
 fn sandbox() -> (tempfile::TempDir, Sandbox) {
@@ -60,6 +46,7 @@ struct App<'a> {
 
 fn open<'a>(cx: &'a mut TestAppContext, repo: &Path) -> App<'a> {
     cx.executor().allow_parking();
+    cx.update(gpui_component::init);
     let lines: Arc<Mutex<Vec<Line>>> = Arc::default();
     let sink = lines.clone();
     let path = repo.to_path_buf();
