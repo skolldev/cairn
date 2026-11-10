@@ -15,7 +15,6 @@ fn a_file_saved_outside_the_service_traces_narrowed_reads_of_unstaged_and_untrac
     common::assert_filesystem_events_available(&repo);
     let harness = Harness::start();
     let opened = open(&harness, &repo);
-    let ours = repo.display().to_string();
 
     std::fs::write(repo.join("README.md"), "saved outside Cairn\n").unwrap();
     // Shown in Unstaged: by then every status Slot has been asked again.
@@ -38,7 +37,7 @@ fn a_file_saved_outside_the_service_traces_narrowed_reads_of_unstaged_and_untrac
         }
         .get();
         let span = wait_for_span(|f| {
-            f.get("repository") == Some(&ours)
+            trace::about(f, &repo)
                 && f.get("slot").map(String::as_str) == Some(slot)
                 && f.get("refresh").map(String::as_str) == Some("worktree")
                 && f.get("generation").and_then(|g| g.parse::<u64>().ok()) > Some(after)
@@ -67,18 +66,7 @@ fn a_file_saved_outside_the_service_traces_narrowed_reads_of_unstaged_and_untrac
 /// The first closed `read_job` span `matches` accepts. A span closes once its Read Job has
 /// published, so it can trail the Snapshot.
 fn wait_for_span(matches: impl Fn(&Fields) -> bool) -> Fields {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let spans = trace::read_jobs();
-        if let Some(found) = spans.iter().find(|f| matches(f)) {
-            return found.clone();
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no such read_job span: {spans:?}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    trace::wait_for(trace::read_jobs, "read_job", matches).1
 }
 
 #[test]
@@ -87,13 +75,11 @@ fn an_open_traces_its_read_jobs_as_open_and_not_pending() {
     let (_dir, repo) = small_fixture_clone();
     let harness = Harness::start();
     let opened = open(&harness, &repo);
-    let repository = repo.display().to_string();
 
     // A Read Job's span closes once it has published, so it can trail the Snapshot.
     let spans = |slot: &str| {
         wait_for_span(|f| {
-            f.get("repository") == Some(&repository)
-                && f.get("slot").map(String::as_str) == Some(slot)
+            trace::about(f, &repo) && f.get("slot").map(String::as_str) == Some(slot)
         });
         trace::read_jobs()
     };
@@ -107,7 +93,7 @@ fn an_open_traces_its_read_jobs_as_open_and_not_pending() {
         let span = spans
             .iter()
             .find(|f| {
-                f.get("repository") == Some(&repository)
+                trace::about(f, &repo)
                     && f.get("slot").map(String::as_str) == Some(slot)
                     && f.get("generation") == Some(&generation.get().to_string())
             })

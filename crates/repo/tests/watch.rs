@@ -285,10 +285,9 @@ fn changes_during(
     change();
     let second = untracked_marker(seen, harness, repo, &after);
     let to = external_change_naming(repo, &after);
-    let repository = repo.display().to_string();
     let changes = trace::external_changes()[from + 1..=to]
         .iter()
-        .filter(|change| change.get("repository") == Some(&repository))
+        .filter(|change| trace::about(change, repo))
         .cloned()
         .collect();
     During {
@@ -300,21 +299,10 @@ fn changes_during(
 /// Waits for the watcher to start an External change in `repo` for a path ending in
 /// `suffix`, and returns where the first such one lies among [`trace::external_changes`].
 fn external_change_naming(repo: &Path, suffix: &str) -> usize {
-    let repository = repo.display().to_string();
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let changes = trace::external_changes();
-        if let Some(at) = changes.iter().position(|change| {
-            change.get("repository") == Some(&repository) && names(change, suffix)
-        }) {
-            return at;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no External change in {repository} named {suffix}"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    trace::wait_for(trace::external_changes, "external_change", |change| {
+        trace::about(change, repo) && names(change, suffix)
+    })
+    .0
 }
 
 #[test]

@@ -4,7 +4,9 @@
 //! same binary.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
@@ -46,6 +48,31 @@ pub fn read_jobs() -> Vec<Fields> {
 /// handles one event at a time, in the order the OS reported them.
 pub fn external_changes() -> Vec<Fields> {
     spans().external_changes.lock().unwrap().clone()
+}
+
+/// Whether a span is about the repository at `repo`, as the test opened it.
+pub fn about(span: &Fields, repo: &Path) -> bool {
+    span.get("repository")
+        .is_some_and(|r| r.as_str() == repo.display().to_string())
+}
+
+/// Waits until `spans` lists one that `matches` accepts, and returns where the first such
+/// one lies, and it. A span can trail the Snapshot or the event that caused it. `kind`
+/// names the spans for the failure message.
+pub fn wait_for(
+    spans: fn() -> Vec<Fields>,
+    kind: &str,
+    matches: impl Fn(&Fields) -> bool,
+) -> (usize, Fields) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let listed = spans();
+        if let Some(at) = listed.iter().position(&matches) {
+            return (at, listed[at].clone());
+        }
+        assert!(Instant::now() < deadline, "no such {kind} span: {listed:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 struct Recorded;
