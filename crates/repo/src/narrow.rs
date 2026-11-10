@@ -5,6 +5,7 @@
 //! change the watcher saw at known worktree paths reads only those paths again, starting from
 //! the list the Slot read last. An index write reads only the entries it changed (#54): each
 //! read keeps the index it read against, and the next compares it with the index it loads.
+//! A read with nothing flagging the index can take the kept one as its own (#78).
 //! Anything that can change an answer for paths neither names reads everything again: an
 //! Open, a Local write Job, config, the excludes, or an event the watcher lost.
 //!
@@ -41,7 +42,8 @@ struct Changes {
 struct Last<T> {
     workdir: PathBuf,
     list: Vec<T>,
-    /// The index loaded after that read took its changes and before it read.
+    /// The index loaded after that read took its changes and before it read, or, if nothing
+    /// flagged the index, the one the read before it kept.
     index: Index,
 }
 
@@ -56,11 +58,13 @@ pub(crate) enum Scope<T> {
         index: Index,
     },
     /// Only these paths, and whatever changed in the index since `before`, changed since
-    /// `last` was read against `before`.
+    /// `last` was read against `before`. If `index_changed` is false, nothing flagged the
+    /// index since that read took its changes, so `before` stands for it (#78).
     Paths {
         last: Vec<T>,
         before: Index,
         paths: Vec<Vec<u8>>,
+        index_changed: bool,
     },
 }
 
@@ -122,6 +126,7 @@ impl<T: Clone> Narrowed<T> {
                         last: last.list.clone(),
                         before: last.index.clone(),
                         paths: changes.paths.into_iter().collect(),
+                        index_changed: changes.index,
                     }
                 }
             }

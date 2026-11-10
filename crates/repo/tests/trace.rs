@@ -60,6 +60,18 @@ fn a_file_saved_outside_the_service_traces_narrowed_reads_of_unstaged_and_untrac
                 .unwrap();
             assert!(value >= 0.0, "{duration}: {span:?}");
         }
+        // A save changes nothing in `.git`, so Unstaged compares against the index its last
+        // read kept rather than loading it again, about 10 ms on the kernel (#78). Untracked
+        // walks against a load of its own.
+        let index = match slot {
+            "unstaged" => "kept",
+            _ => "loaded",
+        };
+        assert_eq!(
+            span.get("index").map(String::as_str),
+            Some(index),
+            "{span:?}"
+        );
     }
 }
 
@@ -97,6 +109,14 @@ fn an_index_write_traces_narrowed_reads_of_unstaged_and_untracked() {
         // is read in full. Seen red: with an index write reading everything, Unstaged's is
         // `full`.
         assert_eq!(span.get("scope").map(String::as_str), scope, "{span:?}");
+        // The control for a save's kept index: an index write loads it, to compare.
+        if slot != "staged" {
+            assert_eq!(
+                span.get("index").map(String::as_str),
+                Some("loaded"),
+                "{span:?}"
+            );
+        }
     }
 }
 

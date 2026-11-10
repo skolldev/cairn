@@ -319,6 +319,8 @@ impl Slot {
                     // Filled in by a read that can be narrowed to what changed (`narrow`).
                     scope = tracing::field::Empty,
                     paths = tracing::field::Empty,
+                    // `loaded` or `kept`: whether a narrowed read loaded the index (`narrow`).
+                    index = tracing::field::Empty,
                 );
                 let started = Instant::now();
                 // A panicking Read Job must not wedge its Slot or kill a lane worker.
