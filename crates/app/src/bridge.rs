@@ -193,6 +193,12 @@ fn newer(
         tracing::debug!(parent: span, slot, generation = generation.get(), "stale snapshot dropped");
         return false;
     }
+    #[cfg(feature = "measure")]
+    if shown.is_none()
+        && let Some(slot) = cairn_budget::probe::Slot::from_name(slot)
+    {
+        crate::measure::mark(cairn_budget::probe::Mark::Drained(slot));
+    }
     *shown = Some(generation);
     true
 }

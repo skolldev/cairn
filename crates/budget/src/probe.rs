@@ -35,9 +35,81 @@ pub struct Frame {
     pub untracked_paths: Vec<String>,
 }
 
+/// A status Slot or refs, as a launch's marks name them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Slot {
+    Refs,
+    Staged,
+    Unstaged,
+    Untracked,
+}
+
+impl Slot {
+    pub const ALL: [Slot; 4] = [Slot::Refs, Slot::Staged, Slot::Unstaged, Slot::Untracked];
+
+    /// The name the Repo service's `read_job` spans give it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Slot::Refs => "refs",
+            Slot::Staged => "staged",
+            Slot::Unstaged => "unstaged",
+            Slot::Untracked => "untracked",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Slot> {
+        Slot::ALL.into_iter().find(|slot| slot.name() == name)
+    }
+}
+
+/// A point in a launch, for `cairn-budget trace --only launch`. Nothing times a Budget by these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Mark {
+    /// `main` is running.
+    Main,
+    /// GPUI's app has finished launching, and runs Cairn's start-up.
+    Launched,
+    /// The window exists, and Cairn is building what it shows.
+    Window,
+    /// The Repo service has started, and the Open has been sent.
+    Service,
+    /// The Repo service published this Slot's first Snapshot.
+    Published(Slot),
+    /// The window drained this Slot's first Snapshot.
+    Drained(Slot),
+}
+
+impl Mark {
+    fn name(self) -> String {
+        match self {
+            Mark::Main => "main".to_owned(),
+            Mark::Launched => "launched".to_owned(),
+            Mark::Window => "window".to_owned(),
+            Mark::Service => "service".to_owned(),
+            Mark::Published(slot) => format!("published:{}", slot.name()),
+            Mark::Drained(slot) => format!("drained:{}", slot.name()),
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Mark> {
+        match name.split_once(':') {
+            Some(("published", slot)) => Slot::from_name(slot).map(Mark::Published),
+            Some(("drained", slot)) => Slot::from_name(slot).map(Mark::Drained),
+            Some(_) => None,
+            None => match name {
+                "main" => Some(Mark::Main),
+                "launched" => Some(Mark::Launched),
+                "window" => Some(Mark::Window),
+                "service" => Some(Mark::Service),
+                _ => None,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Line {
-    /// The first line a probe writes.
+    /// The first line a probe's window writes. Launch marks can come before it.
     Hello {
         release: bool,
         pid: u32,
@@ -67,6 +139,11 @@ pub enum Line {
     Key {
         ns: u64,
         held: bool,
+    },
+    /// A launch reached this point.
+    Mark {
+        mark: Mark,
+        ns: u64,
     },
 }
 
@@ -115,6 +192,7 @@ impl fmt::Display for Line {
             Line::Presented { id, ns } => write!(f, "presented\t{id}\t{ns}"),
             Line::Dropped { id } => write!(f, "dropped\t{id}"),
             Line::Key { ns, held } => write!(f, "key\t{ns}\t{held}"),
+            Line::Mark { mark, ns } => write!(f, "mark\t{}\t{ns}", mark.name()),
         }
     }
 }
@@ -170,6 +248,10 @@ impl Line {
                 ns: number(0)?,
                 held: flag(1)?,
             }),
+            "mark" => Some(Line::Mark {
+                mark: Mark::from_name(rest.first()?)?,
+                ns: number(1)?,
+            }),
             _ => None,
         }
     }
@@ -214,6 +296,8 @@ pub struct Trace {
     drawables: BTreeMap<u64, Drawable>,
     intents: Vec<(u64, String)>,
     keys: Vec<(u64, bool)>,
+    /// When a launch first reached each point.
+    marks: BTreeMap<Mark, u64>,
 }
 
 impl Trace {
@@ -243,6 +327,9 @@ impl Trace {
             }
             Line::Dropped { .. } => {}
             Line::Key { ns, held } => self.keys.push((ns, held)),
+            Line::Mark { mark, ns } => {
+                self.marks.entry(mark).or_insert(ns);
+            }
         }
     }
 
@@ -264,6 +351,11 @@ impl Trace {
     /// When Cairn sent each Intent, in order.
     pub fn intents(&self) -> &[(u64, String)] {
         &self.intents
+    }
+
+    /// When the launch first reached `mark`, if it said so.
+    pub fn mark(&self, mark: Mark) -> Option<u64> {
+        self.marks.get(&mark).copied()
     }
 
     /// Each key-down: when, and whether the OS flagged it as a repeat.

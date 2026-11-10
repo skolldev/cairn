@@ -69,7 +69,8 @@ pub fn p95(samples: &[f64]) -> f64 {
     percentile(samples, 0.95)
 }
 
-fn median(samples: &[f64]) -> f64 {
+/// The median, as Launch's statistic takes it.
+pub fn median(samples: &[f64]) -> f64 {
     let sorted = sorted(samples);
     match sorted.len() {
         0 => 0.0,

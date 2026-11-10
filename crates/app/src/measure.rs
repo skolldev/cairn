@@ -4,9 +4,11 @@
 //! frame's time from the OS (`cairn_budget::presented`). See `docs/budget-harness.md`.
 
 use std::rc::Rc;
+use std::sync::OnceLock;
 
 use cairn_budget::clock;
-use cairn_budget::probe::{ANIMATE, ENV, Frame, Line};
+use cairn_budget::launch::FirstPublishes;
+use cairn_budget::probe::{ANIMATE, ENV, Frame, Line, Mark};
 use cairn_repo::Intent;
 use gpui::{
     App, Context, Div, Entity, FocusHandle, KeyDownEvent, ParentElement, Styled, Window, canvas,
@@ -30,11 +32,33 @@ fn write_line(line: Line) {
     let _ = out.flush();
 }
 
+/// Whether the harness turned the probe on.
+fn probing() -> bool {
+    static PROBING: OnceLock<bool> = OnceLock::new();
+    *PROBING.get_or_init(|| std::env::var_os(ENV).is_some())
+}
+
+/// Says that the launch reached `mark`, for `cairn-budget trace --only launch`, if the harness
+/// turned the probe on.
+pub fn mark(mark: Mark) {
+    if probing() {
+        write_line(Line::Mark {
+            mark,
+            ns: clock::now_ns(),
+        });
+    }
+}
+
+/// Marks each Slot's first published Snapshot, if the harness turned the probe on.
+pub fn first_publishes() -> Option<FirstPublishes> {
+    probing().then(|| FirstPublishes::new(write_line))
+}
+
 /// Hooks Metal so that it reports presented frames. Before anything draws, so that the first
 /// frame counts. Does nothing where PresentMon sees frames from outside.
 pub fn install_frame_source() {
     #[cfg(target_os = "macos")]
-    if std::env::var_os(ENV).is_some() {
+    if probing() {
         metal::install();
     }
 }

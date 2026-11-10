@@ -110,6 +110,8 @@ impl Workspace {
         if let Some(path) = path {
             service.send(Intent::Open(path));
         }
+        #[cfg(feature = "measure")]
+        measure::mark(cairn_budget::probe::Mark::Service);
         Self {
             service,
             refs,
@@ -261,6 +263,22 @@ impl Render for Workspace {
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::fmt::format::FmtSpan;
+    #[cfg(feature = "measure")]
+    if let Some(first_publishes) = measure::first_publishes() {
+        use tracing_subscriber::prelude::*;
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_span_events(FmtSpan::CLOSE)
+                    .with_filter(
+                        EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| EnvFilter::new("info")),
+                    ),
+            )
+            .with(first_publishes)
+            .init();
+        return;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -278,11 +296,15 @@ fn exit(cx: &mut App) {
 }
 
 fn main() {
+    #[cfg(feature = "measure")]
+    measure::mark(cairn_budget::probe::Mark::Main);
     init_tracing();
     #[cfg(feature = "measure")]
     measure::install_frame_source();
     let path = std::env::args_os().nth(1).map(PathBuf::from);
     gpui_platform::application().run(move |cx: &mut App| {
+        #[cfg(feature = "measure")]
+        measure::mark(cairn_budget::probe::Mark::Launched);
         gpui_component::init(cx);
         gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
         let options = WindowOptions {
@@ -295,6 +317,8 @@ fn main() {
             ..Default::default()
         };
         cx.open_window(options, move |window, cx| {
+            #[cfg(feature = "measure")]
+            measure::mark(cairn_budget::probe::Mark::Window);
             let workspace = cx.new(|cx| {
                 #[allow(unused_mut)]
                 let mut workspace = Workspace::new(

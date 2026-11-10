@@ -3,6 +3,7 @@
 
 pub mod clock;
 pub mod fixture;
+pub mod launch;
 pub mod presented;
 pub mod probe;
 pub mod report;

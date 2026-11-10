@@ -441,12 +441,17 @@ fn latency_run(config: &Config, sandbox: &Sandbox, change: Change) -> Result<Vec
         .collect()
 }
 
-/// One run of launches: process start to first presented frame.
-fn launch_run(config: &Config, sandbox: &Sandbox) -> Result<Vec<f64>, String> {
-    let recorder = Recorder::start(config)?;
-    let mut launches = Vec::with_capacity(config.samples);
+/// One warm-up launch, then `samples` launches, each until its first frame is timed: each kept
+/// launch's clock start, just before its process starts, and everything its probe said.
+fn launches(
+    config: &Config,
+    sandbox: &Sandbox,
+    recorder: &Recorder,
+    samples: usize,
+) -> Result<Vec<(u64, Trace)>, String> {
+    let mut launches = Vec::with_capacity(samples);
     // One discarded launch: warm means the binary has run since boot.
-    for index in 0..1 + config.samples {
+    for index in 0..1 + samples {
         let start = clock::now_ns();
         let cairn = Cairn::start(config, sandbox.repo(), recorder.needs_animation())?;
         cairn.check_build()?;
@@ -465,6 +470,27 @@ fn launch_run(config: &Config, sandbox: &Sandbox) -> Result<Vec<f64>, String> {
             launches.push((start, trace));
         }
     }
+    Ok(launches)
+}
+
+/// Warm launches as `run` makes them, with Metal's presented times, for `trace --only launch`.
+pub(crate) fn metal_launches(
+    config: &Config,
+    sandbox: &Sandbox,
+    samples: usize,
+) -> Result<Vec<(u64, Trace)>, String> {
+    if !cfg!(target_os = "macos") {
+        return Err(
+            "Launch's breakdown reads Metal's presented times, so it runs on macOS only".to_owned(),
+        );
+    }
+    launches(config, sandbox, &Recorder::Metal, samples)
+}
+
+/// One run of launches: process start to first presented frame.
+fn launch_run(config: &Config, sandbox: &Sandbox) -> Result<Vec<f64>, String> {
+    let recorder = Recorder::start(config)?;
+    let launches = launches(config, sandbox, &recorder, config.samples)?;
     let presentmon = recorder.finish()?;
     launches
         .into_iter()
@@ -607,9 +633,14 @@ fn say(row: &Row) {
     );
 }
 
-/// Launch, on the small fixture. The row says any fixture will do.
+/// The fixture Launch opens. The row says any fixture will do.
+pub(crate) fn launch_fixture(config: &Config) -> Result<PathBuf, String> {
+    fixture(config, "ripgrep")
+}
+
+/// Launch, on the small fixture.
 pub fn measure_launch(config: &Config) -> Result<Row, String> {
-    let sandbox = Sandbox::clone_of(&fixture(config, "ripgrep")?)?;
+    let sandbox = Sandbox::clone_of(&launch_fixture(config)?)?;
     let runs = (0..config.runs)
         .map(|_| launch_run(config, &sandbox))
         .collect::<Result<Vec<_>, _>>()?;
