@@ -738,6 +738,23 @@ pub fn wait_for_file(path: &Path) {
     }
 }
 
+pub fn wrapper_runs(log: &Path) -> usize {
+    std::fs::read_to_string(log).map_or(0, |log| log.lines().count())
+}
+
+/// Waits until `log` shows `runs` runs of the slow remote's wrapper, each a git that is now
+/// blocked in it.
+pub fn wait_for_wrapper_runs(log: &Path, runs: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while wrapper_runs(log) < runs {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "git never got to the remote"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 impl SlowRemote {
     /// Commits to a new branch `pushed`, which a plain `git push` then sends to a branch
     /// the remote doesn't have. Returns git's line for the commit.

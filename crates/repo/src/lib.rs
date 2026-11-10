@@ -5,6 +5,7 @@
 //! [`RepoService::drain`]. Jobs run on threads this crate owns, with no async runtime and
 //! no UI executor, so the whole service runs headless in tests.
 
+mod ahead_behind;
 mod fallback;
 mod narrow;
 mod network;
@@ -19,7 +20,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
-pub use cairn_core::{ChangeKind, FileChange, Head, Oid, RefEntry, RefName, Refs, RepoPath, Stash};
+pub use cairn_core::{
+    ChangeKind, FileChange, Head, Oid, RefEntry, RefName, Refs, RepoPath, Stash, Upstream,
+};
 
 use cairn_write::{StartGate, Stop};
 use scheduler::{JobContext, JobQueue, Lane, Qos, QueueHandle, Running, Slot};
@@ -58,6 +61,11 @@ pub enum Intent {
     /// Fetch every remote, pruning what they deleted: `git fetch --all --prune`, run as a
     /// Network Job beside any Local write Job.
     Fetch,
+    /// Show ahead/behind counts for these local branches, the ones whose rows are on screen,
+    /// in place of those named before. Only a branch whose upstream exists is counted, and
+    /// [`Snapshot::Counts`] answers. Counting runs in the Background lane, and a count already
+    /// made for the same (local oid, upstream oid) is never made again.
+    ShowCounts(Vec<RefName>),
     /// Push as the user's own `git push` would: run as a Network Job beside any Local
     /// write Job.
     Push,
@@ -89,6 +97,10 @@ pub enum Snapshot {
     Unstaged(Arc<ChangesSnapshot>),
     /// Files in the worktree that git doesn't track and doesn't ignore.
     Untracked(Arc<UntrackedSnapshot>),
+    /// Ahead/behind counts of the branches [`Intent::ShowCounts`] named. Unlike the other
+    /// Slots, one generation can publish more than once, each time with more counted: a
+    /// later one of the same generation replaces an earlier one.
+    Counts(Arc<CountsSnapshot>),
     /// Where one Job stands: queued, running with its output so far, or done.
     Job(Arc<JobSnapshot>),
     /// A Quit or a Force quit has finished: exit the process. Published once, and after the
@@ -201,6 +213,33 @@ pub type ChangesSnapshot = SlotSnapshot<Vec<FileChange>>;
 /// Untracked paths, sorted. A directory whose contents are all untracked is one entry
 /// ending in `/`, as `git status` shows it, unless `status.showUntrackedFiles=all`.
 pub type UntrackedSnapshot = SlotSnapshot<Vec<RepoPath>>;
+/// Ahead/behind counts against each branch's upstream.
+pub type CountsSnapshot = SlotSnapshot<Counts>;
+
+/// The counts of the visible local branches whose upstream exists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Counts {
+    /// The Refs Snapshot generation whose oids these counts are for.
+    pub refs: Generation,
+    /// Each counted branch, by full name. A branch counted before the Refs Snapshot moved it
+    /// is counted again, so check [`Count::local`] and [`Count::upstream`] against the Refs
+    /// Snapshot shown before showing a count.
+    pub branches: BTreeMap<RefName, Count>,
+    /// Visible branches still waiting for their count, in the order they will be counted.
+    pub pending: Vec<RefName>,
+}
+
+/// One branch's divergence from its upstream, as `git rev-list --left-right --count
+/// <local>...<upstream>` reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Count {
+    pub local: Oid,
+    pub upstream: Oid,
+    /// Commits on the branch that its upstream doesn't have.
+    pub ahead: usize,
+    /// Commits on the upstream that the branch doesn't have.
+    pub behind: usize,
+}
 
 /// The Repo service for one window. Dropping it stops its threads and drops queued Read Jobs.
 ///
@@ -260,6 +299,8 @@ struct Reads {
     /// How far an External change narrows the Unstaged and Untracked reads.
     unstaged_narrowed: Arc<narrow::Narrowed<FileChange>>,
     untracked_narrowed: Arc<narrow::Narrowed<RepoPath>>,
+    /// The counts Slot, in the Background lane.
+    counter: Arc<ahead_behind::Counter>,
     outbox: Arc<Outbox>,
     /// The repository the last Open named.
     open: Mutex<Option<PathBuf>>,
@@ -272,6 +313,10 @@ impl RepoService {
     pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Self {
         let interactive = Lane::new("interactive", INTERACTIVE_THREADS, Qos::UserInitiated);
         let background = Lane::new("background", BACKGROUND_THREADS, Qos::Utility);
+        let outbox = Arc::new(Outbox {
+            pending: Mutex::new(Pending::default()),
+            wake: Box::new(wake),
+        });
         let reads = Arc::new(Reads {
             refs_slot: Slot::new("refs", &interactive),
             staged_slot: Slot::new("staged", &interactive),
@@ -280,10 +325,8 @@ impl RepoService {
             history_slot: Slot::new("history", &background),
             unstaged_narrowed: Arc::new(narrow::Narrowed::new()),
             untracked_narrowed: Arc::new(narrow::Narrowed::new()),
-            outbox: Arc::new(Outbox {
-                pending: Mutex::new(Pending::default()),
-                wake: Box::new(wake),
-            }),
+            counter: ahead_behind::Counter::new(&background, outbox.clone()),
+            outbox,
             open: Mutex::new(None),
             read_mode: Mutex::new(Arc::new(fallback::ReadMode::default())),
         });
@@ -345,6 +388,7 @@ impl RepoService {
                 // A walk of the repository that was open is no longer wanted. Nothing
                 // starts a new one: nothing shows history yet.
                 self.reads.history_slot.drop_jobs();
+                self.reads.counter.opened(&path);
                 self.reads.refresh(
                     &path,
                     Asked {
@@ -376,6 +420,12 @@ impl RepoService {
                     move |workdir, gate, output| stash::stash(workdir, untracked, gate, output),
                     Some(next),
                 );
+            }
+            Intent::ShowCounts(branches) => {
+                let _span =
+                    tracing::info_span!("intent", kind = "show_counts", branches = branches.len())
+                        .entered();
+                self.reads.counter.show(branches);
             }
             Intent::Fetch => {
                 let span = tracing::info_span!("intent", kind = "fetch");
@@ -479,6 +529,7 @@ impl RepoService {
             pending.staged.take().map(Snapshot::Staged),
             pending.unstaged.take().map(Snapshot::Unstaged),
             pending.untracked.take().map(Snapshot::Untracked),
+            pending.counts.take().map(Snapshot::Counts),
         ];
         let jobs = std::mem::take(&mut pending.jobs);
         let quit = std::mem::take(&mut pending.quit).then_some(Snapshot::Quit);
@@ -640,6 +691,8 @@ impl Drop for RepoService {
         self.stop_network_jobs();
         // A walk can take seconds, and dropping the Background lane waits for it.
         self.reads.history_slot.drop_jobs();
+        // So can a count, on a large repository.
+        self.reads.counter.drop_jobs();
     }
 }
 
@@ -833,6 +886,7 @@ impl Reads {
         ] {
             slot.drop_jobs();
         }
+        self.counter.close();
     }
 
     /// Refreshes what a finished Job can change, unless an Open has named another
@@ -874,11 +928,20 @@ impl Reads {
 
     fn refresh_refs(&self, path: &Path, asked: Asked) {
         let mode = self.read_mode.lock().unwrap().clone();
+        let counter = self.counter.clone();
         self.submit(
             &self.refs_slot,
             path,
             asked,
-            move |path, job| read_refs(path, job, &mode),
+            move |path, job| {
+                let refs = read_refs(path, job, &mode);
+                if let Ok(refs) = &refs
+                    && job.is_current()
+                {
+                    counter.refs_read(path, job.generation(), refs);
+                }
+                refs
+            },
             |p| &mut p.refs,
         );
     }
@@ -1186,6 +1249,7 @@ struct Pending {
     staged: Latest<Vec<FileChange>>,
     unstaged: Latest<Vec<FileChange>>,
     untracked: Latest<Vec<RepoPath>>,
+    counts: Latest<Counts>,
     /// The newest Snapshot of each Job, by id.
     jobs: BTreeMap<JobId, Arc<JobSnapshot>>,
     /// A Quit has finished and the UI hasn't drained that yet.
@@ -1200,6 +1264,7 @@ impl Pending {
             && self.staged.pending.is_none()
             && self.unstaged.pending.is_none()
             && self.untracked.pending.is_none()
+            && self.counts.pending.is_none()
             && self.jobs.is_empty()
             && !self.quit
     }
@@ -1258,6 +1323,25 @@ impl Outbox {
     }
 
     fn publish<T>(&self, cell: fn(&mut Pending) -> &mut Latest<T>, snapshot: Arc<SlotSnapshot<T>>) {
+        self.publish_newer(cell, snapshot, false);
+    }
+
+    /// Publishes like [`publish`](Self::publish), but a Snapshot of the generation already
+    /// published replaces it too: a Read Job that publishes as it goes, from one thread.
+    fn publish_progress<T>(
+        &self,
+        cell: fn(&mut Pending) -> &mut Latest<T>,
+        snapshot: Arc<SlotSnapshot<T>>,
+    ) {
+        self.publish_newer(cell, snapshot, true);
+    }
+
+    fn publish_newer<T>(
+        &self,
+        cell: fn(&mut Pending) -> &mut Latest<T>,
+        snapshot: Arc<SlotSnapshot<T>>,
+        same_generation: bool,
+    ) {
         let _span = tracing::debug_span!("publish", generation = snapshot.generation.0).entered();
         let was_empty = {
             let mut pending = self.pending.lock().unwrap();
@@ -1265,10 +1349,9 @@ impl Outbox {
             let latest = cell(&mut pending);
             // A newer generation may have been published, even drained, while this one
             // was checking whether it was still current. Never let it follow that one.
-            if latest
-                .newest
-                .is_some_and(|newest| newest >= snapshot.generation)
-            {
+            if latest.newest.is_some_and(|newest| {
+                newest > snapshot.generation || (newest == snapshot.generation && !same_generation)
+            }) {
                 tracing::debug!("stale; dropped");
                 return;
             }

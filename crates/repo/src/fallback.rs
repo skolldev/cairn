@@ -1,12 +1,13 @@
 //! Git CLI reads when gix cannot represent a repository reliably.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use cairn_write::{Git, Invocation, JobClass, Output, Stop};
 
-use crate::{Head, JobContext, Oid, RefEntry, RefName, Refs, RepoPath, Stash};
+use crate::{Head, JobContext, Oid, RefEntry, RefName, Refs, RepoPath, Stash, Upstream};
 
 #[derive(Default)]
 pub(super) struct ReadMode {
@@ -126,7 +127,7 @@ fn neither_branch_nor_commit(symbolic: &Output, target: &Output) -> String {
     error
 }
 
-fn run(path: &Path, stop: &Stop, args: &[&str]) -> Result<Output, String> {
+pub(super) fn run(path: &Path, stop: &Stop, args: &[&str]) -> Result<Output, String> {
     run_raw(path, stop, args)?
         .success()
         .map_err(|e| e.to_string())
@@ -161,7 +162,7 @@ pub(super) fn refs(path: &Path, stop: &Stop) -> Result<Refs, String> {
         stop,
         &[
             "for-each-ref",
-            "--format=%(refname)%00%(objectname)%00%(*objectname)%00%(symref)",
+            "--format=%(refname)%00%(objectname)%00%(*objectname)%00%(symref)%00%(upstream)",
             "refs/heads/",
             "refs/remotes/",
             "refs/tags/",
@@ -170,13 +171,15 @@ pub(super) fn refs(path: &Path, stop: &Stop) -> Result<Refs, String> {
     let mut local = Vec::new();
     let mut remote = Vec::new();
     let mut tags = Vec::new();
+    // Each local branch's `%(upstream)`, by index in `local`.
+    let mut upstreams = Vec::new();
     for line in output
         .stdout
         .split(|&byte| byte == b'\n')
         .filter(|line| !line.is_empty())
     {
         let fields: Vec<_> = line.split(|&byte| byte == 0).collect();
-        if fields.len() != 4 {
+        if fields.len() != 5 {
             return Err("git for-each-ref returned an invalid record".into());
         }
         let name = String::from_utf8_lossy(fields[0]).into_owned();
@@ -190,8 +193,12 @@ pub(super) fn refs(path: &Path, stop: &Stop) -> Result<Refs, String> {
             target,
             peeled,
             symref,
+            upstream: None,
         };
         if name.starts_with("refs/heads/") {
+            if !fields[4].is_empty() {
+                upstreams.push((local.len(), String::from_utf8_lossy(fields[4]).into_owned()));
+            }
             local.push(entry)
         } else if name.starts_with("refs/remotes/") {
             remote.push(entry)
@@ -199,6 +206,7 @@ pub(super) fn refs(path: &Path, stop: &Stop) -> Result<Refs, String> {
             tags.push(entry)
         }
     }
+    resolve_upstreams(path, stop, &mut local, &remote, &tags, upstreams)?;
     let symbolic = run_raw(path, stop, &["symbolic-ref", "-q", "HEAD"])?;
     let target = run_raw(path, stop, &["rev-parse", "-q", "--verify", "HEAD"])?;
     let neither_error = neither_branch_nor_commit(&symbolic, &target);
@@ -236,4 +244,57 @@ pub(super) fn refs(path: &Path, stop: &Stop) -> Result<Refs, String> {
         tags,
         stashes,
     })
+}
+
+/// Gives each local branch in `upstreams` its upstream, with the target from the listed refs.
+/// An upstream outside them, such as `refs/notes/x`, is rare enough to ask git about alone.
+/// One that git can't find is gone.
+fn resolve_upstreams(
+    path: &Path,
+    stop: &Stop,
+    local: &mut [RefEntry],
+    remote: &[RefEntry],
+    tags: &[RefEntry],
+    upstreams: Vec<(usize, String)>,
+) -> Result<(), String> {
+    let mut targets: HashMap<String, Oid> = local
+        .iter()
+        .chain(remote)
+        .chain(tags)
+        .map(|entry| (entry.name.as_str().to_owned(), entry.target.clone()))
+        .collect();
+    let unlisted: Vec<&str> = upstreams
+        .iter()
+        .map(|(_, name)| name.as_str())
+        .filter(|name| !targets.contains_key(*name))
+        .filter(|name| {
+            !["refs/heads/", "refs/remotes/", "refs/tags/"]
+                .iter()
+                .any(|p| name.starts_with(p))
+        })
+        .collect();
+    if !unlisted.is_empty() {
+        let mut args = vec!["for-each-ref", "--format=%(refname)%00%(objectname)"];
+        args.extend(&unlisted);
+        let output = run(path, stop, &args)?;
+        for line in output.stdout.split(|&b| b == b'\n') {
+            if let Some((name, target)) = line
+                .iter()
+                .position(|&b| b == 0)
+                .map(|at| (&line[..at], &line[at + 1..]))
+            {
+                targets.insert(
+                    String::from_utf8_lossy(name).into_owned(),
+                    Oid::from_hex(String::from_utf8_lossy(target).into_owned()),
+                );
+            }
+        }
+    }
+    for (index, name) in upstreams {
+        local[index].upstream = Some(Upstream {
+            target: targets.get(&name).cloned(),
+            name: RefName::new(name),
+        });
+    }
+    Ok(())
 }

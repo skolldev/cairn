@@ -227,3 +227,56 @@ fn a_detached_head_shows_its_short_oid_above_the_sections(cx: &mut TestAppContex
     assert!(top(&mut app, &detached) < top(&mut app, "sidebar:section:Local"));
     assert!(!app.shown("sidebar:current:refs/heads/main"));
 }
+
+#[gpui::test]
+fn a_local_branch_shows_its_counts_and_a_gone_upstream_says_so(cx: &mut TestAppContext) {
+    hermetic();
+    let dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_commit(dir.path(), "copy");
+    let bare = dir.path().join("origin.git");
+    let bare = bare.to_str().unwrap();
+    git(dir.path(), &["init", "--quiet", "--bare", bare]);
+    git(&repo, &["remote", "add", "origin", bare]);
+    git(&repo, &["push", "--quiet", "-u", "origin", "main"]);
+    let base = git(&repo, &["rev-parse", "main"]).trim().to_owned();
+    for message in ["local 1", "local 2"] {
+        git(
+            &repo,
+            &["commit", "--quiet", "--allow-empty", "-m", message],
+        );
+    }
+    let mut upstream = base.clone();
+    for message in ["upstream 1", "upstream 2", "upstream 3"] {
+        let tree = format!("{base}^{{tree}}");
+        upstream = git(
+            &repo,
+            &["commit-tree", &tree, "-p", &upstream, "-m", message],
+        )
+        .trim()
+        .to_owned();
+    }
+    git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/main", &upstream],
+    );
+    git(
+        &repo,
+        &["branch", "--quiet", "--track", "level", "origin/main"],
+    );
+    git(&repo, &["branch", "--quiet", "--no-track", "orphan"]);
+    git(&repo, &["config", "branch.orphan.remote", "origin"]);
+    git(&repo, &["config", "branch.orphan.merge", "refs/heads/gone"]);
+
+    let mut app = open(cx, Some(&repo));
+    // Seen red: no `report_visible` call in the list's processor, so nothing is counted.
+    app.until("main shows its counts", |app| {
+        app.draw();
+        app.shown("sidebar:counts:refs/heads/main:↑2 ↓3")
+    });
+    // Seen red: `divergence` returning nothing for a gone upstream.
+    assert!(app.shown("sidebar:gone:refs/heads/orphan"));
+    // `level` comes before `main` on screen, so it was counted first: its count is in.
+    // Seen red: `divergence` keeping zero counts.
+    assert!(!app.shown("sidebar:counts:refs/heads/level:↑0 ↓0"));
+    assert!(!app.shown("sidebar:gone:refs/heads/level"));
+}

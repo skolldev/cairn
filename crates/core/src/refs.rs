@@ -78,6 +78,21 @@ pub struct RefEntry {
     pub peeled: Option<Oid>,
     /// The ref a symbolic ref points at (`%(symref)`), such as `origin/HEAD`'s branch.
     pub symref: Option<RefName>,
+    /// A local branch's upstream, as `%(upstream)` names it from `branch.<name>.remote` and
+    /// `branch.<name>.merge`. `None` for a branch with none, and for every remote branch
+    /// and tag.
+    pub upstream: Option<Upstream>,
+}
+
+/// The ref a local branch tracks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Upstream {
+    /// Usually a remote-tracking branch, such as `refs/remotes/origin/main`, or a local
+    /// branch for `branch.<name>.remote = .`.
+    pub name: RefName,
+    /// What it points at. `None` when the ref doesn't exist: the upstream is gone, as after
+    /// a fetch pruned the branch the remote deleted.
+    pub target: Option<Oid>,
 }
 
 /// Where HEAD points.

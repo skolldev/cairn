@@ -11,7 +11,10 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use cairn_repo::{Head, Intent, Oid, RefsSnapshot, Snapshot};
-use common::{Harness, Release, Seen, SlowRemote, git, open, rev_list_order, slow_remote};
+use common::{
+    Harness, Release, Seen, SlowRemote, git, open, rev_list_order, slow_remote,
+    wait_for_wrapper_runs, wrapper_runs,
+};
 
 /// A repository whose next walk blocks in the slow remote until `release` exists. The ref
 /// `refs/held/walk` points at a local tag of a commit only the remote has, and the repository
@@ -40,23 +43,6 @@ fn held_walk() -> SlowRemote {
     git(&f.repo, &["config", "extensions.partialClone", "origin"]);
     git(&f.repo, &["config", "remote.origin.promisor", "true"]);
     f
-}
-
-fn wrapper_runs(log: &Path) -> usize {
-    std::fs::read_to_string(log).map_or(0, |log| log.lines().count())
-}
-
-/// Waits until `log` shows `runs` runs of the slow remote's wrapper, each a walk's git that
-/// is now blocked in it.
-fn wait_for_wrapper_runs(log: &Path, runs: usize) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while wrapper_runs(log) < runs {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the walk never got to the remote"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
 }
 
 fn answer_arrives(walk: &mpsc::Receiver<Result<Vec<Oid>, String>>) -> Result<Vec<Oid>, String> {

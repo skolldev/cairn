@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use cairn_repo::{Head, RefEntry, RefName, Refs};
+use cairn_repo::{Head, Oid, RefEntry, RefName, Refs, Upstream};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
@@ -50,6 +50,10 @@ pub enum Row {
         label: String,
         depth: usize,
         current: bool,
+        /// What the ref points at.
+        target: Oid,
+        /// A local branch's upstream.
+        upstream: Option<Upstream>,
     },
     Stash {
         index: usize,
@@ -100,6 +104,8 @@ enum Node {
         label: String,
         /// The short name, lowercased, that the filter matches against.
         haystack: String,
+        target: Oid,
+        upstream: Option<Upstream>,
     },
     Stash {
         index: usize,
@@ -274,11 +280,19 @@ impl Tree {
 
     fn leaf(&self, node: &Node, depth: usize) -> Row {
         match node {
-            Node::Ref { name, label, .. } => Row::Ref {
+            Node::Ref {
+                name,
+                label,
+                target,
+                upstream,
+                ..
+            } => Row::Ref {
                 name: name.clone(),
                 label: label.clone(),
                 depth,
                 current: self.current.as_ref() == Some(name),
+                target: target.clone(),
+                upstream: upstream.clone(),
             },
             Node::Stash { index, message, .. } => Row::Stash {
                 index: *index,
@@ -305,6 +319,8 @@ fn insert(nodes: &mut Vec<Node>, prefix: &str, entry: &RefEntry) {
                 name: entry.name.clone(),
                 label: segment.to_owned(),
                 haystack: entry.name.short().to_lowercase(),
+                target: entry.target.clone(),
+                upstream: entry.upstream.clone(),
             });
             return;
         }
