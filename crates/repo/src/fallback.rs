@@ -29,6 +29,11 @@ impl ReadMode {
                 "^(index\\.sparse|extensions\\.partialclone|remote\\..*\\.promisor|core\\.safecrlf)$",
             ],
         )?;
+        // Exit 1 is "no key matches", an answer. Any other failure is git failing, whose
+        // empty stdout says nothing about the repository.
+        let Some(output) = answer(output)? else {
+            return Ok(false);
+        };
         let config = String::from_utf8_lossy(&output.stdout);
         let enabled = config.lines().any(|line| {
             let Some((key, value)) = line.split_once(' ') else {
@@ -94,6 +99,16 @@ fn run_raw(path: &Path, stop: &Stop, args: &[&str]) -> Result<Output, String> {
                 .stop_on(stop),
         )
         .map_err(|e| e.to_string())
+}
+
+/// Git's answer from a command that exits 1 for "no", such as `symbolic-ref -q`: the output
+/// on exit 0, `None` on exit 1. Any other exit is git failing, and its stderr is the error.
+fn answer(output: Output) -> Result<Option<Output>, String> {
+    match output.status.code() {
+        Some(0) => Ok(Some(output)),
+        Some(1) => Ok(None),
+        _ => Err(output.stderr_text().into_owned()),
+    }
 }
 
 fn run(path: &Path, stop: &Stop, args: &[&str]) -> Result<Output, String> {
@@ -171,20 +186,16 @@ pub(super) fn refs(path: &Path, stop: &Stop) -> Result<Refs, String> {
     }
     let symbolic = run_raw(path, stop, &["symbolic-ref", "-q", "HEAD"])?;
     let target = run_raw(path, stop, &["rev-parse", "-q", "--verify", "HEAD"])?;
-    let head = if symbolic.status.success() {
-        Head::Branch {
+    let rev_parse_error = target.stderr_text().into_owned();
+    let target = answer(target)?
+        .map(|target| Oid::from_hex(String::from_utf8_lossy(&target.stdout).trim().to_owned()));
+    let head = match (answer(symbolic)?, target) {
+        (Some(symbolic), target) => Head::Branch {
             name: RefName::new(String::from_utf8_lossy(&symbolic.stdout).trim().to_owned()),
-            target: target
-                .status
-                .success()
-                .then(|| Oid::from_hex(String::from_utf8_lossy(&target.stdout).trim().to_owned())),
-        }
-    } else if target.status.success() {
-        Head::Detached {
-            target: Oid::from_hex(String::from_utf8_lossy(&target.stdout).trim().to_owned()),
-        }
-    } else {
-        return Err(String::from_utf8_lossy(&target.stderr).into_owned());
+            target,
+        },
+        (None, Some(target)) => Head::Detached { target },
+        (None, None) => return Err(rev_parse_error),
     };
     let stash = run(path, stop, &["stash", "list", "--format=%H%x00%gs"])?;
     let stashes = stash

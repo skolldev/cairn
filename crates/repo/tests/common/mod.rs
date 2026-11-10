@@ -834,3 +834,29 @@ pub fn changes(snapshot: &ChangesSnapshot) -> Vec<String> {
     let list = snapshot.result.as_ref().expect("the list reads");
     list.iter().map(render).collect()
 }
+
+/// The refs Snapshot, if `snapshot` is one.
+pub fn refs_of(snapshot: &Snapshot) -> Option<&Arc<RefsSnapshot>> {
+    match snapshot {
+        Snapshot::Refs(refs) => Some(refs),
+        _ => None,
+    }
+}
+
+/// The newest refs Snapshot in `seen`. A drain returns the status Slots' Snapshots after
+/// the refs one, so the refs Snapshot isn't always the last thing drained.
+pub fn last_refs(seen: &[Snapshot]) -> Arc<RefsSnapshot> {
+    seen.iter()
+        .rev()
+        .find_map(refs_of)
+        .expect("a refs Snapshot")
+        .clone()
+}
+
+/// Opens `path` on a new Repo service and returns the refs Snapshot that answers the Open.
+pub fn open_refs(path: &Path) -> Arc<RefsSnapshot> {
+    let harness = Harness::start();
+    harness.service.send(Intent::Open(path.to_path_buf()));
+    let seen = harness.drain_until(|s| refs_of(s).is_some());
+    last_refs(&seen)
+}
