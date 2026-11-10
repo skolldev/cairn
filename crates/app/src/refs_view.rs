@@ -13,8 +13,9 @@ use std::sync::Arc;
 use cairn_repo::Refs;
 use cairn_repo::{Generation, Head, RefsSnapshot};
 use gpui::{
-    AnyElement, Context, ElementId, Entity, FontWeight, IntoElement, ParentElement, Render,
-    SharedString, Styled, Subscription, Window, div, prelude::*, px, rgb, uniform_list,
+    AnyElement, ClickEvent, Context, ElementId, Entity, EventEmitter, FontWeight, IntoElement,
+    ParentElement, Render, SharedString, Styled, Subscription, Window, div, prelude::*, px, rgb,
+    uniform_list,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
@@ -24,6 +25,9 @@ const DIM: u32 = 0x7d8590;
 const CURRENT: u32 = 0x58a6ff;
 const ROW_HEIGHT: f32 = 22.;
 const INDENT: f32 = 14.;
+
+/// The user asked to switch to this local branch, by its short name.
+pub struct SwitchTo(pub String);
 
 pub struct RefsView {
     snapshot: Option<Arc<RefsSnapshot>>,
@@ -85,6 +89,19 @@ impl RefsView {
         cx.notify();
     }
 
+    /// Asks to switch to the local branch `branch`, unless it is already the current one. A
+    /// double-click on its row lands here, and so does the Budget harness's switch.
+    pub fn switch_to(&mut self, branch: String, cx: &mut Context<Self>) {
+        let current = self
+            .tree
+            .as_ref()
+            .and_then(Tree::current)
+            .is_some_and(|current| current.short() == branch);
+        if !current {
+            cx.emit(SwitchTo(branch));
+        }
+    }
+
     /// Tells the Budget harness what this view shows.
     #[cfg(feature = "measure")]
     pub fn report_to(&self, frame: &mut cairn_budget::probe::Frame) {
@@ -101,6 +118,8 @@ impl RefsView {
         }
     }
 }
+
+impl EventEmitter<SwitchTo> for RefsView {}
 
 impl Render for RefsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -220,6 +239,12 @@ impl RefsView {
             element = element
                 .cursor_pointer()
                 .on_click(cx.listener(move |view, _, _, cx| view.toggle(&id, cx)));
+        } else if let Some(branch) = row.local_branch() {
+            element = element.on_click(cx.listener(move |view, event: &ClickEvent, _, cx| {
+                if event.click_count() == 2 {
+                    view.switch_to(branch.clone(), cx);
+                }
+            }));
         }
         element.into_any_element()
     }
