@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use cairn_repo::Intent;
+use cairn_repo::{Intent, JobKind, JobState};
 use cairn_write::{Git, Invocation, JobClass};
 use gpui::{
     Bounds, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, TestAppContext,
@@ -15,6 +15,7 @@ use gpui::{
 };
 
 use crate::Workspace;
+use crate::jobs::Banner;
 use crate::recent::RecentRepos;
 
 /// Points git at an empty home, once per test binary, so a developer's config can't change
@@ -115,6 +116,26 @@ pub fn post_checkout_hook(repo: &Path, body: &str) {
     }
 }
 
+/// Points `repo`'s `origin` at its URL through a wrapper around git that first runs
+/// `block`, a few lines of sh, for both fetch and push. `dir` holds the wrapper.
+pub fn slow_remote(repo: &Path, dir: &Path, block: &str) {
+    let wrapper = dir.join("slow-remote.sh");
+    std::fs::write(&wrapper, format!("{block}exec git \"$@\"\n")).unwrap();
+    for (key, command) in [
+        ("remote.origin.uploadpack", "upload-pack"),
+        ("remote.origin.receivepack", "receive-pack"),
+    ] {
+        git(
+            repo,
+            &[
+                "config",
+                key,
+                &format!("sh '{}' {command}", slash(&wrapper)),
+            ],
+        );
+    }
+}
+
 /// The real window, whose exit hook sets a flag instead of ending the test process.
 pub struct App<'a> {
     pub cx: &'a mut VisualTestContext,
@@ -135,7 +156,10 @@ pub fn open_with_recent<'a>(
 ) -> App<'a> {
     // Real git runs on the service's threads, so the executor must wait for them.
     cx.executor().allow_parking();
-    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        crate::fetch::bind_keys(cx);
+    });
     let exited = Rc::new(Cell::new(false));
     let exit = exited.clone();
     let path = repo.map(Path::to_path_buf);
@@ -182,6 +206,24 @@ impl App<'_> {
     pub fn send(&mut self, intent: Intent) {
         self.workspace
             .read_with(self.cx, |workspace, _| workspace.service.send(intent));
+    }
+
+    /// What the Job banner shows, if anything.
+    pub fn banner(&mut self) -> Option<Banner> {
+        self.workspace
+            .read_with(self.cx, |workspace, cx| workspace.jobs.read(cx).banner())
+    }
+
+    /// The kind and state of every Job the window has seen, oldest first.
+    pub fn jobs_seen(&mut self) -> Vec<(JobKind, JobState)> {
+        self.workspace.read_with(self.cx, |workspace, cx| {
+            workspace
+                .jobs
+                .read(cx)
+                .seen()
+                .map(|job| (job.kind.clone(), job.state.clone()))
+                .collect()
+        })
     }
 
     /// The recent repositories, as the window lists them.

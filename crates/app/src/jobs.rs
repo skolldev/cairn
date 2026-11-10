@@ -2,8 +2,9 @@
 //! newest: queued or running with its latest output line, done for a moment, or failed with
 //! git's own words until the user dismisses them or starts another Job.
 //!
-//! A Local write Job has no stop button (ADR 0002). Quit and Force quit handle a running one,
-//! and [`QuitView`](crate::quit::QuitView) reads the same Snapshots on its own.
+//! A queued or running fetch has a Stop button. A Local write Job has none (ADR 0002):
+//! Quit and Force quit handle a running one, and [`QuitView`](crate::quit::QuitView) reads
+//! the same Snapshots on its own.
 
 #[cfg(test)]
 mod tests;
@@ -14,8 +15,8 @@ use std::time::Duration;
 
 use cairn_repo::{JobId, JobKind, JobSnapshot, JobState};
 use gpui::{
-    Context, IntoElement, ParentElement, Render, SharedString, Styled, Task, Window, div,
-    prelude::*, rgb,
+    Context, EventEmitter, IntoElement, ParentElement, Render, SharedString, Styled, Task, Window,
+    div, prelude::*, rgb,
 };
 
 /// How long a Job that ended well stays on screen.
@@ -45,6 +46,9 @@ pub enum Banner {
     },
 }
 
+/// The user asked to stop this Network Job.
+pub struct StopJob(pub JobId);
+
 #[derive(Default)]
 pub struct JobsView {
     jobs: BTreeMap<JobId, Arc<JobSnapshot>>,
@@ -52,11 +56,16 @@ pub struct JobsView {
     hidden_through: Option<JobId>,
     /// Hides the newest Job once it has been shown done for [`DONE_SHOWN`].
     hide_done: Option<Task<()>>,
+    /// A Fetch Intent has been sent, and no Snapshot of its Job has arrived yet.
+    fetch_asked: bool,
 }
 
 impl JobsView {
     pub fn record_job(&mut self, job: Arc<JobSnapshot>, cx: &mut Context<Self>) {
         let id = job.id;
+        if job.kind == JobKind::Fetch {
+            self.fetch_asked = false;
+        }
         let ended_well = matches!(job.state, JobState::Done(Ok(())) | JobState::Stopped);
         self.jobs.insert(id, job);
         if self.newest().is_some_and(|newest| newest.id == id) {
@@ -77,8 +86,26 @@ impl JobsView {
         self.jobs.values()
     }
 
+    /// Records that a Fetch Intent has been sent, until its Job's first Snapshot arrives.
+    pub fn record_fetch_sent(&mut self) {
+        self.fetch_asked = true;
+    }
+
+    /// Whether a fetch has been asked for and hasn't ended, so another would only queue.
+    pub fn fetching(&self) -> bool {
+        self.fetch_asked || self.jobs.values().any(|job| unended_fetch(job))
+    }
+
     fn newest(&self) -> Option<&Arc<JobSnapshot>> {
         self.jobs.values().next_back()
+    }
+
+    /// The newest Job, if the user can stop it: a fetch that hasn't ended. A push isn't
+    /// offered, because stopping one can leave the user's work unpublished.
+    fn stoppable(&self) -> Option<JobId> {
+        self.newest()
+            .filter(|job| unended_fetch(job))
+            .map(|job| job.id)
     }
 
     fn hide_through(&mut self, id: JobId, cx: &mut Context<Self>) {
@@ -109,6 +136,11 @@ impl JobsView {
     }
 }
 
+/// Whether `job` is a fetch that is queued or running.
+fn unended_fetch(job: &JobSnapshot) -> bool {
+    job.kind == JobKind::Fetch && matches!(job.state, JobState::Queued | JobState::Running)
+}
+
 /// The git command a Job runs, as the user would type it.
 fn title(kind: &JobKind) -> String {
     match kind {
@@ -117,6 +149,8 @@ fn title(kind: &JobKind) -> String {
         JobKind::Push => "git push".to_owned(),
     }
 }
+
+impl EventEmitter<StopJob> for JobsView {}
 
 const DIM: u32 = 0x7d8590;
 const FAILED: u32 = 0xff7a90;
@@ -140,10 +174,27 @@ impl Render for JobsView {
                 .debug_selector(move || selector.to_owned())
                 .child(text)
         };
+        let stop = self.stoppable().map(|id| {
+            div()
+                .id("job-stop")
+                .debug_selector(|| "job:stop".to_owned())
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .bg(rgb(0x2a2f37))
+                .cursor_pointer()
+                .on_click(cx.listener(move |_, _, _, cx| cx.emit(StopJob(id))))
+                .child("Stop")
+        });
         match banner {
             Banner::Queued { title } => row
                 .child(div().child(title))
-                .child(line("job:queued", "Waiting for git…".into()).text_color(rgb(DIM))),
+                .child(
+                    line("job:queued", "Waiting for git…".into())
+                        .flex_1()
+                        .text_color(rgb(DIM)),
+                )
+                .children(stop),
             Banner::Running { title, output } => row
                 .child(div().child(title))
                 .child(line("job:running", "Running…".into()).text_color(rgb(DIM)))
@@ -154,7 +205,8 @@ impl Render for JobsView {
                         .text_color(rgb(DIM))
                         .whitespace_nowrap()
                         .overflow_hidden()
-                })),
+                }))
+                .children(stop),
             Banner::Done { title } => row
                 .child(div().child(title))
                 .child(line("job:done", "Done".into()).text_color(rgb(DIM))),
