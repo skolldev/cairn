@@ -234,7 +234,7 @@ These numbers are the definition of "blazing fast" for this project. Each Budget
 
 | Interaction | Budget | Fixture | Status |
 | --- | --- | --- | --- |
-| Launch, process start to the first presented frame of Cairn's own UI (no repo content required) | median < 300 ms, none over 400 ms, across 20 warm launches | any | Proven on macOS (239 ms median, framework only). Windows needs a PresentMon trace (Phase 1) |
+| Launch, process start to the first presented frame of Cairn's own UI (no repo content required) | median < 400 ms, none over 500 ms, across 20 warm launches | any | Measured on macOS: 387 ms median, worst 445 ms (#83). Moved from < 300 ms, see [why](#why-launch-is-under-400-ms). Windows needs a PresentMon trace (Phase 1) |
 | Cached open, from the Intent to the first graph screen, including a restore at startup | < 200 ms | Linux kernel | Unproven (Phase 2) |
 | First open of a repo (no Cairn cache), to the first screen of HEAD's history | < 1 s | Linux kernel | Unproven (Phase 2) |
 | Graph scrolling, at 120 Hz, over the top 100k rows, in the Floor's five scenarios | at least 99.5% of presented intervals within 12.5 ms, no gap over 25 ms | Linux kernel | Proven on Windows. macOS needs an Instruments cross-check (Phase 2) |
@@ -243,6 +243,16 @@ These numbers are the definition of "blazing fast" for this project. Each Budget
 | External change to UI updated: from a file saved, or a `git` command run outside Cairn having exited, to the updated status, sidebar and graph | < 100 ms | Linux kernel | Unproven (Phase 1) |
 | Intent to UI updated after a Local write Job, such as Commit pressed to the updated graph and status | < 100 ms | small repo | Unproven (Phase 1). Needs the tuned CLI runner: a four-spawn commit is about 50 ms tuned and 125 ms naive on Windows |
 | Memory, settled after the scroll scenarios plus 10 s, at a 1728x1117 logical window, with commit metadata resident | < 500 MB | Linux kernel | Unproven (Phase 2). The framework and delta row store measured 248 MB on macOS and 37 MB on Windows |
+
+### Why Launch is under 400 ms
+
+Launch was median < 300 ms, none over 400 ms, from Phase 0's 239 ms, which measured the framework only. Phase 1 missed it on macOS by about 85 ms. #83 broke a warm launch into phases and found that Cairn's own code costs about 40 ms before the first presented frame. The rest is GPUI, gpui-component and macOS:
+
+- **gpui-component's font check, about 148 ms before the window exists.** `gpui_component::init` lists every installed font to check that two families exist. A build without the listing passed the old Budget at 249 ms ([pins.md](docs/pins.md#gpui-components-font-check-costs-launch-about-140-ms-on-macos)). The fix belongs in gpui-component, and the pinned 0.9.0 doesn't have it.
+- **GPUI starting the app and opening the window, about 113 ms.**
+- **Two waits with no known cause, about 70 ms:** the first Snapshots wait about 28 ms for the main thread, and the timed frame takes about 41 ms from paint to screen. Some of the second may be the method: Metal reports no time for the first frames.
+
+So no change to Cairn's code alone can reach 300 ms. The Budget moves to median < 400 ms, none over 500 ms, set from #83's measurement: 387 ms median and 445 ms worst on the M3 Max. That's a margin of about one and a half frames on the median. Re-measure when gpui-component checks fonts without the listing, and tighten the Budget from that measurement.
 
 **Recorded only, never gating:**
 
