@@ -129,6 +129,7 @@ fn write(file: &Path, entries: &[PathBuf]) -> io::Result<()> {
 /// however it was named.
 fn worktree_root(opened: &Path) -> PathBuf {
     let path = std::fs::canonicalize(opened)
+        .map(without_verbatim_prefix)
         .or_else(|_| std::path::absolute(opened))
         .unwrap_or_else(|_| opened.to_path_buf());
     match path.parent() {
@@ -137,6 +138,22 @@ fn worktree_root(opened: &Path) -> PathBuf {
         }
         _ => path,
     }
+}
+
+/// `path` without the `\\?\` that Windows' `canonicalize` puts before a drive path, which
+/// git can't use and nobody wants to read. A path that needs it, such as a UNC one, keeps it.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        if let Some(Component::Prefix(prefix)) = path.components().next()
+            && let Prefix::VerbatimDisk(_) = prefix.kind()
+            && let Some(plain) = path.to_str().and_then(|p| p.strip_prefix(r"\\?\"))
+        {
+            return PathBuf::from(plain);
+        }
+    }
+    path
 }
 
 /// The user chose this recent repository to open.

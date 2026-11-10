@@ -21,7 +21,7 @@ struct Fixture {
 fn fixture() -> Fixture {
     hermetic();
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().canonicalize().unwrap();
+    let root = canonical(dir.path());
     let repo = |name: &str| {
         let repo = root.join(name);
         git(
@@ -43,6 +43,16 @@ fn fixture() -> Fixture {
         b: repo("b"),
         store: root.join("app-data").join("Cairn").join("recent-repos.txt"),
         dir,
+    }
+}
+
+/// `dir` as the list keeps it: canonical, and on Windows without the `\\?\` that git can't
+/// use.
+fn canonical(dir: &Path) -> PathBuf {
+    let path = dir.canonicalize().unwrap();
+    match path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+        Some(plain) if cfg!(windows) => PathBuf::from(plain),
+        _ => path,
     }
 }
 
@@ -118,7 +128,7 @@ fn reopening_the_open_repository_after_removing_it_records_it_again(cx: &mut Tes
 #[gpui::test]
 fn a_failed_open_isnt_added(cx: &mut TestAppContext) {
     let f = fixture();
-    let not_a_repo = f.dir.path().canonicalize().unwrap().join("plain");
+    let not_a_repo = canonical(f.dir.path()).join("plain");
     std::fs::create_dir(&not_a_repo).unwrap();
     let mut app = open_with_recent(cx, None, Some(f.store.clone()));
 
@@ -238,7 +248,7 @@ fn a_repository_is_listed_once_by_its_worktree_root_however_it_was_opened(cx: &m
     open_and_wait(&mut app, &f.b);
     #[cfg(unix)]
     {
-        let link = f.dir.path().canonicalize().unwrap().join("link-to-a");
+        let link = canonical(f.dir.path()).join("link-to-a");
         std::os::unix::fs::symlink(&f.a, &link).unwrap();
         app.send(Intent::Open(link));
         // Seen red: `std::path::absolute` in place of `canonicalize` keeps the link.
@@ -252,13 +262,7 @@ fn a_repository_is_listed_once_by_its_worktree_root_however_it_was_opened(cx: &m
 fn the_list_keeps_the_most_recent_twenty(cx: &mut TestAppContext) {
     let f = fixture();
     let older: Vec<PathBuf> = (0..KEPT)
-        .map(|n| {
-            f.dir
-                .path()
-                .canonicalize()
-                .unwrap()
-                .join(format!("old-{n}"))
-        })
+        .map(|n| canonical(f.dir.path()).join(format!("old-{n}")))
         .collect();
     earlier_launches(&f.store, &older);
     let mut app = open_with_recent(cx, None, Some(f.store.clone()));
