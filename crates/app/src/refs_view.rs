@@ -46,6 +46,9 @@ pub struct RefsView {
     counts: Option<Arc<CountsSnapshot>>,
     /// The local branches on screen, as last reported with [`ShowCounts`].
     visible: Vec<RefName>,
+    /// The rows the list last asked for. To measure a row it first asks for row 0 alone, on
+    /// every layout, and only then for the rows it draws.
+    drawn: std::ops::Range<usize>,
     _filter_changed: Subscription,
 }
 
@@ -67,6 +70,7 @@ impl RefsView {
             rows: Vec::new(),
             counts: None,
             visible: Vec::new(),
+            drawn: 0..0,
             _filter_changed: filter_changed,
         }
     }
@@ -87,9 +91,12 @@ impl RefsView {
         self.counts.as_ref()
     }
 
-    /// Reports the local branches among the rows in `range`, the ones the list draws, when
-    /// they differ from those reported last.
-    fn report_visible(&mut self, range: &std::ops::Range<usize>, cx: &mut Context<Self>) {
+    /// Reports the local branches among the rows the list drew, when they differ from those
+    /// reported last. It runs once the frame is drawn, so the row the list asked for only to
+    /// measure it is never reported: the count of a branch on screen would be Superseded, and
+    /// start over, on every frame.
+    fn report_visible(&mut self, cx: &mut Context<Self>) {
+        let range = &self.drawn;
         let visible: Vec<RefName> = self.rows
             [range.start.min(self.rows.len())..range.end.min(self.rows.len())]
             .iter()
@@ -244,8 +251,9 @@ impl Render for RefsView {
         let list = uniform_list(
             "sidebar-rows",
             self.rows.len(),
-            cx.processor(|view, range: std::ops::Range<usize>, _window, cx| {
-                view.report_visible(&range, cx);
+            cx.processor(|view, range: std::ops::Range<usize>, window, cx| {
+                view.drawn = range.clone();
+                cx.defer_in(window, |view, _, cx| view.report_visible(cx));
                 range.map(|ix| view.render_row(ix, cx)).collect::<Vec<_>>()
             }),
         )

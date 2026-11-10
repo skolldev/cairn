@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use gpui::TestAppContext;
 
-use crate::testing::{App, git, hermetic, open, repo_with_commit};
+use crate::testing::{
+    App, Release, block_until, git, hermetic, open, repo_with_commit, slash, slow_remote,
+};
 
 /// A repository on `main` with `feature/a` and `feature/b`, remotes `origin` (with its
 /// symbolic `HEAD`) and `upstream`, tags `v1.0` and `v2.0`, and one stash.
@@ -297,4 +299,98 @@ fn a_local_branch_shows_its_counts_and_a_gone_upstream_says_so(cx: &mut TestAppC
     // Seen red: `divergence` keeping zero counts.
     assert!(!app.shown("sidebar:counts:refs/heads/level:↑0 ↓0"));
     assert!(!app.shown("sidebar:gone:refs/heads/level"));
+}
+
+#[gpui::test]
+fn frames_drawn_while_a_branch_on_screen_is_counted_never_start_its_count_over(
+    cx: &mut TestAppContext,
+) {
+    hermetic();
+    let dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_commit(dir.path(), "copy");
+    let bare = dir.path().join("origin.git");
+    let bare = bare.to_str().unwrap();
+    git(dir.path(), &["init", "--quiet", "--bare", bare]);
+    git(&repo, &["remote", "add", "origin", bare]);
+    git(&repo, &["push", "--quiet", "origin", "main"]);
+    // `main`'s upstream is a tag of a commit only the remote has, in a partial clone, so the
+    // count's `git rev-list` fetches it, and waits in the remote's wrapper until released.
+    // The tag sits outside the refs a Refs read lists, so that read never peels it.
+    let base = git(&repo, &["rev-parse", "main"]).trim().to_owned();
+    let remote_only = git(
+        Path::new(bare),
+        &[
+            "commit-tree",
+            &format!("{base}^{{tree}}"),
+            "-p",
+            &base,
+            "-m",
+            "on the remote",
+        ],
+    )
+    .trim()
+    .to_owned();
+    git(
+        Path::new(bare),
+        &["update-ref", "refs/heads/remote-only", &remote_only],
+    );
+    git(
+        Path::new(bare),
+        &["config", "uploadpack.allowAnySHA1InWant", "true"],
+    );
+    let tag = dir.path().join("tag-object");
+    std::fs::write(
+        &tag,
+        format!(
+            "object {remote_only}\ntype commit\ntag held\ntagger Cairn Test <test@cairn.invalid> 1700000000 +0000\n\nneeds the remote\n"
+        ),
+    )
+    .unwrap();
+    let tag = git(
+        &repo,
+        &["hash-object", "-t", "tag", "-w", tag.to_str().unwrap()],
+    );
+    git(&repo, &["update-ref", "refs/held/up", tag.trim()]);
+    git(&repo, &["config", "core.repositoryFormatVersion", "1"]);
+    git(&repo, &["config", "extensions.partialClone", "origin"]);
+    git(&repo, &["config", "remote.origin.promisor", "true"]);
+    git(&repo, &["config", "branch.main.remote", "."]);
+    git(&repo, &["config", "branch.main.merge", "refs/held/up"]);
+    let log = dir.path().join("remote.log");
+    let release = Release(dir.path().join("release"));
+    slow_remote(
+        &repo,
+        dir.path(),
+        &format!(
+            "echo run >> '{}'\n{}",
+            slash(&log),
+            block_until(&release.0, dir.path())
+        ),
+    );
+    let runs = || std::fs::read_to_string(&log).map_or(0, |log| log.lines().count());
+
+    let mut app = open(cx, Some(&repo));
+    // Seen red: `report_visible` reporting each range the list asks for as it asks. The row
+    // it measures alone is no local branch, so every frame Superseded the count, and its git
+    // was stopped before it reached the remote.
+    app.until("main's count waits in the remote", |app| {
+        app.draw();
+        runs() >= 1
+    });
+    // Frames while it waits. The list asks for its first row alone on each one, to measure
+    // it, before the rows it draws.
+    for _ in 0..20 {
+        app.draw();
+        app.cx
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    release.release();
+    app.until("main shows its count", |app| {
+        app.draw();
+        app.shown("sidebar:counts:refs/heads/main:↓1")
+    });
+    // A count started over would reach the remote again.
+    assert_eq!(runs(), 1, "the count of main started over");
 }
