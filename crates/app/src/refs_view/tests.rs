@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::TestAppContext;
 
-use crate::testing::{App, git, hermetic, open};
+use crate::testing::{App, git, hermetic, open, repo_with_commit};
 
 /// A repository on `main` with `feature/a` and `feature/b`, remotes `origin` (with its
 /// symbolic `HEAD`) and `upstream`, tags `v1.0` and `v2.0`, and one stash.
@@ -17,15 +17,8 @@ struct Fixture {
 fn fixture() -> Fixture {
     hermetic();
     let dir = tempfile::tempdir().unwrap();
-    let repo = dir.path().join("copy");
+    let repo = repo_with_commit(dir.path(), "copy");
     let path = |p: &Path| p.to_str().unwrap().to_owned();
-    git(
-        dir.path(),
-        &["init", "--quiet", "--initial-branch=main", &path(&repo)],
-    );
-    std::fs::write(repo.join("file.txt"), "one\n").unwrap();
-    git(&repo, &["add", "file.txt"]);
-    git(&repo, &["commit", "--quiet", "-m", "base"]);
     git(&repo, &["branch", "feature/a"]);
     git(&repo, &["branch", "feature/b"]);
     git(&repo, &["tag", "v1.0"]);

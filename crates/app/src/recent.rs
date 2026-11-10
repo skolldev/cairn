@@ -8,6 +8,7 @@ mod tests;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use cairn_repo::RefsSnapshot;
 use gpui::{
     Context, EventEmitter, IntoElement, ParentElement, Render, SharedString, Styled, Window, div,
     prelude::*, rgb,
@@ -162,6 +163,9 @@ pub struct OpenRecent(pub PathBuf);
 /// The list as the user sees it: in the empty state, and under the header's Open Recent.
 pub struct RecentView {
     repos: RecentRepos,
+    /// The path the window's newest Open named, until its Refs Snapshot is shown. Only that
+    /// Snapshot, if Ok, records it: a refresh of the repository open before can't.
+    awaiting: Option<PathBuf>,
     /// The header's list is showing.
     menu_open: bool,
 }
@@ -183,9 +187,11 @@ impl Place {
 }
 
 impl RecentView {
-    pub fn new(repos: RecentRepos) -> Self {
+    /// `opening` is the path the window opens at launch, if any.
+    pub fn new(repos: RecentRepos, opening: Option<PathBuf>) -> Self {
         Self {
             repos,
+            awaiting: opening,
             menu_open: false,
         }
     }
@@ -195,10 +201,22 @@ impl RecentView {
         self.repos.entries()
     }
 
-    /// An Open of `workdir` succeeded.
-    pub fn record(&mut self, workdir: &Path, cx: &mut Context<Self>) {
-        self.repos.record(workdir);
-        cx.notify();
+    /// The window is sending an Open of `path`.
+    pub fn opening(&mut self, path: PathBuf) {
+        self.awaiting = Some(path);
+    }
+
+    /// The sidebar now shows `refs`. If it answers the Open being awaited, that Open has
+    /// succeeded or failed, and only success records it.
+    pub fn refs_shown(&mut self, refs: &RefsSnapshot, cx: &mut Context<Self>) {
+        if self.awaiting.as_ref() != Some(&refs.workdir) {
+            return;
+        }
+        self.awaiting = None;
+        if refs.result.is_ok() {
+            self.repos.record(&refs.workdir);
+            cx.notify();
+        }
     }
 
     pub fn toggle_menu(&mut self, cx: &mut Context<Self>) {

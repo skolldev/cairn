@@ -46,7 +46,7 @@ struct Workspace {
     recent: Entity<RecentView>,
     /// An Open has been sent. Until then, the window shows the empty state.
     opened: bool,
-    bridge: Entity<Bridge>,
+    _bridge: Entity<Bridge>,
     _switch_to: gpui::Subscription,
     _open_recent: gpui::Subscription,
     #[cfg(debug_assertions)]
@@ -72,7 +72,7 @@ impl Workspace {
         let status = cx.new(|_| StatusView::default());
         let quit = cx.new(|_| QuitView::new(service.clone(), exit));
         let jobs = cx.new(|_| JobsView::default());
-        let recent = cx.new(|_| RecentView::new(recent));
+        let recent = cx.new(|_| RecentView::new(recent, path.clone()));
         let open_recent = cx.subscribe(&recent, |workspace, _, OpenRecent(path), cx| {
             workspace.open(path.clone(), cx);
         });
@@ -118,7 +118,7 @@ impl Workspace {
             jobs,
             recent,
             opened,
-            bridge,
+            _bridge: bridge,
             _switch_to: switch_to,
             _open_recent: open_recent,
             #[cfg(debug_assertions)]
@@ -148,8 +148,8 @@ impl Workspace {
     /// Opens the repository at `path`. It joins the recent list only once it has opened.
     fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.opened = true;
-        // Reopening the repository that is open still records it, in case it was removed.
-        self.bridge.update(cx, |bridge, _| bridge.forget_recorded());
+        self.recent
+            .update(cx, |recent, _| recent.opening(path.clone()));
         self.service.send(Intent::Open(path));
         cx.notify();
     }

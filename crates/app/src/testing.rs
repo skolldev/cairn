@@ -56,6 +56,24 @@ pub fn git(repo: &Path, args: &[&str]) -> String {
     String::from_utf8(out.stdout).expect("git output is UTF-8")
 }
 
+/// A repository at `parent/name` on `main`, whose one commit "base" adds `file.txt`.
+pub fn repo_with_commit(parent: &Path, name: &str) -> PathBuf {
+    let repo = parent.join(name);
+    git(
+        parent,
+        &[
+            "init",
+            "--quiet",
+            "--initial-branch=main",
+            repo.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(repo.join("file.txt"), "one\n").unwrap();
+    git(&repo, &["add", "file.txt"]);
+    git(&repo, &["commit", "--quiet", "-m", "base"]);
+    repo
+}
+
 /// `path` as git's own sh reads it: forward slashes, on Windows too.
 pub fn slash(path: &Path) -> String {
     path.to_str().unwrap().replace('\\', "/")
@@ -152,6 +170,13 @@ impl App<'_> {
             assert!(Instant::now() < deadline, "timed out waiting until {what}");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Opens `repo` as the window does: the Open button, the command line or a recent entry.
+    pub fn open_repo(&mut self, repo: &Path) {
+        let repo = repo.to_path_buf();
+        self.workspace
+            .update(self.cx, |workspace, cx| workspace.open(repo, cx));
     }
 
     pub fn send(&mut self, intent: Intent) {

@@ -6,7 +6,6 @@
 //! for zed#61469 on Windows. A window that draws no frames still drains, more slowly,
 //! because the app can't exit until it has seen the Quit Snapshot.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,8 +38,6 @@ pub struct Bridge {
     quit: Entity<QuitView>,
     jobs: Entity<JobsView>,
     recent: Entity<RecentView>,
-    /// The workdir whose Open last succeeded, so a refresh of it isn't recorded again.
-    recorded: Option<PathBuf>,
     /// The newest generation shown, per Slot. Generations of different Slots are unrelated.
     refs_shown: Option<Generation>,
     staged_shown: Option<Generation>,
@@ -84,7 +81,6 @@ impl Bridge {
             quit,
             jobs,
             recent,
-            recorded: None,
             refs_shown: None,
             staged_shown: None,
             unstaged_shown: None,
@@ -92,12 +88,6 @@ impl Bridge {
             armed: false,
             frameless_drain: None,
         }
-    }
-
-    /// An Open was sent: its first Ok Refs Snapshot is recorded, even for the workdir that
-    /// is already open.
-    pub fn forget_recorded(&mut self) {
-        self.recorded = None;
     }
 
     fn pump(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -133,12 +123,8 @@ impl Bridge {
             match snapshot {
                 Snapshot::Refs(refs) => {
                     if newer(&mut self.refs_shown, refs.generation, "refs", &refs.span) {
-                        // The first Ok Refs Snapshot for a workdir is its Open succeeding.
-                        if refs.result.is_ok() && self.recorded.as_ref() != Some(&refs.workdir) {
-                            self.recorded = Some(refs.workdir.clone());
-                            self.recent
-                                .update(cx, |view, cx| view.record(&refs.workdir, cx));
-                        }
+                        self.recent
+                            .update(cx, |view, cx| view.refs_shown(&refs, cx));
                         self.refs.update(cx, |view, cx| {
                             view.set_snapshot(refs, cx);
                             cx.notify();

@@ -7,7 +7,7 @@ use cairn_repo::Intent;
 use gpui::TestAppContext;
 
 use super::KEPT;
-use crate::testing::{App, git, hermetic, open_with_recent};
+use crate::testing::{App, hermetic, open_with_recent, repo_with_commit};
 
 /// Repositories `a` and `b`, each with one commit, and a store file in its own folder that
 /// doesn't exist yet. Paths are canonical, as the list keeps them.
@@ -22,25 +22,9 @@ fn fixture() -> Fixture {
     hermetic();
     let dir = tempfile::tempdir().unwrap();
     let root = canonical(dir.path());
-    let repo = |name: &str| {
-        let repo = root.join(name);
-        git(
-            &root,
-            &[
-                "init",
-                "--quiet",
-                "--initial-branch=main",
-                repo.to_str().unwrap(),
-            ],
-        );
-        std::fs::write(repo.join("file.txt"), "one\n").unwrap();
-        git(&repo, &["add", "file.txt"]);
-        git(&repo, &["commit", "--quiet", "-m", "base"]);
-        repo
-    };
     Fixture {
-        a: repo("a"),
-        b: repo("b"),
+        a: repo_with_commit(&root, "a"),
+        b: repo_with_commit(&root, "b"),
         store: root.join("app-data").join("Cairn").join("recent-repos.txt"),
         dir,
     }
@@ -58,7 +42,7 @@ fn canonical(dir: &Path) -> PathBuf {
 
 /// Opens `repo` and waits until the list shows it at the top.
 fn open_and_wait(app: &mut App, repo: &Path) {
-    app.send(Intent::Open(repo.to_path_buf()));
+    app.open_repo(repo);
     app.until("the opened repository tops the list", |app| {
         app.recent().first().map(PathBuf::as_path) == Some(repo)
     });
@@ -110,6 +94,7 @@ fn opening_a_then_b_then_a_lists_a_then_b_and_survives_a_restart(cx: &mut TestAp
 fn reopening_the_open_repository_after_removing_it_records_it_again(cx: &mut TestAppContext) {
     let f = fixture();
     let mut app = open_with_recent(cx, None, Some(f.store.clone()));
+    // Seen red: `opening` not setting `awaiting` times out here, before the reopen.
     open_and_wait(&mut app, &f.a);
     app.draw();
     app.click("open-recent");
@@ -117,12 +102,32 @@ fn reopening_the_open_repository_after_removing_it_records_it_again(cx: &mut Tes
     assert!(app.recent().is_empty());
 
     // As the Open button's folder picker does once a folder is chosen.
-    app.workspace
-        .update(app.cx, |workspace, cx| workspace.open(f.a.clone(), cx));
-    // Seen red: `forget_recorded` leaving the open workdir as recorded times out here.
+    app.open_repo(&f.a);
     app.until("the reopened repository is listed again", |app| {
         app.recent() == [f.a.clone()]
     });
+}
+
+#[gpui::test]
+fn a_refresh_of_the_repository_open_before_isnt_taken_for_the_next_open(cx: &mut TestAppContext) {
+    let f = fixture();
+    let gone = canonical(f.dir.path()).join("gone");
+    let mut app = open_with_recent(cx, None, Some(f.store.clone()));
+    open_and_wait(&mut app, &f.a);
+    app.draw();
+    app.click("open-recent");
+    app.click(&format!("recent:menu:remove:{}", f.a.display()));
+
+    app.open_repo(&gone);
+    // Stands in for a refresh of A that was published before the Open of `gone` and is
+    // drained after it: an Ok Refs Snapshot of A while the window waits for `gone`. Sent
+    // past the window, so the window still waits for `gone`.
+    app.send(Intent::Open(f.a.clone()));
+    // The marker: that Snapshot is shown, and recording happens as it is.
+    assert!(refs_shown(&mut app, &f.a));
+    // Seen red: `refs_shown` recording whatever Ok Refs Snapshot comes next, not the one
+    // that answers the awaited path, lists A again.
+    assert!(app.recent().is_empty());
 }
 
 #[gpui::test]
@@ -132,10 +137,10 @@ fn a_failed_open_isnt_added(cx: &mut TestAppContext) {
     std::fs::create_dir(&not_a_repo).unwrap();
     let mut app = open_with_recent(cx, None, Some(f.store.clone()));
 
-    app.send(Intent::Open(not_a_repo.clone()));
+    app.open_repo(&not_a_repo);
     // The marker: the failed Open's own Refs Snapshot is shown, and recording happens as it is.
     assert!(!refs_shown(&mut app, &not_a_repo));
-    // Seen red: the Bridge recording an Err Refs Snapshot too lists the folder.
+    // Seen red: `refs_shown` recording an Err Refs Snapshot too lists the folder.
     assert!(app.recent().is_empty());
     assert!(!f.store.exists());
 
@@ -228,17 +233,26 @@ fn a_recent_repository_that_is_gone_shows_gits_error_and_stays_listed(cx: &mut T
 
     app.click(&format!("recent:empty:open:{}", f.a.display()));
     assert!(!refs_shown(&mut app, &f.a));
-    // Seen red: the Bridge recording an Err Refs Snapshot too moves A to the top.
+    // Seen red: `refs_shown` recording an Err Refs Snapshot too moves A to the top.
     assert_eq!(app.recent(), [f.b.clone(), f.a.clone()]);
     let mut restarted = open_with_recent(cx, None, Some(f.store.clone()));
     assert_eq!(restarted.recent(), [f.b.clone(), f.a.clone()]);
+
+    // Control: once A is a repository again, the same choice opens it and moves it up.
+    repo_with_commit(&canonical(f.dir.path()), "a");
+    restarted.draw();
+    restarted.click(&format!("recent:empty:open:{}", f.a.display()));
+    assert!(refs_shown(&mut restarted, &f.a));
+    restarted.until("the restored repository tops the list", |app| {
+        app.recent() == [f.a.clone(), f.b.clone()]
+    });
 }
 
 #[gpui::test]
 fn a_repository_is_listed_once_by_its_worktree_root_however_it_was_opened(cx: &mut TestAppContext) {
     let f = fixture();
     let mut app = open_with_recent(cx, None, Some(f.store.clone()));
-    app.send(Intent::Open(f.a.join(".git")));
+    app.open_repo(&f.a.join(".git"));
     assert!(refs_shown(&mut app, &f.a.join(".git")));
     // Seen red: `worktree_root` keeping the `.git` folder times out here.
     app.until("the worktree root is listed", |app| {
@@ -250,7 +264,7 @@ fn a_repository_is_listed_once_by_its_worktree_root_however_it_was_opened(cx: &m
     {
         let link = canonical(f.dir.path()).join("link-to-a");
         std::os::unix::fs::symlink(&f.a, &link).unwrap();
-        app.send(Intent::Open(link));
+        app.open_repo(&link);
         // Seen red: `std::path::absolute` in place of `canonicalize` keeps the link.
         app.until("the worktree root moves to the top", |app| {
             app.recent() == [f.a.clone(), f.b.clone()]
