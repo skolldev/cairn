@@ -791,9 +791,12 @@ dependencies = [
 name = "cairn-budget"
 version = "0.0.0"
 dependencies = [
+ "cairn-repo",
  "cairn-write",
  "libc",
  "tempfile",
+ "tracing",
+ "tracing-subscriber",
  "windows-sys 0.61.2",
 ]
 

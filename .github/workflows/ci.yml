@@ -206,7 +206,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: test
         timeout-minutes: 10
-        run: cargo test --workspace --locked --no-fail-fast -- --nocapture
+        run: cargo test-all -- --nocapture
       # The Budget harness's probe builds only with this feature, and never ships.
       - name: clippy and test, with the Budget harness's probe
         timeout-minutes: 10

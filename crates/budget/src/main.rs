@@ -4,17 +4,20 @@ use std::path::PathBuf;
 
 use cairn_budget::report::{self, Row};
 use cairn_budget::run::{self, Config};
+use cairn_budget::trace;
 
 const USAGE: &str = "\
 usage: cairn-budget run [--only launch,write,external] [options]
        cairn-budget held-key [options]
+       cairn-budget trace --only external [--samples N]
 
 options:
   --cairn PATH       the cairn binary, built with --features measure
                      (default: next to this one)
   --presentmon PATH  PresentMon's console exe, on Windows (default: $CAIRN_PRESENTMON)
   --runs N           runs per Budget (default 3; fewer can only come out Invalid)
-  --samples N        samples per run (default 20; fewer can only come out Invalid)
+  --samples N        samples per run (default 20; fewer can only come out Invalid).
+                     For trace, samples per row; trace takes no other option
   --out DIR          where the result goes (default budget-results)";
 
 struct Args {
@@ -103,11 +106,30 @@ fn measure(args: &Args) -> Result<Vec<Row>, String> {
     Ok(rows)
 }
 
+/// `trace`: where External change's time goes, Slot by Slot. It gives no number, so it writes
+/// no result file.
+fn trace(args: &Args) -> Result<i32, String> {
+    if cfg!(debug_assertions) {
+        return Err("this is a debug build: run it with `cargo run --release`".to_owned());
+    }
+    if args.only != ["external"] {
+        return Err(format!(
+            "trace explains External change only: pass --only external\n{USAGE}"
+        ));
+    }
+    let _home = hermetic()?;
+    println!("{}", trace::trace_external_change(&args.config)?);
+    Ok(0)
+}
+
 fn run() -> Result<i32, String> {
     if std::env::var_os("CI").is_some() {
         return Err("this is a CI runner, and Budget numbers never count from one".to_owned());
     }
     let args = parse_args()?;
+    if args.command == "trace" {
+        return trace(&args);
+    }
     let rust_version = run::rust_version()?;
     let _home = hermetic()?;
     let repo = std::env::current_dir().map_err(|e| e.to_string())?;
