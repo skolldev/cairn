@@ -164,7 +164,7 @@ impl Workspace {
         if !self.opened || self.jobs.read(cx).fetching() {
             return;
         }
-        self.jobs.update(cx, |jobs, _| jobs.fetch_asked());
+        self.jobs.update(cx, |jobs, _| jobs.record_fetch_sent());
         self.service.send(Intent::Fetch);
     }
 

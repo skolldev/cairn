@@ -10,9 +10,9 @@ use gpui::{ClickEvent, Div, KeyBinding, Stateful, Styled, Window, actions, div, 
 actions!(cairn, [Fetch]);
 
 #[cfg(target_os = "macos")]
-const SHORTCUT: &str = "cmd-shift-f";
+pub(crate) const SHORTCUT: &str = "cmd-shift-f";
 #[cfg(not(target_os = "macos"))]
-const SHORTCUT: &str = "ctrl-shift-f";
+pub(crate) const SHORTCUT: &str = "ctrl-shift-f";
 
 /// Binds the shortcut, app-wide: the window handles [`Fetch`] wherever focus is.
 pub fn bind_keys(cx: &mut gpui::App) {

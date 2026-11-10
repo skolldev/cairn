@@ -2,8 +2,9 @@
 //! newest: queued or running with its latest output line, done for a moment, or failed with
 //! git's own words until the user dismisses them or starts another Job.
 //!
-//! A queued or running fetch has a Stop button. A Local write Job has none (ADR 0002). Quit and Force quit handle a running one,
-//! and [`QuitView`](crate::quit::QuitView) reads the same Snapshots on its own.
+//! A queued or running fetch has a Stop button. A Local write Job has none (ADR 0002):
+//! Quit and Force quit handle a running one, and [`QuitView`](crate::quit::QuitView) reads
+//! the same Snapshots on its own.
 
 #[cfg(test)]
 mod tests;
@@ -86,17 +87,13 @@ impl JobsView {
     }
 
     /// Records that a Fetch Intent has been sent, until its Job's first Snapshot arrives.
-    pub fn fetch_asked(&mut self) {
+    pub fn record_fetch_sent(&mut self) {
         self.fetch_asked = true;
     }
 
     /// Whether a fetch has been asked for and hasn't ended, so another would only queue.
     pub fn fetching(&self) -> bool {
-        self.fetch_asked
-            || self.jobs.values().any(|job| {
-                job.kind == JobKind::Fetch
-                    && matches!(job.state, JobState::Queued | JobState::Running)
-            })
+        self.fetch_asked || self.jobs.values().any(|job| unended_fetch(job))
     }
 
     fn newest(&self) -> Option<&Arc<JobSnapshot>> {
@@ -107,10 +104,7 @@ impl JobsView {
     /// offered, because stopping one can leave the user's work unpublished.
     fn stoppable(&self) -> Option<JobId> {
         self.newest()
-            .filter(|job| {
-                job.kind == JobKind::Fetch
-                    && matches!(job.state, JobState::Queued | JobState::Running)
-            })
+            .filter(|job| unended_fetch(job))
             .map(|job| job.id)
     }
 
@@ -140,6 +134,11 @@ impl JobsView {
             },
         })
     }
+}
+
+/// Whether `job` is a fetch that is queued or running.
+fn unended_fetch(job: &JobSnapshot) -> bool {
+    job.kind == JobKind::Fetch && matches!(job.state, JobState::Queued | JobState::Running)
 }
 
 /// The git command a Job runs, as the user would type it.

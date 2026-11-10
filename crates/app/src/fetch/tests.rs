@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cairn_repo::{JobKind, JobState};
+use cairn_repo::{Intent, JobKind, JobState};
 use gpui::TestAppContext;
 
 use crate::jobs::Banner;
@@ -75,8 +75,8 @@ fn the_keyboard_shortcut_fetches(cx: &mut TestAppContext) {
     git(&f.origin, &["branch", "new"]);
     let mut app = open_with_remote(cx, &f.repo);
 
-    // Seen red: without `track_focus` on the window's root, nothing handles the key.
     press_shortcut(&mut app);
+    // Seen red: without `track_focus` on the window's root, nothing handles the key.
     app.until("the fetch is done and origin/new is shown", |app| {
         app.draw();
         app.shown("job:done") && app.shown("sidebar:refs/remotes/origin/new")
@@ -85,6 +85,8 @@ fn the_keyboard_shortcut_fetches(cx: &mut TestAppContext) {
     // With focus in the filter box, the shortcut still fetches.
     app.click("sidebar:filter");
     press_shortcut(&mut app);
+    // Seen red: the root's focus and action moved onto the header, which holds focus only
+    // while nothing inside the window does.
     app.until("a second fetch is done", |app| {
         app.jobs_seen()
             .iter()
@@ -95,10 +97,7 @@ fn the_keyboard_shortcut_fetches(cx: &mut TestAppContext) {
 }
 
 fn press_shortcut(app: &mut App) {
-    #[cfg(target_os = "macos")]
-    app.cx.simulate_keystrokes("cmd-shift-f");
-    #[cfg(not(target_os = "macos"))]
-    app.cx.simulate_keystrokes("ctrl-shift-f");
+    app.cx.simulate_keystrokes(super::SHORTCUT);
 }
 
 #[gpui::test]
@@ -163,6 +162,62 @@ fn a_slow_fetch_shows_the_remotes_latest_line_and_stop_ends_it_as_stopped(cx: &m
 }
 
 #[gpui::test]
+fn stop_ends_a_queued_fetch_before_it_starts(cx: &mut TestAppContext) {
+    let f = fixture();
+    let release = Release(f.dir.path().join("release"));
+    let log = f.dir.path().join("remote.log");
+    slow_remote(
+        &f.repo,
+        f.dir.path(),
+        &format!(
+            "echo run >> '{}'\necho 'slow remote waiting' >&2\n{}",
+            slash(&log),
+            block_until(&release.0, f.dir.path())
+        ),
+    );
+    let mut app = open_with_remote(cx, &f.repo);
+    // Network Jobs run one at a time, so a fetch queues behind a push the remote holds.
+    app.send(Intent::Push);
+    app.until("the push is running", |app| {
+        app.jobs_seen()
+            .iter()
+            .any(|(kind, state)| *kind == JobKind::Push && *state == JobState::Running)
+    });
+
+    app.click("toolbar:fetch");
+    app.until("the fetch shows queued", |app| {
+        app.draw();
+        app.shown("job:queued")
+    });
+    // Seen red: a Stop offered only while a fetch runs isn't drawn here.
+    app.click("job:stop");
+    app.until("the fetch shows stopped", |app| {
+        app.draw();
+        app.shown("job:stopped")
+    });
+    release.release();
+    // The marker: the push ends after the queue has dealt with the stopped fetch.
+    app.until("the push is done", |app| {
+        app.jobs_seen()
+            .iter()
+            .any(|(kind, state)| *kind == JobKind::Push && *state == JobState::Done(Ok(())))
+    });
+
+    assert_eq!(
+        app.jobs_seen(),
+        [
+            (JobKind::Push, JobState::Done(Ok(()))),
+            (JobKind::Fetch, JobState::Stopped)
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "run\n",
+        "the fetch reached the remote"
+    );
+}
+
+#[gpui::test]
 fn a_remote_that_refuses_shows_gits_own_stderr(cx: &mut TestAppContext) {
     let f = fixture();
     let mut app = open_with_remote(cx, &f.repo);
@@ -221,9 +276,10 @@ fn pressing_fetch_again_while_one_is_running_starts_no_other(cx: &mut TestAppCon
     // The second press comes before the first fetch's Snapshot has reached the window.
     app.click("toolbar:fetch");
     app.click("toolbar:fetch");
-    app.until("the fetch is running", |app| {
-        app.draw();
-        app.shown("job:running")
+    app.until("a fetch is running", |app| {
+        app.jobs_seen()
+            .iter()
+            .any(|(_, state)| *state == JobState::Running)
     });
     app.click("toolbar:fetch");
     release.release();
@@ -235,6 +291,8 @@ fn pressing_fetch_again_while_one_is_running_starts_no_other(cx: &mut TestAppCon
             .any(|(_, state)| *state == JobState::Done(Ok(())))
     });
 
+    // Seen red: without `fetch_asked`, the second press queues a fetch, and without the
+    // check for a queued or running one, the third does.
     assert_eq!(app.jobs_seen(), [(JobKind::Fetch, JobState::Done(Ok(())))]);
     assert_eq!(std::fs::read_to_string(&log).unwrap(), "run\n");
 }
