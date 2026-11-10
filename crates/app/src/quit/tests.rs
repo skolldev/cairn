@@ -8,26 +8,12 @@ use std::time::{Duration, Instant};
 use cairn_repo::Intent;
 use gpui::{Modifiers, TestAppContext, px, size};
 
-use crate::testing::{App, git, hermetic, open};
+use crate::testing::{App, Release, block_until, git, hermetic, open, post_checkout_hook, slash};
 
 /// How long a test waits when nothing marks what must not happen. A close that exits
 /// does so well within this: `closing_with_nothing_running_exits_without_asking` is the
 /// control.
 const SETTLE: Duration = Duration::from_millis(300);
-
-/// `path` as git's own sh reads it: forward slashes, on Windows too.
-fn slash(path: &Path) -> String {
-    path.to_str().unwrap().replace('\\', "/")
-}
-
-/// Creates the release file when dropped, so a failing test leaves nothing blocked on it.
-struct Release(PathBuf);
-
-impl Drop for Release {
-    fn drop(&mut self) {
-        let _ = std::fs::write(&self.0, "");
-    }
-}
 
 /// A repository with a branch `other` and a commit to push. A `post-checkout` hook and a
 /// wrapper around git on the remote each block until the release file exists or the temp dir
@@ -58,19 +44,11 @@ fn fixture() -> Fixture {
     git(&repo, &["config", "push.default", "current"]);
 
     let block = format!(
-        "touch '{blocked}'\n\
-         while [ ! -f '{release}' ] && [ -d '{dir}' ]; do sleep 0.05; done\n",
-        blocked = slash(&blocked),
-        release = slash(&release),
-        dir = slash(dir.path()),
+        "touch '{}'\n{}",
+        slash(&blocked),
+        block_until(&release, dir.path())
     );
-    let hook = repo.join(".git/hooks/post-checkout");
-    std::fs::write(&hook, format!("#!/bin/sh\n{block}")).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    post_checkout_hook(&repo, &block);
     let wrapper = dir.path().join("slow-remote.sh");
     std::fs::write(&wrapper, format!("{block}exec git \"$@\"\n")).unwrap();
     for (key, command) in [
@@ -97,7 +75,7 @@ fn fixture() -> Fixture {
 
 impl Fixture {
     fn release(&self) {
-        std::fs::write(&self.release.0, "").unwrap();
+        self.release.release();
     }
 
     /// Whether the push reached the remote: the bare remote started with no commits.

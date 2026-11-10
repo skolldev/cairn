@@ -7,12 +7,7 @@ use cairn_repo::{JobKind, JobState};
 use gpui::TestAppContext;
 
 use super::Banner;
-use crate::testing::{App, git, hermetic, open};
-
-/// `path` as git's own sh reads it: forward slashes, on Windows too.
-fn slash(path: &Path) -> String {
-    path.to_str().unwrap().replace('\\', "/")
-}
+use crate::testing::{App, Release, block_until, git, hermetic, open, post_checkout_hook};
 
 /// A repository on `main` with branches `other` and `third`. `file.txt` holds `one` on
 /// `main` and `third`, and `two` on `other`.
@@ -173,25 +168,14 @@ fn a_slow_post_checkout_hook_shows_the_job_running_with_its_latest_line_then_don
     cx: &mut TestAppContext,
 ) {
     let f = fixture();
-    let release = f.dir.path().join("release");
-    let hook = f.repo.join(".git/hooks/post-checkout");
-    std::fs::write(
-        &hook,
-        format!(
-            "#!/bin/sh\n\
-             echo 'hook starting'\n\
-             echo 'hook waiting'\n\
-             while [ ! -f '{release}' ] && [ -d '{dir}' ]; do sleep 0.05; done\n",
-            release = slash(&release),
-            dir = slash(f.dir.path()),
+    let release = Release(f.dir.path().join("release"));
+    post_checkout_hook(
+        &f.repo,
+        &format!(
+            "echo 'hook starting'\necho 'hook waiting'\n{}",
+            block_until(&release.0, f.dir.path())
         ),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    );
     let mut app = open_on_main(cx, &f.repo);
 
     app.double_click("sidebar:refs/heads/other");
@@ -207,7 +191,7 @@ fn a_slow_post_checkout_hook_shows_the_job_running_with_its_latest_line_then_don
     // Seen red: a banner that leaves out the output line.
     assert!(app.shown("job:output"));
 
-    std::fs::write(&release, "").unwrap();
+    release.release();
     app.until("the Job shows done", |app| {
         app.draw();
         app.shown("job:done")
