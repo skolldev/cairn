@@ -77,7 +77,7 @@ cargo run --release -p cairn-budget -- trace --only launch
 
 - `main` running, GPUI's app launched, the window created, and the Repo service started with the Open sent: marks the probe writes, in a `measure` build only.
 - The first painted frame, as the probe stamps it.
-- Each Slot's first Snapshot, when the Repo service published it (from its `read_job` and `publish` spans) and when the window drained it.
+- Each Slot's first Snapshot, when the Repo service published it (from its `read_job` and `publish` spans) and when the window drained it. So a `measure` build with the probe on records those two spans in every run, `run` included, through a filter of its own that leaves Cairn's log as `RUST_LOG` sets it.
 - The first frame painted with every Slot, the frame holding the first drawable Metal gave a presented time to, and that presented time, which is what `run` times.
 - How many frames painted before that frame, and how many drawables Metal gave no time to before it.
 

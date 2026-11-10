@@ -50,8 +50,11 @@ pub fn mark(mark: Mark) {
 }
 
 /// Marks each Slot's first published Snapshot, if the harness turned the probe on.
-pub fn first_publishes() -> Option<FirstPublishes> {
-    probing().then(|| FirstPublishes::new(write_line))
+pub fn first_publishes<S>() -> Option<impl tracing_subscriber::Layer<S>>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    probing().then(|| FirstPublishes::layer(write_line))
 }
 
 /// Hooks Metal so that it reports presented frames. Before anything draws, so that the first

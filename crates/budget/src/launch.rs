@@ -9,9 +9,9 @@ use std::sync::Mutex;
 
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id};
-use tracing::subscriber::Interest;
 use tracing::{Metadata, Subscriber};
 use tracing_subscriber::Layer;
+use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 
@@ -166,19 +166,24 @@ pub fn breakdown(start_ns: u64, trace: &Trace) -> Result<Breakdown, String> {
 }
 
 /// Marks each Slot's first published Snapshot, from the Repo service's own spans: a `publish`
-/// inside a `read_job` that names its Slot. It takes no interest in any other span or event, so
-/// a build that installs it does no more tracing work than those two spans.
+/// inside a `read_job` that names its Slot. Install it through [`FirstPublishes::layer`].
 pub struct FirstPublishes {
     emit: Box<dyn Fn(Line) + Send + Sync>,
     marked: Mutex<BTreeSet<Slot>>,
 }
 
 impl FirstPublishes {
-    pub fn new(emit: impl Fn(Line) + Send + Sync + 'static) -> Self {
+    /// The layer, filtered to its own two spans. The filter is the layer's own, so the other
+    /// layers still see everything they asked for: a layer that answered no for every other
+    /// callsite would silence them all.
+    pub fn layer<S: Subscriber + for<'a> LookupSpan<'a>>(
+        emit: impl Fn(Line) + Send + Sync + 'static,
+    ) -> impl Layer<S> {
         Self {
             emit: Box::new(emit),
             marked: Mutex::default(),
         }
+        .with_filter(filter_fn(watched))
     }
 }
 
@@ -203,18 +208,6 @@ impl Visit for SlotField {
 }
 
 impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for FirstPublishes {
-    fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
-        if watched(metadata) {
-            Interest::always()
-        } else {
-            Interest::never()
-        }
-    }
-
-    fn enabled(&self, metadata: &Metadata<'_>, _: Context<'_, S>) -> bool {
-        watched(metadata)
-    }
-
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
         let ns = clock::now_ns();
         let Some(span) = ctx.span(id) else { return };

@@ -14,7 +14,18 @@ use cairn_budget::launch::FirstPublishes;
 use cairn_budget::probe::{Line, Mark, Slot};
 use cairn_repo::{Intent, RepoService, Snapshot};
 use common::small_fixture;
-use tracing_subscriber::layer::SubscriberExt as _;
+use tracing::span::{Attributes, Id};
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::{Context, SubscriberExt as _};
+
+/// Records the name of every span it sees: a layer beside `FirstPublishes`, such as Cairn's log.
+struct Names(Arc<Mutex<Vec<&'static str>>>);
+
+impl<S: tracing::Subscriber> Layer<S> for Names {
+    fn on_new_span(&self, attrs: &Attributes<'_>, _: &Id, _: Context<'_, S>) {
+        self.0.lock().unwrap().push(attrs.metadata().name());
+    }
+}
 
 /// Drains `service` until `done` holds for the Slots drained so far, by when each was first
 /// drained.
@@ -46,9 +57,15 @@ fn drain_until(
 fn each_slots_first_published_snapshot_is_marked_once_before_it_is_drained() {
     let lines: Arc<Mutex<Vec<Line>>> = Arc::default();
     let sink = lines.clone();
-    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(
-        FirstPublishes::new(move |line| sink.lock().unwrap().push(line)),
-    ))
+    let names: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+    // On top, as Cairn installs it, over the layer that logs.
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::registry()
+            .with(Names(names.clone()))
+            .with(FirstPublishes::layer(move |line| {
+                sink.lock().unwrap().push(line)
+            })),
+    )
     .unwrap();
     let sandbox = Sandbox::clone_of(&small_fixture()).unwrap();
     let (wake, woken) = mpsc::channel();
@@ -76,6 +93,13 @@ fn each_slots_first_published_snapshot_is_marked_once_before_it_is_drained() {
             .collect()
     };
     let first = published(&lines.lock().unwrap());
+    // Seen red: with `FirstPublishes` unfiltered and answering no for every other callsite, no
+    // layer under it sees the Open's `intent` span.
+    assert!(
+        names.lock().unwrap().contains(&"intent"),
+        "the layer beside it sees only {:?}",
+        names.lock().unwrap()
+    );
     for slot in Slot::ALL {
         let marks: Vec<u64> = first
             .iter()
@@ -92,7 +116,7 @@ fn each_slots_first_published_snapshot_is_marked_once_before_it_is_drained() {
     }
 
     // A later answer from Unstaged, which published again, is no first Snapshot: it marks
-    // nothing more.
+    // nothing more. Unstaged only, since the save's answer is what this waits for.
     let before = drained[&Slot::Unstaged].len();
     sandbox.save(true).unwrap();
     drain_until(&service, &woken, &mut drained, |d| {
@@ -104,7 +128,14 @@ fn each_slots_first_published_snapshot_is_marked_once_before_it_is_drained() {
             _ => false,
         })
     });
-    // Seen red: with every publish marked, the save's Unstaged and Untracked answers.
+    let unstaged = |marks: &[(Slot, u64)]| -> Vec<(Slot, u64)> {
+        marks
+            .iter()
+            .filter(|(slot, _)| *slot == Slot::Unstaged)
+            .copied()
+            .collect()
+    };
+    // Seen red: with every publish marked, the save's Unstaged answer.
     let after = published(&lines.lock().unwrap());
-    assert_eq!(after, first);
+    assert_eq!(unstaged(&after), unstaged(&first));
 }
