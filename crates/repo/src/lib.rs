@@ -892,15 +892,18 @@ fn read_untracked(
     let within = match scope {
         narrow::Scope::Unchanged { last, index } => {
             record_scope(Some(0));
+            record_index(IndexUse::Kept);
             let result = Ok(last);
             reading.finish(&result, Some(index));
             return result;
         }
         narrow::Scope::Everything => None,
+        // The walk needs a load of the index whether or not it changed.
         narrow::Scope::Paths {
             last,
             before,
             paths,
+            ..
         } => Some((last, before, paths)),
     };
     let mut changed_only = None;
@@ -911,6 +914,7 @@ fn read_untracked(
         // Loaded after the read took its changes: an index write after this lands in the next
         // read's changes. The walk reads against this same load.
         let index = repo.index().map_err(message)?;
+        record_index(IndexUse::Loaded);
         let narrowed_to = within.and_then(|(last, before, paths)| {
             let tracked = index.changes_since(&before).tracked;
             narrow::paths_with(paths, tracked).map(|paths| (last, before, paths))
@@ -946,30 +950,53 @@ fn read_unstaged(
     narrowed: &narrow::Narrowed<FileChange>,
 ) -> Result<Vec<FileChange>, String> {
     let (scope, reading) = narrowed.begin(path);
-    if let narrow::Scope::Unchanged { last, index } = scope {
-        record_scope(Some(0));
-        let result = Ok(last);
-        reading.finish(&result, Some(index));
-        return result;
-    }
-    // Loaded after the read took its changes and before `diff-files` reads the index, so an
-    // index write after this always lands in the next read's changes. Without it the next
-    // read reads everything.
-    let index = cairn_read::Repo::open(path)
-        .and_then(|repo| repo.index())
-        .inspect_err(|e| tracing::debug!(error = %e, "couldn't load the index"))
-        .ok();
-    let narrowed_to = match (scope, &index) {
-        (
-            narrow::Scope::Paths {
-                last,
-                before,
-                paths,
-            },
-            Some(index),
-        ) => narrow::paths_with(paths, index.changes_since(&before).entries)
-            .map(|paths| (last, paths)),
-        _ => None,
+    let (index, narrowed_to) = match scope {
+        narrow::Scope::Unchanged { last, index } => {
+            record_scope(Some(0));
+            record_index(IndexUse::Kept);
+            let result = Ok(last);
+            reading.finish(&result, Some(index));
+            return result;
+        }
+        // Nothing flagged the index since the last read took its changes, as when a file was
+        // saved, so that read's index stands for it and loading it again, about 10 ms on the
+        // kernel, is skipped (#78). An index write whose event hasn't arrived yet flags the
+        // next read, which compares with this older index and so still reads its entries.
+        narrow::Scope::Paths {
+            last,
+            before,
+            paths,
+            index_changed: false,
+        } => {
+            record_index(IndexUse::Kept);
+            (Some(before), Some((last, paths)))
+        }
+        scope => {
+            // Loaded after the read took its changes and before `diff-files` reads the index,
+            // so an index write after this always lands in the next read's changes. Without it
+            // the next read reads everything.
+            let index = cairn_read::Repo::open(path)
+                .and_then(|repo| repo.index())
+                .inspect_err(|e| tracing::debug!(error = %e, "couldn't load the index"))
+                .ok();
+            if index.is_some() {
+                record_index(IndexUse::Loaded);
+            }
+            let narrowed_to = match (scope, &index) {
+                (
+                    narrow::Scope::Paths {
+                        last,
+                        before,
+                        paths,
+                        ..
+                    },
+                    Some(index),
+                ) => narrow::paths_with(paths, index.changes_since(&before).entries)
+                    .map(|paths| (last, paths)),
+                _ => None,
+            };
+            (index, narrowed_to)
+        }
     };
     let result = match narrowed_to {
         None => {
@@ -1004,6 +1031,21 @@ fn record_scope(changed_only: Option<usize>) {
             span.record("scope", "full");
         }
     }
+}
+
+/// Whether a narrowed Slot's read loaded the index, or kept the one its last read kept.
+enum IndexUse {
+    Loaded,
+    Kept,
+}
+
+/// Says in the running `read_job` span whether this read loaded the index (#78).
+fn record_index(index: IndexUse) {
+    let index = match index {
+        IndexUse::Loaded => "loaded",
+        IndexUse::Kept => "kept",
+    };
+    tracing::Span::current().record("index", index);
 }
 
 /// Snapshots waiting for the UI, coalesced to the newest per Slot.
