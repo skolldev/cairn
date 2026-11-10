@@ -70,8 +70,16 @@ impl Counter {
 
     /// Takes the pairs a Refs read of `path` found, answering Refs `generation`, and counts
     /// the visible ones not counted before. A count already running finishes: its pair may
-    /// still be wanted.
-    pub(crate) fn refs_read(self: &Arc<Self>, path: &Path, generation: Generation, refs: &Refs) {
+    /// still be wanted. `asked` is the span of what asked for the Refs read, such as the
+    /// Open, never the Refs read's own `read_job` span: a Counts Snapshot holding that would
+    /// keep it open for as long as the Snapshot lives.
+    pub(crate) fn refs_read(
+        self: &Arc<Self>,
+        path: &Path,
+        generation: Generation,
+        refs: &Refs,
+        asked: &tracing::Span,
+    ) {
         let mut state = self.state.lock().unwrap();
         if state.open.as_deref() != Some(path) {
             return;
@@ -85,7 +93,7 @@ impl Counter {
             })
             .collect();
         state.refs = Some(RefsRead { generation, pairs });
-        self.submit(&state, Running::Finish, "refs");
+        self.submit(&state, Running::Finish, "refs", asked);
     }
 
     /// Names the local branches on screen. A running count of a branch that scrolled away is
@@ -102,7 +110,7 @@ impl Counter {
         };
         state.visible = visible;
         if state.refs.is_some() {
-            self.submit(&state, running, "show_counts");
+            self.submit(&state, running, "show_counts", &tracing::Span::current());
         }
     }
 
@@ -111,12 +119,22 @@ impl Counter {
         self.slot.drop_jobs();
     }
 
-    fn submit(self: &Arc<Self>, state: &State, running: Running, cause: &'static str) {
+    /// Submits a count. `asked` is the span of the Intent, Job or External change that asked:
+    /// the count's `read_job` span sits inside it, and its Snapshots carry it.
+    fn submit(
+        self: &Arc<Self>,
+        state: &State,
+        running: Running,
+        cause: &'static str,
+        asked: &tracing::Span,
+    ) {
         let Some(path) = state.open.clone() else {
             return;
         };
         let counter = self.clone();
-        let span = tracing::Span::current();
+        let span = asked.clone();
+        // The Slot takes the current span as the `read_job` span's parent.
+        let _asked = asked.enter();
         self.slot.submit(running, cause, move |job| {
             counter.count(&path, job, span);
         });

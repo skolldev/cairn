@@ -929,6 +929,7 @@ impl Reads {
     fn refresh_refs(&self, path: &Path, asked: Asked) {
         let mode = self.read_mode.lock().unwrap().clone();
         let counter = self.counter.clone();
+        let span = asked.span.clone();
         self.submit(
             &self.refs_slot,
             path,
@@ -938,7 +939,7 @@ impl Reads {
                 if let Ok(refs) = &refs
                     && job.is_current()
                 {
-                    counter.refs_read(path, job.generation(), refs);
+                    counter.refs_read(path, job.generation(), refs, &span);
                 }
                 refs
             },
