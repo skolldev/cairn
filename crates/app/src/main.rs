@@ -32,7 +32,7 @@ use gpui::{
 };
 
 use bridge::Bridge;
-use jobs::{JobsView, StopJob};
+use jobs::{JobsView, StashAndSwitch, StopJob};
 use quit::QuitView;
 use recent::{OpenRecent, Place, RecentRepos, RecentView};
 use refs_view::{RefsView, SwitchTo};
@@ -52,6 +52,7 @@ struct Workspace {
     focus: gpui::FocusHandle,
     _bridge: Entity<Bridge>,
     _switch_to: gpui::Subscription,
+    _stash_and_switch: gpui::Subscription,
     _stop_job: gpui::Subscription,
     _open_recent: gpui::Subscription,
     #[cfg(debug_assertions)]
@@ -83,6 +84,9 @@ impl Workspace {
         });
         let switch_to = cx.subscribe(&refs, |workspace, _, SwitchTo(branch), _| {
             workspace.service.send(Intent::Switch(branch.clone()));
+        });
+        let stash_and_switch = cx.subscribe(&jobs, |workspace, _, StashAndSwitch(intent), _| {
+            workspace.service.send(intent.clone());
         });
         let stop_job = cx.subscribe(&jobs, |workspace, _, StopJob(id), _| {
             workspace.service.send(Intent::Stop(*id));
@@ -133,6 +137,7 @@ impl Workspace {
             focus,
             _bridge: bridge,
             _switch_to: switch_to,
+            _stash_and_switch: stash_and_switch,
             _stop_job: stop_job,
             _open_recent: open_recent,
             #[cfg(debug_assertions)]

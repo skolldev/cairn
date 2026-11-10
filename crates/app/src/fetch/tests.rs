@@ -232,7 +232,7 @@ fn a_remote_that_refuses_shows_gits_own_stderr(cx: &mut TestAppContext) {
         app.draw();
         matches!(app.banner(), Some(Banner::Failed { .. }))
     });
-    let Some(Banner::Failed { title, error }) = app.banner() else {
+    let Some(Banner::Failed { title, error, .. }) = app.banner() else {
         unreachable!()
     };
     assert_eq!(title, "git fetch");

@@ -384,8 +384,15 @@ impl JobQueue {
 
     /// Queues a Job behind every one queued before it.
     pub(crate) fn push(&self, job: impl FnOnce() + Send + 'static) {
-        self.shared.queue.lock().unwrap().push_back(Box::new(job));
-        self.shared.ready.notify_one();
+        self.handle().push(job);
+    }
+
+    /// What queues Jobs here from elsewhere, such as from the end of a Job, without owning
+    /// the worker. A Job queued from a running one still runs before a drop returns.
+    pub(crate) fn handle(&self) -> QueueHandle {
+        QueueHandle {
+            shared: self.shared.clone(),
+        }
     }
 
     /// Forgets the queued Jobs, which never start, and stops waiting for the running one:
@@ -393,6 +400,20 @@ impl JobQueue {
     pub(crate) fn abandon(&self) {
         self.abandoned.store(true, Ordering::Release);
         self.shared.queue.lock().unwrap().clear();
+    }
+}
+
+/// Queues Jobs on a [`JobQueue`] it doesn't own.
+#[derive(Clone)]
+pub(crate) struct QueueHandle {
+    shared: Arc<LaneShared>,
+}
+
+impl QueueHandle {
+    /// Queues a Job behind every one queued before it.
+    pub(crate) fn push(&self, job: impl FnOnce() + Send + 'static) {
+        self.shared.queue.lock().unwrap().push_back(Box::new(job));
+        self.shared.ready.notify_one();
     }
 }
 
