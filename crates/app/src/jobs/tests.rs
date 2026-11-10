@@ -7,7 +7,9 @@ use cairn_repo::{JobKind, JobState};
 use gpui::TestAppContext;
 
 use super::Banner;
-use crate::testing::{App, Release, block_until, git, hermetic, open, post_checkout_hook};
+use crate::testing::{
+    App, Release, block_until, git, hermetic, open, post_checkout_hook, repo_with_commit,
+};
 
 /// A repository on `main` with branches `other` and `third`. `file.txt` holds `one` on
 /// `main` and `third`, and `two` on `other`.
@@ -19,19 +21,7 @@ struct Fixture {
 fn fixture() -> Fixture {
     hermetic();
     let dir = tempfile::tempdir().unwrap();
-    let repo = dir.path().join("copy");
-    git(
-        dir.path(),
-        &[
-            "init",
-            "--quiet",
-            "--initial-branch=main",
-            repo.to_str().unwrap(),
-        ],
-    );
-    std::fs::write(repo.join("file.txt"), "one\n").unwrap();
-    git(&repo, &["add", "file.txt"]);
-    git(&repo, &["commit", "--quiet", "-m", "base"]);
+    let repo = repo_with_commit(dir.path(), "copy");
     git(&repo, &["branch", "third"]);
     git(&repo, &["switch", "--quiet", "-c", "other"]);
     std::fs::write(repo.join("file.txt"), "two\n").unwrap();

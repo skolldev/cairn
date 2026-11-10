@@ -51,7 +51,13 @@ fn open<'a>(cx: &'a mut TestAppContext, repo: &Path) -> App<'a> {
     let sink = lines.clone();
     let path = repo.to_path_buf();
     let (workspace, cx) = cx.add_window_view(move |window, cx| {
-        let mut workspace = Workspace::new(Some(path), Rc::new(|_| {}), window, cx);
+        let mut workspace = Workspace::new(
+            Some(path),
+            crate::recent::RecentRepos::load(None),
+            Rc::new(|_| {}),
+            window,
+            cx,
+        );
         workspace.set_probe(Probe::new(
             Rc::new(move |line| sink.lock().unwrap().push(line)),
             false,

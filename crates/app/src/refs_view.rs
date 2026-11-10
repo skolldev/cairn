@@ -68,6 +68,12 @@ impl RefsView {
         self.update_rows(cx);
     }
 
+    /// The Refs Snapshot shown last.
+    #[cfg(test)]
+    pub fn snapshot(&self) -> Option<&Arc<RefsSnapshot>> {
+        self.snapshot.as_ref()
+    }
+
     fn update_rows(&mut self, cx: &mut Context<Self>) {
         let filter = self.filter.read(cx).value();
         self.rows = match &self.tree {

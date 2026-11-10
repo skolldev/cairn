@@ -14,6 +14,7 @@ use gpui::{Context, Entity, Task, Window};
 
 use crate::jobs::JobsView;
 use crate::quit::QuitView;
+use crate::recent::RecentView;
 use crate::refs_view::RefsView;
 use crate::status_view::StatusView;
 
@@ -27,6 +28,7 @@ pub struct Views {
     pub status: Entity<StatusView>,
     pub quit: Entity<QuitView>,
     pub jobs: Entity<JobsView>,
+    pub recent: Entity<RecentView>,
 }
 
 pub struct Bridge {
@@ -35,6 +37,7 @@ pub struct Bridge {
     status: Entity<StatusView>,
     quit: Entity<QuitView>,
     jobs: Entity<JobsView>,
+    recent: Entity<RecentView>,
     /// The newest generation shown, per Slot. Generations of different Slots are unrelated.
     refs_shown: Option<Generation>,
     staged_shown: Option<Generation>,
@@ -55,6 +58,7 @@ impl Bridge {
             status,
             quit,
             jobs,
+            recent,
         }: Views,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -76,6 +80,7 @@ impl Bridge {
             status,
             quit,
             jobs,
+            recent,
             refs_shown: None,
             staged_shown: None,
             unstaged_shown: None,
@@ -118,6 +123,8 @@ impl Bridge {
             match snapshot {
                 Snapshot::Refs(refs) => {
                     if newer(&mut self.refs_shown, refs.generation, "refs", &refs.span) {
+                        self.recent
+                            .update(cx, |view, cx| view.refs_shown(&refs, cx));
                         self.refs.update(cx, |view, cx| {
                             view.set_snapshot(refs, cx);
                             cx.notify();

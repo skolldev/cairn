@@ -1,6 +1,7 @@
 //! The Cairn GPUI binary.
 //!
-//! `cairn [repo-path]` opens a window on the repository and shows its refs and status. `app` speaks to
+//! `cairn [repo-path]` opens a window on the repository and shows its refs and status. Without
+//! a path, it lists the recent repositories to choose from. `app` speaks to
 //! the Repo service only in Intents, and hears back only through Snapshots drained by the
 //! bridge. `RUST_LOG` filters the `tracing` output (default `info`).
 
@@ -11,6 +12,7 @@ mod jobs;
 #[cfg(feature = "measure")]
 mod measure;
 mod quit;
+mod recent;
 mod refs_view;
 mod status_view;
 #[cfg(target_os = "macos")]
@@ -31,6 +33,7 @@ use gpui::{
 use bridge::Bridge;
 use jobs::JobsView;
 use quit::QuitView;
+use recent::{OpenRecent, Place, RecentRepos, RecentView};
 use refs_view::{RefsView, SwitchTo};
 use status_view::StatusView;
 
@@ -40,8 +43,12 @@ struct Workspace {
     status: Entity<StatusView>,
     quit: Entity<QuitView>,
     jobs: Entity<JobsView>,
+    recent: Entity<RecentView>,
+    /// An Open has been sent. Until then, the window shows the empty state.
+    opened: bool,
     _bridge: Entity<Bridge>,
     _switch_to: gpui::Subscription,
+    _open_recent: gpui::Subscription,
     #[cfg(debug_assertions)]
     frame_clock: Option<std::rc::Rc<frame_overlay::FrameClock>>,
     #[cfg(feature = "measure")]
@@ -51,6 +58,7 @@ struct Workspace {
 impl Workspace {
     fn new(
         path: Option<PathBuf>,
+        recent: RecentRepos,
         exit: Rc<dyn Fn(&mut App)>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -64,6 +72,10 @@ impl Workspace {
         let status = cx.new(|_| StatusView::default());
         let quit = cx.new(|_| QuitView::new(service.clone(), exit));
         let jobs = cx.new(|_| JobsView::default());
+        let recent = cx.new(|_| RecentView::new(recent, path.clone()));
+        let open_recent = cx.subscribe(&recent, |workspace, _, OpenRecent(path), cx| {
+            workspace.open(path.clone(), cx);
+        });
         let switch_to = cx.subscribe(&refs, |workspace, _, SwitchTo(branch), _| {
             workspace.service.send(Intent::Switch(branch.clone()));
         });
@@ -88,11 +100,13 @@ impl Workspace {
                     status: status.clone(),
                     quit: quit.clone(),
                     jobs: jobs.clone(),
+                    recent: recent.clone(),
                 },
                 window,
                 cx,
             )
         });
+        let opened = path.is_some();
         if let Some(path) = path {
             service.send(Intent::Open(path));
         }
@@ -102,8 +116,11 @@ impl Workspace {
             status,
             quit,
             jobs,
+            recent,
+            opened,
             _bridge: bridge,
             _switch_to: switch_to,
+            _open_recent: open_recent,
             #[cfg(debug_assertions)]
             frame_clock: frame_overlay::FrameClock::enabled().then(Default::default),
             #[cfg(feature = "measure")]
@@ -118,15 +135,23 @@ impl Workspace {
             multiple: false,
             prompt: Some("Open".into()),
         });
-        let service = self.service.clone();
-        cx.spawn(async move |_, _| {
+        cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = chosen.await
                 && let Some(path) = paths.into_iter().next()
             {
-                service.send(Intent::Open(path));
+                let _ = this.update(cx, |workspace, cx| workspace.open(path, cx));
             }
         })
         .detach();
+    }
+
+    /// Opens the repository at `path`. It joins the recent list only once it has opened.
+    fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.opened = true;
+        self.recent
+            .update(cx, |recent, _| recent.opening(path.clone()));
+        self.service.send(Intent::Open(path));
+        cx.notify();
     }
 }
 
@@ -154,7 +179,58 @@ impl Render for Workspace {
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| this.choose_repo(cx)))
                     .child("Open repository…"),
+            )
+            .child(
+                div()
+                    .id("open-recent")
+                    .debug_selector(|| "open-recent".to_owned())
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(rgb(0x2a2f37))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.recent.update(cx, |recent, cx| recent.toggle_menu(cx))
+                    }))
+                    .child(if self.recent.read(cx).menu_open() {
+                        "Open Recent ▴"
+                    } else {
+                        "Open Recent ▾"
+                    }),
             );
+        let content = if self.opened {
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .child(div().flex_1().min_w_0().child(self.refs.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .border_l_1()
+                        .border_color(rgb(0x2a2f37))
+                        .child(self.status.clone()),
+                )
+        } else {
+            // The empty state: nothing open yet, so the recent repositories are the way in.
+            let list = self.recent.update(cx, |recent, cx| {
+                recent.list(Place::Empty, cx).into_any_element()
+            });
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .child(
+                    div()
+                        .text_color(rgb(0x7d8590))
+                        .child("No repository open. Pass a path on the command line, use Open, or choose a recent one."),
+                )
+                .child(list)
+        };
         #[allow(unused_mut)]
         let mut root = div()
             .size_full()
@@ -165,23 +241,10 @@ impl Render for Workspace {
             .text_color(rgb(0xe6edf3))
             .text_size(px(13.))
             .child(header)
+            .child(self.recent.clone())
             .child(self.quit.clone())
             .child(self.jobs.clone())
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .child(div().flex_1().min_w_0().child(self.refs.clone()))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .border_l_1()
-                            .border_color(rgb(0x2a2f37))
-                            .child(self.status.clone()),
-                    ),
-            );
+            .child(content);
         #[cfg(debug_assertions)]
         if let Some(clock) = &self.frame_clock {
             root = root.child(clock.overlay()).child(clock.end_marker());
@@ -234,7 +297,13 @@ fn main() {
         cx.open_window(options, move |window, cx| {
             let workspace = cx.new(|cx| {
                 #[allow(unused_mut)]
-                let mut workspace = Workspace::new(path, Rc::new(exit), window, cx);
+                let mut workspace = Workspace::new(
+                    path,
+                    RecentRepos::load(RecentRepos::default_file()),
+                    Rc::new(exit),
+                    window,
+                    cx,
+                );
                 #[cfg(feature = "measure")]
                 workspace.probe_from_env(window, cx);
                 workspace
