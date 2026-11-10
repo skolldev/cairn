@@ -105,7 +105,7 @@ impl App<'_> {
 
     fn command(&mut self, command: Command) {
         self.workspace
-            .update(self.cx, |workspace, _| workspace.measure(command));
+            .update(self.cx, |workspace, cx| workspace.measure(command, cx));
     }
 }
 

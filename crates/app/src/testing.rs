@@ -2,14 +2,17 @@
 //! behind it. The test platform's `quit` does nothing, so the exit hook sets a flag instead.
 
 use std::cell::Cell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use cairn_repo::Intent;
 use cairn_write::{Git, Invocation, JobClass};
-use gpui::{Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
+use gpui::{
+    Bounds, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, TestAppContext,
+    VisualTestContext,
+};
 
 use crate::Workspace;
 
@@ -50,6 +53,47 @@ pub fn git(repo: &Path, args: &[&str]) -> String {
         out.stderr_text()
     );
     String::from_utf8(out.stdout).expect("git output is UTF-8")
+}
+
+/// `path` as git's own sh reads it: forward slashes, on Windows too.
+pub fn slash(path: &Path) -> String {
+    path.to_str().unwrap().replace('\\', "/")
+}
+
+/// Creates the release file when dropped, so a failing test leaves nothing blocked on it.
+pub struct Release(pub PathBuf);
+
+impl Release {
+    pub fn release(&self) {
+        std::fs::write(&self.0, "").unwrap();
+    }
+}
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.0, "");
+    }
+}
+
+/// A line of sh that blocks until `release` exists or `dir` is gone. A Force quit can leave
+/// a hook running after its test has ended, and the temp dir going away ends it.
+pub fn block_until(release: &Path, dir: &Path) -> String {
+    format!(
+        "while [ ! -f '{release}' ] && [ -d '{dir}' ]; do sleep 0.05; done\n",
+        release = slash(release),
+        dir = slash(dir),
+    )
+}
+
+/// Installs `body` as the repository's `post-checkout` hook, a real one that git runs.
+pub fn post_checkout_hook(repo: &Path, body: &str) {
+    let hook = repo.join(".git/hooks/post-checkout");
+    std::fs::write(&hook, format!("#!/bin/sh\n{body}")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }
 
 /// The real window, whose exit hook sets a flag instead of ending the test process.
@@ -124,6 +168,31 @@ impl App<'_> {
             .unwrap_or_else(|| panic!("{selector} isn't drawn"));
         self.cx
             .simulate_click(bounds.center(), Modifiers::default());
+        self.cx.run_until_parked();
+        self.draw();
+    }
+
+    /// Two clicks, as the platform reports a double-click: the second carries a count of 2.
+    pub fn double_click(&mut self, selector: &str) {
+        let position = self
+            .bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} isn't drawn"))
+            .center();
+        for click_count in [1, 2] {
+            self.cx.simulate_event(MouseDownEvent {
+                position,
+                modifiers: Modifiers::default(),
+                button: MouseButton::Left,
+                click_count,
+                first_mouse: false,
+            });
+            self.cx.simulate_event(MouseUpEvent {
+                position,
+                modifiers: Modifiers::default(),
+                button: MouseButton::Left,
+                click_count,
+            });
+        }
         self.cx.run_until_parked();
         self.draw();
     }
