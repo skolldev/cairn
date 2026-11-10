@@ -8,34 +8,9 @@ use std::sync::Arc;
 
 use cairn_repo::{Head, Intent, JobState, RefEntry, Refs, RefsSnapshot, Snapshot};
 use common::{
-    Harness, assert_filesystem_events_available, git, git_output, git_ran, git_runs, small_fixture,
-    small_fixture_clone,
+    Harness, assert_filesystem_events_available, git, git_output, git_ran, git_runs, last_refs,
+    open_refs, refs_of, small_fixture, small_fixture_clone,
 };
-
-fn refs_of(snapshot: &Snapshot) -> Option<&Arc<RefsSnapshot>> {
-    match snapshot {
-        Snapshot::Refs(refs) => Some(refs),
-        _ => None,
-    }
-}
-
-/// The newest refs Snapshot in `seen`. A drain returns the status Slots' Snapshots after
-/// the refs one, so the refs Snapshot isn't always the last thing drained.
-fn last_refs(seen: &[Snapshot]) -> Arc<RefsSnapshot> {
-    seen.iter()
-        .rev()
-        .find_map(refs_of)
-        .expect("a refs Snapshot")
-        .clone()
-}
-
-/// Opens `path` and returns the refs Snapshot that answers the Open.
-fn open(path: &Path) -> Arc<RefsSnapshot> {
-    let harness = Harness::start();
-    harness.service.send(Intent::Open(path.to_path_buf()));
-    let seen = harness.drain_until(|s| refs_of(s).is_some());
-    last_refs(&seen)
-}
 
 /// One line per ref, in the shape `git for-each-ref` prints with the same format.
 fn render(entries: &[RefEntry]) -> Vec<String> {
@@ -106,7 +81,7 @@ fn assert_matches_git(repo: &Path, refs: &Refs) {
 #[test]
 fn refs_snapshot_of_the_small_fixture_matches_git_for_each_ref() {
     let fixture = small_fixture();
-    let snapshot = open(&fixture);
+    let snapshot = open_refs(&fixture);
     let refs = snapshot.result.as_ref().expect("the fixture opens");
     assert!(!refs.tags.is_empty(), "the fixture has tags");
     assert_matches_git(&fixture, refs);
@@ -129,7 +104,7 @@ fn cli_refs_path_matches_git_for_each_ref_head_and_stash() {
     git(&repo, &["tag", "-a", "cli-tag", "-m", "tag"]);
     std::fs::write(repo.join("README.md"), b"changed\n").unwrap();
     git(&repo, &["stash", "push", "--quiet", "-m", "cli stash"]);
-    let snapshot = open(&repo);
+    let snapshot = open_refs(&repo);
     assert_matches_git(&repo, snapshot.result.as_ref().unwrap());
 }
 
@@ -197,7 +172,7 @@ fn malformed_stash_reflog_retries_refs_with_git_and_latches_cli() {
     // A newly opened service proves that control through the same Snapshot seam.
     std::fs::write(&log, valid_log).unwrap();
     git(&repo, &["config", "log.date", "bogus"]);
-    let control = open(&repo);
+    let control = open_refs(&repo);
     assert!(control.result.is_ok(), "gix reads Refs with this config");
 
     harness.service.send(Intent::Switch(original));
@@ -252,7 +227,7 @@ fn refs_snapshot_covers_branches_stashes_annotated_tags_and_symrefs() {
         git(&repo, &["stash", "push", "--quiet", "-m", message]);
     }
 
-    let snapshot = open(&repo);
+    let snapshot = open_refs(&repo);
     let refs = snapshot.result.as_ref().expect("the copy opens");
     assert_eq!(refs.stashes.len(), 2);
     assert!(
@@ -284,7 +259,7 @@ fn each_refs_snapshot_carries_a_newer_generation() {
 #[test]
 fn opening_a_path_that_is_not_a_repo_publishes_the_error() {
     let dir = tempfile::tempdir().unwrap();
-    let snapshot = open(dir.path());
+    let snapshot = open_refs(dir.path());
     let error = snapshot.result.as_ref().expect_err("not a repository");
     assert!(!error.is_empty());
     assert_eq!(snapshot.workdir, dir.path());
@@ -359,7 +334,7 @@ fn in_cli_mode_a_detached_head_is_published_as_detached() {
     let (_dir, repo) = small_fixture_clone();
     git(&repo, &["config", "core.safecrlf", "true"]);
     git(&repo, &["switch", "--quiet", "--detach"]);
-    let snapshot = open(&repo);
+    let snapshot = open_refs(&repo);
     let refs = snapshot.result.as_ref().expect("the copy opens");
     // Seen red: an exit 1 from `symbolic-ref -q HEAD` taken as git failing.
     assert!(
@@ -375,7 +350,7 @@ fn in_cli_mode_an_unborn_branch_is_published_with_no_target() {
     let (_dir, repo) = small_fixture_clone();
     git(&repo, &["config", "core.safecrlf", "true"]);
     git(&repo, &["symbolic-ref", "HEAD", "refs/heads/unborn"]);
-    let snapshot = open(&repo);
+    let snapshot = open_refs(&repo);
     let refs = snapshot.result.as_ref().expect("the copy opens");
     // Seen red: an exit 1 from `rev-parse -q --verify HEAD` taken as git failing.
     assert!(

@@ -2,8 +2,10 @@
 //!
 //! No repository on disk makes just one of `symbolic-ref -q HEAD` and `rev-parse -q --verify
 //! HEAD` fail: a config write racing between the two does. So this test binary's git is a
-//! wrapper ahead of the real one on `PATH`. In a repository holding `.git/cairn-fail-<subcommand>`,
-//! it has the real git include that file, which is a broken config, for that subcommand only.
+//! wrapper ahead of the real one on `PATH`. When an argument names a repository holding
+//! `.git/cairn-fail-<subcommand>`, it has the real git include that file, a broken config,
+//! for that subcommand only. It finds the repository by the marker, not by where the runner
+//! puts `-C`.
 //! Real git still fails, with its own exit code and error. Unix only: the wrapper is a shell
 //! script, and Windows resolves a `git.exe`.
 
@@ -12,27 +14,25 @@
 mod common;
 
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
-use cairn_repo::{Intent, RefsSnapshot, Snapshot};
 use cairn_write::Git;
-use common::{Harness, git, git_output, small_fixture_clone};
+use common::{git, git_output, open_refs, small_fixture_clone};
 
 const WRAPPER: &str = r#"#!/bin/sh
 # Drop this directory from PATH, so that `git` below is the real one.
 here=$(dirname "$0")
 PATH=$(printf '%s' ":$PATH:" | sed "s|:$here:|:|g; s|^:||; s|:$||")
 export PATH
-repo=
-[ "$1" = -C ] && repo=$2
+# The subcommand is the first argument that names one, and the repository is whichever
+# argument is a directory holding that subcommand's marker, wherever the runner puts it.
 for arg; do
   case $arg in
   symbolic-ref | rev-parse)
-    broken="$repo/.git/cairn-fail-$arg"
-    if [ -n "$repo" ] && [ -f "$broken" ]; then
-      exec git -c include.path="$broken" "$@"
-    fi
+    for dir; do
+      broken="$dir/.git/cairn-fail-$arg"
+      [ -f "$broken" ] && exec git -c include.path="$broken" "$@"
+    done
     break
     ;;
   esac
@@ -84,26 +84,12 @@ fn failing(subcommand: &str) -> (tempfile::TempDir, std::path::PathBuf, String) 
     (dir, repo, error)
 }
 
-fn open(repo: &Path) -> Arc<RefsSnapshot> {
-    let harness = Harness::start();
-    harness.service.send(Intent::Open(repo.to_path_buf()));
-    harness
-        .drain_until(|s| matches!(s, Snapshot::Refs(_)))
-        .iter()
-        .rev()
-        .find_map(|s| match s {
-            Snapshot::Refs(refs) => Some(refs.clone()),
-            _ => None,
-        })
-        .unwrap()
-}
-
 #[test]
 fn a_symbolic_ref_that_fails_publishes_gits_error_not_a_detached_head() {
     let (_dir, repo, error) = failing("symbolic-ref");
     let control = git_output(&repo, &["rev-parse", "-q", "--verify", "HEAD"]);
     assert!(control.status.success(), "rev-parse still answers");
-    let refs = open(&repo);
+    let refs = open_refs(&repo);
     assert_eq!(refs.result.as_ref().map(|r| &r.head), Err(&error));
 }
 
@@ -112,6 +98,6 @@ fn a_rev_parse_that_fails_publishes_gits_error_not_an_unborn_branch() {
     let (_dir, repo, error) = failing("rev-parse");
     let control = git_output(&repo, &["symbolic-ref", "-q", "HEAD"]);
     assert!(control.status.success(), "symbolic-ref still answers");
-    let refs = open(&repo);
+    let refs = open_refs(&repo);
     assert_eq!(refs.result.as_ref().map(|r| &r.head), Err(&error));
 }
