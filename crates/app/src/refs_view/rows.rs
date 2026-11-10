@@ -76,9 +76,7 @@ impl Row {
     /// The short name of the local branch it stands for, if it is one.
     pub fn local_branch(&self) -> Option<String> {
         match self {
-            Row::Ref { name, .. } if name.as_str().starts_with("refs/heads/") => {
-                Some(name.short().to_owned())
-            }
+            Row::Ref { name, .. } if name.is_local_branch() => Some(name.short().to_owned()),
             _ => None,
         }
     }

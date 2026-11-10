@@ -46,6 +46,11 @@ impl RefName {
         &self.0
     }
 
+    /// Whether it names a local branch, under `refs/heads/`.
+    pub fn is_local_branch(&self) -> bool {
+        self.0.starts_with("refs/heads/")
+    }
+
     /// The name without its category prefix: `main`, `origin/main`, `v1.0`.
     pub fn short(&self) -> &str {
         ["refs/heads/", "refs/remotes/", "refs/tags/", "refs/"]

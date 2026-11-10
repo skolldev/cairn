@@ -20,6 +20,10 @@ use common::{
 /// - `lonely` has no upstream.
 /// - `orphan` is configured to track `origin/gone`, which doesn't exist: its upstream is gone.
 /// - `dot` tracks the local `main` (`branch.dot.remote = .`).
+/// - `short` tracks `lonely` by its short name, which git expands for `.`.
+/// - `tagged` tracks `refs/held/tag`, an annotated tag outside the listed refs.
+/// - `excluded` tracks `origin/excluded`, gone, which a negative refspec rules out of fetches.
+///   git still maps it through the positive refspec.
 struct Tracking {
     _dir: tempfile::TempDir,
     repo: PathBuf,
@@ -68,6 +72,31 @@ fn tracking() -> Tracking {
     git(&repo, &["config", "branch.orphan.remote", "origin"]);
     git(&repo, &["config", "branch.orphan.merge", "refs/heads/gone"]);
     git(&repo, &["branch", "--quiet", "--track", "dot", "main"]);
+    for (branch, remote, merge) in [
+        ("short", ".", "lonely"),
+        ("tagged", ".", "refs/held/tag"),
+        ("excluded", "origin", "refs/heads/excluded"),
+    ] {
+        git(&repo, &["branch", "--quiet", "--no-track", branch]);
+        git(
+            &repo,
+            &["config", &format!("branch.{branch}.remote"), remote],
+        );
+        git(&repo, &["config", &format!("branch.{branch}.merge"), merge]);
+    }
+    git(&repo, &["tag", "-a", "-m", "held", "held-tag"]);
+    let tag = git(&repo, &["rev-parse", "refs/tags/held-tag"]);
+    git(&repo, &["update-ref", "refs/held/tag", tag.trim()]);
+    git(&repo, &["tag", "-d", "held-tag"]);
+    git(
+        &repo,
+        &[
+            "config",
+            "--add",
+            "remote.origin.fetch",
+            "^refs/heads/excluded",
+        ],
+    );
     Tracking { _dir: dir, repo }
 }
 
@@ -125,6 +154,23 @@ fn assert_upstreams(repo: &Path, refs: &Refs) {
     assert_eq!(orphan.target, None, "gone");
     let dot = upstream_of(refs, "dot").expect("dot tracks main");
     assert_eq!(dot.name.as_str(), "refs/heads/main");
+    // Seen red: `dwim_local` returning the merge name as it is.
+    let short = upstream_of(refs, "short").expect("short tracks lonely");
+    assert_eq!(short.name.as_str(), "refs/heads/lonely");
+    // A tag stays on its tag object, as `%(objectname)` does.
+    // Seen red: `ref_target` peeling with `peel_to_id`.
+    let tagged = upstream_of(refs, "tagged").expect("tagged tracks a tag");
+    assert_eq!(
+        tagged.target.as_ref().map(|t| t.as_str().to_owned()),
+        Some(oid(repo, "refs/held/tag"))
+    );
+    assert_ne!(
+        oid(repo, "refs/held/tag"),
+        oid(repo, "refs/held/tag^{commit}")
+    );
+    // Seen red: matching negative refspecs too.
+    let excluded = upstream_of(refs, "excluded").expect("git ignores negative refspecs here");
+    assert_eq!(excluded.name.as_str(), "refs/remotes/origin/excluded");
     assert_eq!(render_upstreams(refs), git_upstreams(repo));
 }
 
@@ -277,7 +323,8 @@ fn only_the_branches_named_as_visible_are_counted() {
         .send(Intent::ShowCounts(branches(&["main", "lonely"])));
     let counts = counts_until(&harness, |c| finished(c) && count(c, "main").is_some());
 
-    // Seen red: counting every branch with an upstream, not only the visible ones.
+    // Seen red: counting every branch with an upstream, not only the visible ones (both
+    // `state.visible` filters in `Counter::count` removed).
     assert_eq!(count(&counts, "topic"), None);
     assert!(
         !counts_run(&t.repo).iter().any(|run| run.contains(&topic)),
@@ -439,4 +486,53 @@ fn a_count_held_in_git_never_delays_a_refs_snapshot() {
         count(&counts, "held").map(|c| (c.ahead, c.behind)),
         Some((0, 1))
     );
+}
+
+#[test]
+fn a_running_count_finishes_while_its_branch_stays_on_screen() {
+    let f = held_count();
+    git(&f.repo, &["branch", "--quiet", "--no-track", "spare"]);
+    let tag = oid(&f.repo, "refs/held/up");
+    let held_runs = || {
+        counts_run(&f.repo)
+            .iter()
+            .filter(|run| run.contains(&tag))
+            .count()
+    };
+    let harness = Harness::start();
+    let _release = Release(&f.release);
+    harness.service.send(Intent::Open(f.repo.clone()));
+    harness
+        .service
+        .send(Intent::ShowCounts(branches(&["held"])));
+    wait_for_wrapper_runs(&f.log, 1);
+
+    // Control: once `held` scrolls away, its count is Superseded. The marker is the next Read
+    // Job finishing, which waits in the Slot until the held one has ended, and nothing but a
+    // stop ends it before `release` exists.
+    harness
+        .service
+        .send(Intent::ShowCounts(branches(&[f.branch.as_str()])));
+    counts_until(&harness, |c| finished(c) && count(c, &f.branch).is_some());
+    assert!(!f.release.exists());
+
+    harness
+        .service
+        .send(Intent::ShowCounts(branches(&["held", f.branch.as_str()])));
+    wait_for_wrapper_runs(&f.log, 2);
+    // `held` stays on screen, so its count runs on.
+    harness.service.send(Intent::ShowCounts(branches(&[
+        "held",
+        f.branch.as_str(),
+        "spare",
+    ])));
+    std::fs::write(&f.release, "").unwrap();
+    let counts = counts_until(&harness, |c| finished(c) && count(c, "held").is_some());
+    assert_eq!(
+        count(&counts, "held").map(|c| (c.ahead, c.behind)),
+        Some((0, 1))
+    );
+    // One count stopped by the control, one that finished. Seen red: `show` always
+    // Superseding, which stops the second and counts `held` a third time.
+    assert_eq!(held_runs(), 2, "{:?}", counts_run(&f.repo));
 }

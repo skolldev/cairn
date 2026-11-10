@@ -81,6 +81,12 @@ impl RefsView {
         self.counts = Some(counts);
     }
 
+    /// The counts Snapshot shown last.
+    #[cfg(test)]
+    pub fn counts(&self) -> Option<&Arc<CountsSnapshot>> {
+        self.counts.as_ref()
+    }
+
     /// Reports the local branches among the rows in `range`, the ones the list draws, when
     /// they differ from those reported last.
     fn report_visible(&mut self, range: &std::ops::Range<usize>, cx: &mut Context<Self>) {
@@ -88,9 +94,7 @@ impl RefsView {
             [range.start.min(self.rows.len())..range.end.min(self.rows.len())]
             .iter()
             .filter_map(|row| match row {
-                Row::Ref { name, .. } if name.as_str().starts_with("refs/heads/") => {
-                    Some(name.clone())
-                }
+                Row::Ref { name, .. } if name.is_local_branch() => Some(name.clone()),
                 _ => None,
             })
             .collect();

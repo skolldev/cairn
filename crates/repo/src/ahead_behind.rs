@@ -6,7 +6,7 @@
 //! rev-list --left-right --count`, so a refresh that moves neither oid counts nothing. A
 //! count can take seconds on a large repository, so the Interactive lane never waits on one.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -31,8 +31,10 @@ struct State {
     visible: Vec<RefName>,
     /// From the newest Refs read of the open repository.
     refs: Option<RefsRead>,
-    /// Ahead and behind for each (local oid, upstream oid) counted in the open repository.
-    cache: HashMap<(Oid, Oid), (usize, usize)>,
+    /// Each (local oid, upstream oid) counted in the open repository.
+    cache: HashMap<(Oid, Oid), Count>,
+    /// The branch whose count is running, if one is.
+    counting: Option<RefName>,
 }
 
 struct RefsRead {
@@ -86,16 +88,21 @@ impl Counter {
         self.submit(&state, Running::Finish, "refs");
     }
 
-    /// Names the local branches on screen. Counting what scrolled away is no longer wanted,
-    /// so a running count is Superseded. The same set again changes nothing.
+    /// Names the local branches on screen. A running count of a branch that scrolled away is
+    /// no longer wanted, so it is Superseded. One of a branch still on screen finishes, or a
+    /// long count would start over on every scroll. The same set again changes nothing.
     pub(crate) fn show(self: &Arc<Self>, visible: Vec<RefName>) {
         let mut state = self.state.lock().unwrap();
         if state.visible == visible {
             return;
         }
+        let running = match &state.counting {
+            Some(branch) if visible.contains(branch) => Running::Finish,
+            _ => Running::Supersede,
+        };
         state.visible = visible;
         if state.refs.is_some() {
-            self.submit(&state, Running::Supersede, "show_counts");
+            self.submit(&state, running, "show_counts");
         }
     }
 
@@ -116,7 +123,8 @@ impl Counter {
     }
 
     /// The Read Job: counts each visible pair not counted yet, publishing what it has before
-    /// each count and once at the end, so a slow count holds back only its own row.
+    /// each count and once at the end, so a slow count holds back only its own row. A branch
+    /// that scrolled away before its turn is skipped.
     fn count(&self, path: &Path, job: &JobContext, span: tracing::Span) {
         let (refs, mut branches, mut pending) = {
             let state = self.state.lock().unwrap();
@@ -124,39 +132,51 @@ impl Counter {
                 return;
             };
             let mut branches = BTreeMap::new();
-            let mut pending = Vec::new();
+            let mut pending = VecDeque::new();
             for name in &state.visible {
                 let Some((local, upstream)) = refs.pairs.get(name) else {
                     continue;
                 };
                 match state.cache.get(&(local.clone(), upstream.clone())) {
-                    Some(&(ahead, behind)) => {
-                        branches.insert(name.clone(), count(local, upstream, ahead, behind));
+                    Some(count) => {
+                        branches.insert(name.clone(), count.clone());
                     }
-                    None => pending.push((name.clone(), local.clone(), upstream.clone())),
+                    None => pending.push_back((name.clone(), local.clone(), upstream.clone())),
                 }
             }
             (refs.generation, branches, pending)
         };
-        pending.reverse();
-        while let Some((name, local, upstream)) = pending.pop() {
-            let still: Vec<RefName> = std::iter::once(name.clone())
-                .chain(pending.iter().rev().map(|(name, ..)| name.clone()))
+        while let Some((name, local, upstream)) = pending.pop_front() {
+            {
+                let mut state = self.state.lock().unwrap();
+                if !state.visible.contains(&name) {
+                    continue;
+                }
+                state.counting = Some(name.clone());
+            }
+            let waiting = std::iter::once(name.clone())
+                .chain(pending.iter().map(|(name, ..)| name.clone()))
                 .collect();
-            self.publish(path, job, &span, refs, &branches, still);
+            self.publish(path, job, &span, refs, &branches, waiting);
             let counted = rev_list(path, job.cli_stop(), &local, &upstream);
+            let mut state = self.state.lock().unwrap();
+            state.counting = None;
+            // Checked under the lock an Open takes to empty the cache, so a count of the
+            // repository that was open never lands in the new one's.
             if !job.is_current() {
                 tracing::debug!("superseded while running; result dropped");
                 return;
             }
             match counted {
                 Ok((ahead, behind)) => {
-                    self.state
-                        .lock()
-                        .unwrap()
-                        .cache
-                        .insert((local.clone(), upstream.clone()), (ahead, behind));
-                    branches.insert(name, count(&local, &upstream, ahead, behind));
+                    let count = Count {
+                        local: local.clone(),
+                        upstream: upstream.clone(),
+                        ahead,
+                        behind,
+                    };
+                    state.cache.insert((local, upstream), count.clone());
+                    branches.insert(name, count);
                 }
                 // Shown as no count, and tried again by the next Read Job.
                 Err(error) => tracing::warn!(%error, branch = %name, "couldn't count ahead/behind"),
@@ -190,15 +210,6 @@ impl Counter {
                 span: span.clone(),
             }),
         );
-    }
-}
-
-fn count(local: &Oid, upstream: &Oid, ahead: usize, behind: usize) -> Count {
-    Count {
-        local: local.clone(),
-        upstream: upstream.clone(),
-        ahead,
-        behind,
     }
 }
 

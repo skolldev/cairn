@@ -1323,7 +1323,7 @@ impl Outbox {
     }
 
     fn publish<T>(&self, cell: fn(&mut Pending) -> &mut Latest<T>, snapshot: Arc<SlotSnapshot<T>>) {
-        self.publish_newer(cell, snapshot, false);
+        self.publish_unless_stale(cell, snapshot, false);
     }
 
     /// Publishes like [`publish`](Self::publish), but a Snapshot of the generation already
@@ -1333,14 +1333,16 @@ impl Outbox {
         cell: fn(&mut Pending) -> &mut Latest<T>,
         snapshot: Arc<SlotSnapshot<T>>,
     ) {
-        self.publish_newer(cell, snapshot, true);
+        self.publish_unless_stale(cell, snapshot, true);
     }
 
-    fn publish_newer<T>(
+    /// Publishes `snapshot` unless a newer generation has been published, or the same one and
+    /// `replaces_same` is false.
+    fn publish_unless_stale<T>(
         &self,
         cell: fn(&mut Pending) -> &mut Latest<T>,
         snapshot: Arc<SlotSnapshot<T>>,
-        same_generation: bool,
+        replaces_same: bool,
     ) {
         let _span = tracing::debug_span!("publish", generation = snapshot.generation.0).entered();
         let was_empty = {
@@ -1350,7 +1352,7 @@ impl Outbox {
             // A newer generation may have been published, even drained, while this one
             // was checking whether it was still current. Never let it follow that one.
             if latest.newest.is_some_and(|newest| {
-                newest > snapshot.generation || (newest == snapshot.generation && !same_generation)
+                newest > snapshot.generation || (newest == snapshot.generation && !replaces_same)
             }) {
                 tracing::debug!("stale; dropped");
                 return;

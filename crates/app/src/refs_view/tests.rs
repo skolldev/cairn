@@ -275,7 +275,25 @@ fn a_local_branch_shows_its_counts_and_a_gone_upstream_says_so(cx: &mut TestAppC
     });
     // Seen red: `divergence` returning nothing for a gone upstream.
     assert!(app.shown("sidebar:gone:refs/heads/orphan"));
-    // `level` comes before `main` on screen, so it was counted first: its count is in.
+    // The marker that `level` was counted: its (0, 0) count has reached the sidebar.
+    app.until("level is counted", |app| {
+        let workspace = app.workspace.clone();
+        app.cx.read(|cx| {
+            workspace
+                .read(cx)
+                .refs
+                .read(cx)
+                .counts()
+                .is_some_and(|counts| {
+                    counts.result.as_ref().is_ok_and(|c| {
+                        c.branches
+                            .get(&cairn_repo::RefName::new("refs/heads/level"))
+                            .is_some_and(|c| (c.ahead, c.behind) == (0, 0))
+                    })
+                })
+        })
+    });
+    app.draw();
     // Seen red: `divergence` keeping zero counts.
     assert!(!app.shown("sidebar:counts:refs/heads/level:↑0 ↓0"));
     assert!(!app.shown("sidebar:gone:refs/heads/level"));
