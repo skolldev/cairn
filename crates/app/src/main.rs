@@ -14,6 +14,8 @@ mod refs_view;
 mod status_view;
 #[cfg(target_os = "macos")]
 mod terminate;
+#[cfg(test)]
+mod testing;
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -54,7 +56,7 @@ impl Workspace {
         let service = Arc::new(RepoService::start(move || {
             let _ = wake.try_send(());
         }));
-        let refs = cx.new(|_| RefsView::default());
+        let refs = cx.new(|cx| RefsView::new(window, cx));
         let status = cx.new(|_| StatusView::default());
         let quit = cx.new(|_| QuitView::new(service.clone(), exit));
         // The window stays open until the Repo service says it has quit, and the bridge then
@@ -204,6 +206,8 @@ fn main() {
     measure::install_frame_source();
     let path = std::env::args_os().nth(1).map(PathBuf::from);
     gpui_platform::application().run(move |cx: &mut App| {
+        gpui_component::init(cx);
+        gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(900.), px(700.)), cx)),
             titlebar: Some(TitlebarOptions {

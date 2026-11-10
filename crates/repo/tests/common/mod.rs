@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+pub mod trace;
+
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant};

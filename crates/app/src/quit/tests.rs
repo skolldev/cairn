@@ -2,61 +2,18 @@
 //! window, and answering its prompts.
 //! The test platform's `quit` does nothing, so each test watches the exit hook instead.
 
-use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use cairn_repo::Intent;
-use cairn_write::{Git, Invocation, JobClass};
-use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
+use gpui::{Modifiers, TestAppContext, px, size};
 
-use crate::Workspace;
+use crate::testing::{App, git, hermetic, open};
 
 /// How long a test waits when nothing marks what must not happen. A close that exits
 /// does so well within this: `closing_with_nothing_running_exits_without_asking` is the
 /// control.
 const SETTLE: Duration = Duration::from_millis(300);
-
-/// Points git at an empty home, once per test binary, so a developer's config can't change
-/// the result. Runs before anything spawns git.
-fn hermetic() {
-    static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
-    HOME.get_or_init(|| {
-        let home = tempfile::tempdir().expect("temp home");
-        // SAFETY: this runs inside `OnceLock::get_or_init`, which blocks every other test
-        // thread at the same call until it returns, and nothing spawns git before it.
-        unsafe {
-            std::env::set_var("HOME", home.path());
-            std::env::set_var("XDG_CONFIG_HOME", home.path().join(".config"));
-            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
-        }
-        home
-    });
-}
-
-fn git(repo: &Path, args: &[&str]) -> String {
-    hermetic();
-    let invocation = Invocation::new(JobClass::LocalWrite, repo)
-        .args([
-            "-c",
-            "user.name=Cairn Test",
-            "-c",
-            "user.email=test@cairn.invalid",
-        ])
-        .args(args.iter().copied());
-    let out = Git::shared()
-        .expect("a usable git is installed")
-        .run(&invocation)
-        .expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        out.stderr_text()
-    );
-    String::from_utf8(out.stdout).expect("git output is UTF-8")
-}
 
 /// `path` as git's own sh reads it: forward slashes, on Windows too.
 fn slash(path: &Path) -> String {
@@ -149,46 +106,7 @@ impl Fixture {
     }
 }
 
-/// The real window, whose exit hook sets a flag instead of ending the test process.
-struct App<'a> {
-    cx: &'a mut VisualTestContext,
-    workspace: Entity<Workspace>,
-    exited: Rc<Cell<bool>>,
-}
-
-fn open<'a>(cx: &'a mut TestAppContext, repo: Option<&Path>) -> App<'a> {
-    // Real git runs on the service's threads, so the executor must wait for them.
-    cx.executor().allow_parking();
-    let exited = Rc::new(Cell::new(false));
-    let exit = exited.clone();
-    let path = repo.map(Path::to_path_buf);
-    let (workspace, cx) = cx.add_window_view(move |window, cx| {
-        Workspace::new(path, Rc::new(move |_| exit.set(true)), window, cx)
-    });
-    App {
-        cx,
-        workspace,
-        exited,
-    }
-}
-
 impl App<'_> {
-    /// Runs the app until `done` holds. Snapshots arrive from the service's threads.
-    fn until(&mut self, what: &str, mut done: impl FnMut(&mut Self) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            // The test window draws no frames, so the Bridge drains on its timer, and that
-            // runs on the executor's clock.
-            self.cx.executor().advance_clock(Duration::from_millis(100));
-            self.cx.run_until_parked();
-            if done(self) {
-                return;
-            }
-            assert!(Instant::now() < deadline, "timed out waiting until {what}");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
     /// Runs the app while two reads of the repository finish, and for at least [`SETTLE`].
     /// A wrong Quit still needs the Network queue and Bridge to publish and show its exit.
     fn settle(&mut self, repo: &Path) {
@@ -200,11 +118,6 @@ impl App<'_> {
             self.cx.run_until_parked();
         }
         self.until("the wait ends", |_| Instant::now() >= end);
-    }
-
-    fn send(&mut self, intent: Intent) {
-        self.workspace
-            .read_with(self.cx, |workspace, _| workspace.service.send(intent));
     }
 
     /// A user's click on the window's close button. It never closes the window itself: the
@@ -280,7 +193,7 @@ fn opening_a_repo_shows_its_refs_and_status_in_the_window(cx: &mut TestAppContex
         // red: dropping either Refs or Untracked in Bridge::apply times out here.
         app.cx.simulate_resize(size(px(901.), px(701.)));
         app.cx.run_until_parked();
-        app.cx.debug_bounds("refs:other").is_some()
+        app.shown("sidebar:refs/heads/other")
             && app
                 .cx
                 .debug_bounds("status:?:untracked-marker.txt")
