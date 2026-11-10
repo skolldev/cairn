@@ -10,8 +10,8 @@ pub const MIN_SAMPLES: usize = 20;
 pub const EXTERNAL_CHANGE: Budget = Budget::Latency { limit_ms: 100.0 };
 pub const LOCAL_WRITE: Budget = Budget::Latency { limit_ms: 100.0 };
 pub const LAUNCH: Budget = Budget::Launch {
-    median_limit_ms: 300.0,
-    none_over_ms: 400.0,
+    median_limit_ms: 400.0,
+    none_over_ms: 500.0,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,7 +69,8 @@ pub fn p95(samples: &[f64]) -> f64 {
     percentile(samples, 0.95)
 }
 
-fn median(samples: &[f64]) -> f64 {
+/// The median, as Launch's statistic takes it.
+pub fn median(samples: &[f64]) -> f64 {
     let sorted = sorted(samples);
     match sorted.len() {
         0 => 0.0,

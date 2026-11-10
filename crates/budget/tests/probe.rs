@@ -1,7 +1,7 @@
 //! The lines Cairn's `measure` build writes, and what makes a frame the one a sample waits for.
 
 use cairn_budget::presented::{Drawable, DrawableSource};
-use cairn_budget::probe::{Expect, Frame, Line, Trace};
+use cairn_budget::probe::{Expect, Frame, Line, Mark, Slot, Trace};
 
 fn frame(paint_ns: u64) -> Frame {
     Frame {
@@ -44,6 +44,18 @@ fn every_line_survives_the_pipe() {
         Line::Presented { id: 9, ns: 7 },
         Line::Dropped { id: 10 },
         Line::Key { ns: 8, held: true },
+        Line::Mark {
+            mark: Mark::Main,
+            ns: 1,
+        },
+        Line::Mark {
+            mark: Mark::Published(Slot::Untracked),
+            ns: 2,
+        },
+        Line::Mark {
+            mark: Mark::Drained(Slot::Refs),
+            ns: 3,
+        },
     ];
     for line in lines {
         assert_eq!(Line::parse(&line.to_string()), Some(line.clone()), "{line}");

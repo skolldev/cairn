@@ -4,12 +4,12 @@ use std::path::PathBuf;
 
 use cairn_budget::report::{self, Row};
 use cairn_budget::run::{self, Config};
-use cairn_budget::trace;
+use cairn_budget::{launch, trace};
 
 const USAGE: &str = "\
 usage: cairn-budget run [--only launch,write,external] [options]
        cairn-budget held-key [options]
-       cairn-budget trace --only external [--samples N]
+       cairn-budget trace --only external|launch [--samples N]
 
 options:
   --cairn PATH       the cairn binary, built with --features measure
@@ -106,19 +106,24 @@ fn measure(args: &Args) -> Result<Vec<Row>, String> {
     Ok(rows)
 }
 
-/// `trace`: where External change's time goes, Slot by Slot. It gives no number, so it writes
-/// no result file.
+/// `trace`: where External change's time goes, Slot by Slot, or a warm Launch's, phase by phase.
+/// It gives no number, so it writes no result file.
 fn trace(args: &Args) -> Result<i32, String> {
     if cfg!(debug_assertions) {
         return Err("this is a debug build: run it with `cargo run --release`".to_owned());
     }
-    if args.only != ["external"] {
-        return Err(format!(
-            "trace explains External change only: pass --only external\n{USAGE}"
-        ));
-    }
+    let explain = match args.only.as_slice() {
+        [only] if only == "external" => trace::trace_external_change,
+        [only] if only == "launch" => launch::trace_launch,
+        _ => {
+            return Err(format!(
+                "trace explains one of External change and Launch: pass --only external or \
+                 --only launch\n{USAGE}"
+            ));
+        }
+    };
     let _home = hermetic()?;
-    println!("{}", trace::trace_external_change(&args.config)?);
+    println!("{}", explain(&args.config)?);
     Ok(0)
 }
 
