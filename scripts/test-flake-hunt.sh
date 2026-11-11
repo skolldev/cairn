@@ -146,6 +146,8 @@ fn slow() {
 }
 RUST
 cargo generate-lockfile -q
+# With no user config, so a developer's commit.gpgsign can't stop the commit.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 git init -q
 git add .
 git -c user.name=t -c user.email=t@t commit -qm fixture
@@ -235,6 +237,7 @@ for _ in $(seq 1 100); do
   grep -q "^hunting" "$work/interrupted.out" && break
   sleep 0.1
 done
+# Time for the binary to start, so Ctrl-C has something running to kill.
 sleep 1
 kill -INT "$pid"
 # A hunt that ignores Ctrl-C would run for its whole hour.
@@ -283,10 +286,9 @@ hunt 0 "a changed tree" --filter steady --iterations 1
 grep -q "commit $(git rev-parse --short HEAD) (uncommitted changes)$" <<<"$out" || fail "didn't flag the changed tree: $out"
 mv tests/standin.rs.orig tests/standin.rs
 
-# A long message shows by its first line, in the summary. The rest is in the log.
+# A message of several lines shows on one, as an assert_eq!'s values must to tell its failures apart.
 STANDIN_MULTILINE=1 hunt 1 "a multi-line message" --filter multiline --iterations 1
-grep -qx "  1x the first line" <<<"$out" || fail "lost the first line: $out"
-grep -q "the second line" <<<"$out" && fail "printed the whole message: $out"
+grep -qx "  1x the first line | the second line" <<<"$out" || fail "didn't join the message's lines: $out"
 
 # A binary in a crate of its own is named by its crate's directory.
 STANDIN_OTHER_FAILS=1 hunt 1 "a crate in a directory" --filter other_steady --iterations 1

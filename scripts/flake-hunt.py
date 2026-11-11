@@ -4,7 +4,14 @@
 For flakes that show up in CI and not locally. See docs/flake-hunting.md. Run from the repository
 root.
 
-    scripts/flake-hunt.py [--for 1h | --iterations N] [--filter NAME] [-- CARGO TEST ARGUMENTS]
+    scripts/flake-hunt.py [--for DURATION] [--iterations N] [--filter NAME] [--until-fail]
+                          [--jobs N] [--timeout SECONDS] [-- CARGO TEST ARGUMENTS]
+
+--for hunts that long (90s, 30m, 8h or 1h30m; default 1h unless --iterations is given), and
+--iterations stops after that many. --filter hunts only the tests whose names contain NAME, and
+--until-fail stops at the first failure. --jobs runs N iterations side by side, for load like a
+busy CI runner's. --timeout is how long one test binary may run before it counts as hung
+(default 120).
 
 With no cargo arguments it runs what CI's default suite runs: the workspace's tests, then
 cairn-app's with its `measure` feature. Cargo arguments replace that, as with git-matrix.sh.
@@ -21,7 +28,6 @@ or broke partway.
 import argparse
 import collections
 import datetime
-import fcntl
 import json
 import math
 import os
@@ -44,7 +50,17 @@ def error(message):
     sys.exit(2)
 
 
+def oldest_git():
+    """oldest-git.sh's default version, the one check-git-floor.sh holds to GitVersion::MINIMUM."""
+    with open(os.path.join(HERE, "oldest-git.sh")) as f:
+        found = re.search(r'^version="\$\{1:-(\d+\.\d+\.\d+)\}"$', f.read(), re.M)
+    if not found:
+        error("can't read the default version from oldest-git.sh")
+    return found.group(1)
+
+
 def git_versions():
+    """The gits to alternate: CAIRN_GIT_VERSIONS, or the oldest supported and the newest released."""
     listed = os.environ.get("CAIRN_GIT_VERSIONS")
     if listed:
         return listed.split()
@@ -54,7 +70,7 @@ def git_versions():
     ).stdout
     released = [m.group(1) for m in re.finditer(r"refs/tags/v(\d+\.\d+\.\d+)$", tags, re.M)]
     newest = max(released, key=lambda v: tuple(int(p) for p in v.split(".")))
-    return ["2.37.0", newest]
+    return [oldest_git(), newest]
 
 
 def git_bin(version):
@@ -113,6 +129,8 @@ def build(builds, build_dir, test_filter):
 
 def lock(path):
     """Holds a lock on path until this process exits, or fails if another hunt holds it."""
+    import fcntl  # here, so that Windows reaches main()'s refusal rather than an ImportError
+
     held = open(path, "w")
     try:
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -143,13 +161,14 @@ def failures(output):
     return found
 
 
-def first_line(message, limit=200):
-    """A message as the summary shows it. The whole of it is in the log."""
-    line = message.split("\n", 1)[0]
+def one_line(message, limit=200):
+    """A message as the summary shows it: on one line, so an assert_eq!'s values stay beside its
+    first line, and cut short, so a dump doesn't bury the report. The whole of it is in the log."""
+    line = " | ".join(part.strip() for part in message.splitlines() if part.strip())
     return line if len(line) <= limit else line[: limit - 3] + "..."
 
 
-def session(sid):
+def session_processes(sid):
     """The commands of the processes still running in a session, by pid."""
     ps = subprocess.run(["ps", "-A", "-o", "pid=,command="], capture_output=True, text=True).stdout
     found = {}
@@ -166,7 +185,7 @@ def session(sid):
 def kill_session(sid):
     """Kills every process in a session. A git started to be stoppable leads its own process group,
     so a group kill would miss it and what it started, but it stays in the session."""
-    for pid in session(sid):
+    for pid in session_processes(sid):
         try:
             os.kill(pid, signal.SIGKILL)
         except OSError:
@@ -177,7 +196,7 @@ def leftovers(sid):
     """What a test binary left running, given a moment to finish, as check-test-processes.sh gives
     it. Killed, so the next run starts clean."""
     for _ in range(5):
-        left = session(sid)
+        left = session_processes(sid)
         if not left:
             return []
         time.sleep(1)
@@ -298,7 +317,7 @@ class Hunt:
             lines.append(f"FAILED {binary} {test} at {location}: {self.rate(binary, seen)}")
             # Only a suggestion: the hunt never posts anywhere.
             lines.append(f"  issue: gh issue list --label flaky --search {test}")
-            for message, count in collections.Counter(first_line(m) for _, m, _ in seen).most_common():
+            for message, count in collections.Counter(one_line(m) for _, m, _ in seen).most_common():
                 lines.append(f"  {count}x {message}")
             lines.extend(self.logs(seen))
         for binary, seen in sorted(self.hung.items()):
@@ -353,7 +372,7 @@ def duration(text):
     return h * 3600 + m * 60 + s
 
 
-def interrupt(signum, frame):
+def raise_interrupt(signum, frame):
     raise KeyboardInterrupt
 
 
@@ -399,8 +418,8 @@ def main():
     args = parser.parse_args()
     # Whether or not SIGINT arrived ignored, as a shell's background job gets it. SIGTERM too, so a
     # hunt stopped any other way still writes its report.
-    signal.signal(signal.SIGINT, interrupt)
-    signal.signal(signal.SIGTERM, interrupt)
+    signal.signal(signal.SIGINT, raise_interrupt)
+    signal.signal(signal.SIGTERM, raise_interrupt)
 
     try:
         build_dir = os.path.abspath(os.path.join("target", "flake", "build"))
@@ -424,17 +443,18 @@ def main():
     deadline = started + limit if limit is not None else math.inf
     next_n = [0]
 
-    crashed = []
+    broke = []  # tracebacks of the hunt's own failures, not the tests'
 
     def job():
         try:
-            hunt_job()
+            run_iterations()
         except BaseException:
             # A hunt that broke must not end in a report that says nothing failed.
-            crashed.append(traceback.format_exc())
+            broke.append(traceback.format_exc())
             hunt.interrupt()
 
-    def hunt_job():
+    def run_iterations():
+        """Takes the next iteration and runs it, until the hunt is over."""
         while not hunt.stop.is_set():
             with hunt.lock:
                 if args.iterations is not None and next_n[0] >= args.iterations:
@@ -461,8 +481,8 @@ def main():
         for j in jobs:
             j.join()
 
-    if crashed:
-        print(crashed[0], file=sys.stderr, end="")
+    if broke:
+        print(broke[0], file=sys.stderr, end="")
         error("the hunt itself broke, so its counts can't be trusted")
     elapsed = round(time.monotonic() - started)
     summary = hunt.summary([state, f"{elapsed}s"] + (["interrupted"] if interrupted else []))

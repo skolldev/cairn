@@ -47,7 +47,7 @@ FAILED repo/recheck a_recheck_leaves_alone_the_slots_that_answered at crates/rep
   log: target/flake/20261111-210000/logs/0007-git-2.37.0-repo-recheck.log
 ```
 
-- **FAILED** groups failures by test and by the place they panicked, so one assertion that fails with different messages is one group. Under it come the distinct messages with their counts, each by its first line, a search for the `flaky` issue to update, and the logs. The hunt never posts anything.
+- **FAILED** groups failures by test and by the place they panicked, so one assertion that fails with different messages is one group. Under it come the distinct messages with their counts, each on one line, a search for the `flaky` issue to update, and the logs. The hunt never posts anything.
 - A binary is named by its crate's directory and its target, with `(measure)` for `cairn-app`'s second build.
 - **HUNG**, **CRASHED** (a binary that died without a test failing, as an abort does) and **LEAKED** count a binary's runs the same way, and list the unfinished tests or the processes left behind.
 - **SLOW** marks a binary that passed but took more than half its timeout. It isn't a failure, but a timeout that's about to start biting.
