@@ -30,14 +30,16 @@ depinfo_for() {
   done
   # An executable has no extension on Unix, so its name may contain none to strip.
   [ -f "$1.d" ] && { printf '%s\n' "$1.d"; return; }
-  # A binary is copied up out of deps/, where its dep-info stays under the crate name and a hash.
-  # Every hash found is listed: another profile's build of the same binary only adds sources.
+  # A binary is copied up out of deps/, where its dep-info stays under the crate name and a hash,
+  # or under the crate name alone on Windows MSVC, where Cargo leaves the hash off binaries.
+  # Every one found is listed: another profile's build of the same binary only adds sources.
   local found=no
-  for candidate in "$dir/deps/${stem//-/_}"-*.d; do
+  for candidate in "$dir/deps/${stem//-/_}.d" "$dir/deps/${stem//-/_}"-*.d; do
     [ -f "$candidate" ] && { printf '%s\n' "$candidate"; found=yes; }
   done
   [ "$found" = yes ] && return
-  echo "error: no dep-info for $1" >&2
+  echo "error: no dep-info for $1; in $dir/deps under its name:" >&2
+  find "$dir/deps" -maxdepth 1 -iname "*${stem//-/_}*" >&2 || true
   return 1
 }
 
