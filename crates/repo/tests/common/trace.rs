@@ -59,18 +59,36 @@ pub fn about(span: &Fields, repo: &Path) -> bool {
 /// Waits until `spans` lists one that `matches` accepts, and returns where the first such
 /// one lies, and it. A span can trail the Snapshot or the event that caused it. `kind`
 /// names the spans for the failure message.
+#[track_caller]
 pub fn wait_for(
     spans: fn() -> Vec<Fields>,
     kind: &str,
     matches: impl Fn(&Fields) -> bool,
 ) -> (usize, Fields) {
+    let listed = wait_until(spans, 0, &format!("no such {kind} span"), |listed| {
+        listed.iter().any(&matches)
+    });
+    let at = listed.iter().position(&matches).unwrap();
+    (at, listed[at].clone())
+}
+
+/// Waits until `done` accepts the spans `spans` lists past the first `from`, and returns
+/// those. When it gives up, it fails with `what` and every one of them, so the failure shows
+/// what happened instead.
+#[track_caller]
+pub fn wait_until(
+    spans: fn() -> Vec<Fields>,
+    from: usize,
+    what: &str,
+    done: impl Fn(&[Fields]) -> bool,
+) -> Vec<Fields> {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let listed = spans();
-        if let Some(at) = listed.iter().position(&matches) {
-            return (at, listed[at].clone());
+        let listed = spans().split_off(from);
+        if done(&listed) {
+            return listed;
         }
-        assert!(Instant::now() < deadline, "no such {kind} span: {listed:?}");
+        assert!(Instant::now() < deadline, "{what}: {listed:?}");
         std::thread::sleep(Duration::from_millis(10));
     }
 }

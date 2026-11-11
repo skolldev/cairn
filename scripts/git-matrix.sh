@@ -8,7 +8,9 @@
 # --no-fail-fast. The feature is what brings in the Budget harness probe's tests, which run git too.
 # Environment: CAIRN_GIT_VERSIONS overrides the versions to run, as a space-separated list. Builds
 # go to ~/git-<version>, as with oldest-git.sh. Create the fixtures first with your usual git.
-# It closes with one total per version, then an ok or error line. Its exit code is the result.
+# It prints what cargo says only where it needs reading: compile errors and warnings, failing tests
+# and their output. Cargo's full output for each version is kept in a log, named at the end beside
+# one total per version, then an ok or error line. Its exit code is the result.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -22,16 +24,29 @@ versions="${CAIRN_GIT_VERSIONS:-2.37.0 $(newest_released)}"
 [ "$#" -gt 0 ] || set -- -p cairn-write -p cairn-repo -p cairn-budget -p cairn-app \
   --features cairn-app/measure --no-fail-fast
 
-log="$(mktemp)"
-trap 'rm -f "$log"' EXIT
+tmp="${TMPDIR:-/tmp}"
+logs="$(mktemp -d "${tmp%/}/git-matrix.XXXXXX")"
+
+# Drops the lines a passing run is made of, and keeps everything else, so a kind of line nobody
+# listed here still shows.
+quiet() {
+  awk '
+    /^ *(Compiling|Checking|Finished|Running|Doc-tests|Fresh|Blocking|Updating|Locking|Downloading|Downloaded) / { next }
+    /^running [0-9]+ tests?$/ || /^test .* \.\.\. (ok|ignored)$/ || /^test result: ok\./ { next }
+    /^$/ { blank = 1; next }
+    { if (blank && shown) print ""; blank = 0; shown = 1; print; fflush() }
+  '
+}
 
 failed=()
 totals=""
+lognames=""
 for version in $versions; do
   bin="$("$here/oldest-git.sh" "$version")"
-  echo "== git $version"
+  log="$logs/$version.log"
+  echo "== git $version, all of it in $log"
   note=""
-  if ! PATH="$bin:$PATH" CAIRN_EXPECT_GIT_VERSION="$version" cargo test "$@" 2>&1 | tee "$log"; then
+  if ! PATH="$bin:$PATH" CAIRN_EXPECT_GIT_VERSION="$version" cargo test "$@" 2>&1 | tee "$log" | quiet; then
     failed+=("$version")
     note=", cargo failed"
   fi
@@ -45,8 +60,11 @@ for version in $versions; do
   case "$counts" in *", 0 failed") ;; *) note="" ;; esac
   totals="$totals
 git $version: $counts$note"
+  lognames="$lognames
+log for git $version: $log"
 done
 
+echo "$lognames"
 echo "$totals"
 
 if [ "${#failed[@]}" -ne 0 ]; then
