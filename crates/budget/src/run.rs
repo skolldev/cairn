@@ -189,23 +189,31 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// Stops a run before it clones anything if its frames couldn't be timed. On Windows PresentMon
-/// has to run as administrator: `dwm.exe` runs on another account, and an unelevated PresentMon
-/// lists it as `<unknown>`, so no DWM flip would time a frame and every sample would fail at the
-/// end of its run.
+/// Stops a run before it clones anything if its frames couldn't be timed. On Windows that takes
+/// PresentMon, run as administrator: `dwm.exe` runs on another account, and an unelevated
+/// PresentMon lists it as `<unknown>`, so no DWM flip would time a frame and every sample would
+/// fail at the end of its run.
+#[cfg_attr(not(windows), allow(unused_variables))]
 pub fn check_frame_source(config: &Config) -> Result<(), String> {
-    if !cfg!(windows) || config.presentmon.is_none() {
-        return Ok(());
-    }
-    if !elevated()? {
-        return Err(
-            "PresentMon can't see dwm.exe unless the harness runs as administrator: run it from \
-             a Git Bash started with Run as administrator"
-                .to_owned(),
-        );
+    #[cfg(windows)]
+    {
+        if config.presentmon.is_none() {
+            return Err(NO_PRESENTMON.to_owned());
+        }
+        if !elevated()? {
+            return Err(
+                "PresentMon can't see dwm.exe unless the harness runs as administrator: run it \
+                 from a Git Bash started with Run as administrator"
+                    .to_owned(),
+            );
+        }
     }
     Ok(())
 }
+
+const NO_PRESENTMON: &str = "on Windows the harness needs PresentMon: run it through \
+                             scripts/budget.sh, which fetches it, or pass --presentmon or set \
+                             CAIRN_PRESENTMON";
 
 /// Whether this process runs as administrator.
 #[cfg(windows)]
@@ -249,11 +257,6 @@ fn elevated() -> Result<bool, String> {
     Ok(elevation.TokenIsElevated != 0)
 }
 
-#[cfg(not(windows))]
-fn elevated() -> Result<bool, String> {
-    Ok(true)
-}
-
 /// Where a run's frame times come from.
 enum Recorder {
     Metal,
@@ -282,10 +285,7 @@ impl Recorder {
         if !cfg!(windows) {
             return Err("numbers count only from macOS and the physical Windows PC".to_owned());
         }
-        let exe = config.presentmon.clone().ok_or(
-            "on Windows the harness needs PresentMon: pass --presentmon or set CAIRN_PRESENTMON",
-        )?;
-        check_frame_source(config)?;
+        let exe = config.presentmon.clone().ok_or(NO_PRESENTMON)?;
         let name = config
             .cairn
             .file_name()

@@ -7,13 +7,18 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# On Windows, run and held-key time frames with PresentMon: fetch it unless one is given.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*)
-    # --presentmon, if passed, still wins.
-    if [ -z "${CAIRN_PRESENTMON:-}" ]; then
-      CAIRN_PRESENTMON="$(cygpath -m "$(scripts/presentmon.sh)")"
-      export CAIRN_PRESENTMON
-    fi
+    case "${1:-}" in
+      run | held-key)
+        if [ -z "${CAIRN_PRESENTMON:-}" ] && [[ " $* " != *" --presentmon "* ]]; then
+          exe="$(scripts/presentmon.sh)"
+          CAIRN_PRESENTMON="$(cygpath -m "$exe")"
+          export CAIRN_PRESENTMON
+        fi
+        ;;
+    esac
     ;;
 esac
 cargo build --release --locked -p cairn-app --features measure
