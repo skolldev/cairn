@@ -86,8 +86,9 @@ Like External change's trace, it explains a number and never gives one: no resul
 ## Windows
 
 1. Set the primary display to 120 Hz.
-2. Get the PresentMon 2.6.0 console exe, and set `CAIRN_PRESENTMON` to it or pass `--presentmon`. Other versions name their CSV columns differently, and a missing column stops the run. Performance Log Users is enough to trace Cairn, but not DWM.
-3. Run the commands above from Git Bash, as administrator. `dwm.exe` runs on another account, so an unelevated PresentMon lists it as `<unknown>`: the harness then finds no DWM flips, and a run stops with "a frame that showed the change was never presented" even though the window stayed in front.
+2. Run the commands above from Git Bash, as administrator. `dwm.exe` runs on another account, and an unelevated PresentMon lists it as `<unknown>`, so no DWM flip could time a frame: the harness refuses to start unelevated.
+
+`scripts/budget.sh` uses the PresentMon 2.6.0 console exe that `scripts/presentmon.sh` fetches to `~/presentmon-2.6.0` and checks against a pinned hash. `CAIRN_PRESENTMON` or `--presentmon` points it at another. Other versions name their CSV columns differently, and a missing column stops the run.
 
 `scripts/budget.sh run` then records a PresentMon trace around each run, Launch included.
 

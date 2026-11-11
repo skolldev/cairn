@@ -189,6 +189,71 @@ impl Drop for KillOnDrop {
     }
 }
 
+/// Stops a run before it clones anything if its frames couldn't be timed. On Windows PresentMon
+/// has to run as administrator: `dwm.exe` runs on another account, and an unelevated PresentMon
+/// lists it as `<unknown>`, so no DWM flip would time a frame and every sample would fail at the
+/// end of its run.
+pub fn check_frame_source(config: &Config) -> Result<(), String> {
+    if !cfg!(windows) || config.presentmon.is_none() {
+        return Ok(());
+    }
+    if !elevated()? {
+        return Err(
+            "PresentMon can't see dwm.exe unless the harness runs as administrator: run it from \
+             a Git Bash started with Run as administrator"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// Whether this process runs as administrator.
+#[cfg(windows)]
+fn elevated() -> Result<bool, String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token = std::ptr::null_mut();
+    // SAFETY: the current process's pseudo-handle is always valid, and `token` is a valid handle
+    // for the call to write.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(format!(
+            "couldn't read this process's token: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut written = 0;
+    // SAFETY: `token` was opened with TOKEN_QUERY, and `elevation` is a TOKEN_ELEVATION of the
+    // size passed.
+    let read = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            (&raw mut elevation).cast(),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut written,
+        )
+    };
+    let error = std::io::Error::last_os_error();
+    // SAFETY: `token` is open, and nothing uses it after this.
+    unsafe { CloseHandle(token) };
+    if read == 0 {
+        return Err(format!(
+            "couldn't read whether this process is elevated: {error}"
+        ));
+    }
+    Ok(elevation.TokenIsElevated != 0)
+}
+
+#[cfg(not(windows))]
+fn elevated() -> Result<bool, String> {
+    Ok(true)
+}
+
 /// Where a run's frame times come from.
 enum Recorder {
     Metal,
@@ -220,6 +285,7 @@ impl Recorder {
         let exe = config.presentmon.clone().ok_or(
             "on Windows the harness needs PresentMon: pass --presentmon or set CAIRN_PRESENTMON",
         )?;
+        check_frame_source(config)?;
         let name = config
             .cairn
             .file_name()

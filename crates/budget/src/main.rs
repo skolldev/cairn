@@ -135,6 +135,7 @@ fn run() -> Result<i32, String> {
     if args.command == "trace" {
         return trace(&args);
     }
+    run::check_frame_source(&args.config)?;
     let rust_version = run::rust_version()?;
     let _home = hermetic()?;
     let repo = std::env::current_dir().map_err(|e| e.to_string())?;

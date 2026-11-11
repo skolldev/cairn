@@ -7,5 +7,14 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*)
+    # --presentmon, if passed, still wins.
+    if [ -z "${CAIRN_PRESENTMON:-}" ]; then
+      CAIRN_PRESENTMON="$(cygpath -m "$(scripts/presentmon.sh)")"
+      export CAIRN_PRESENTMON
+    fi
+    ;;
+esac
 cargo build --release --locked -p cairn-app --features measure
 cargo run --release --locked -p cairn-budget -- "$@"
