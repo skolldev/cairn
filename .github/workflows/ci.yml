@@ -5,9 +5,13 @@ on:
   push:
   workflow_dispatch:
 
+# Rust caches are saved only from main, and branches restore main's. One set is ~6 GB of the
+# repo's 10 GB, so a branch saving its own pushed main's out, and every save took up to 2 minutes.
+# Line tables only, as in release: backtraces keep file and line, and the caches are smaller.
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   # Only cairn-app may depend on GPUI. The dependency graph is resolved for every target,
@@ -20,6 +24,8 @@ jobs:
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Guard self-test (deliberate violations must fail)
         run: ./scripts/test-check-gpui-free.sh
       - name: Every crate except cairn-app is GPUI-free
@@ -96,6 +102,8 @@ jobs:
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Cache the small fixture
         uses: actions/cache@v4
         with:
@@ -212,6 +220,8 @@ jobs:
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Cache the small fixture
         uses: actions/cache@v4
         with:
@@ -254,6 +264,8 @@ jobs:
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Cache git ${{ env.GIT_VERSION }}
         id: git-cache
         uses: actions/cache@v4
