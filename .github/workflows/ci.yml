@@ -68,6 +68,8 @@ jobs:
         run: ./scripts/test-git-matrix.sh
       - name: seen-red.py self-test
         run: ./scripts/test-seen-red.sh
+      - name: flake-hunt.py self-test
+        run: ./scripts/test-flake-hunt.sh
       - name: Cache the small fixture
         uses: actions/cache@v4
         with:
