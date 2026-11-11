@@ -231,6 +231,7 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: Cache git ${{ env.GIT_VERSION }}
+        id: git-cache
         uses: actions/cache@v4
         with:
           path: ~/git-${{ env.GIT_VERSION }}
@@ -247,8 +248,11 @@ jobs:
           ./scripts/fixtures.sh filters
       - name: Build git ${{ env.GIT_VERSION }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libz-dev libcurl4-openssl-dev
+          # Only a build needs the headers, so a cached git needs nothing from Ubuntu's mirrors.
+          if [ "${{ steps.git-cache.outputs.cache-hit }}" != "true" ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends libz-dev libcurl4-openssl-dev
+          fi
           ./scripts/oldest-git.sh "$GIT_VERSION" "$HOME/git-$GIT_VERSION" >> "$GITHUB_PATH"
       # The runner itself, and the Repo service's reads. cairn-app's tests run git too, but
       # building GPUI here isn't worth it: run those on it locally (CODING_STANDARDS.md).

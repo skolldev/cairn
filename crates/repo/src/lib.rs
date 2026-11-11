@@ -84,6 +84,11 @@ pub enum Intent {
     /// git is running isn't killed, but exiting the process closes its pipes and can kill it
     /// mid-step, so the caller confirms this first.
     ForceQuit,
+    /// Recheck: the user is looking again, as when the window gains focus. Reads again, in
+    /// full, every Slot whose last Snapshot was an error, and nothing else (ADR 0009). It
+    /// queues behind a running read as a refresh does. Counts never publish an error: a
+    /// failed count is tried again by the next count.
+    Recheck,
 }
 
 /// An immutable view of repository state, shared by `Arc`. Each variant comes from its
@@ -435,6 +440,7 @@ impl RepoService {
                 let span = tracing::info_span!("intent", kind = "push");
                 self.network_job(JobKind::Push, span, network::push);
             }
+            Intent::Recheck => self.reads.recheck(),
             Intent::Stop(id) => {
                 let _span = tracing::info_span!("intent", kind = "stop", job = id.0).entered();
                 let job = self.network_jobs.lock().unwrap().get(&id).cloned();
@@ -949,9 +955,7 @@ impl Reads {
 
     /// Reads Staged, Unstaged and Untracked again, in full.
     fn refresh_status(&self, path: &Path, asked: Asked) {
-        self.submit(&self.staged_slot, path, asked, read_staged, |p| {
-            &mut p.staged
-        });
+        self.submit_staged(path, asked);
         self.unstaged_narrowed.everything();
         self.untracked_narrowed.everything();
         self.submit_unstaged_and_untracked(path, asked);
@@ -970,15 +974,71 @@ impl Reads {
     /// Reads Staged again in full, and Unstaged and Untracked narrowed to the files an
     /// External change touched and the entries the index changed.
     fn refresh_index(&self, path: &Path, touched: Touched, asked: Asked) {
-        self.submit(&self.staged_slot, path, asked, read_staged, |p| {
-            &mut p.staged
-        });
+        self.submit_staged(path, asked);
         self.unstaged_narrowed.index();
         self.untracked_narrowed.index();
         self.refresh_worktree(path, touched, asked);
     }
 
+    /// Reads again, in full, each Slot whose last Snapshot was an error (ADR 0009). Counts never
+    /// publish one. A Snapshot of the repository that was open before the last Open still
+    /// counts until that Open's read replaces it, which costs at most one extra read.
+    fn recheck(&self) {
+        // Held across the submits, as `close` requires.
+        let open = self.open.lock().unwrap();
+        let Some(path) = open.as_deref() else {
+            tracing::debug!("no repository is open; recheck ignored");
+            return;
+        };
+        let span = tracing::info_span!("intent", kind = "recheck", path = %path.display());
+        let _entered = span.enter();
+        let failed = {
+            let pending = self.outbox.pending.lock().unwrap();
+            [
+                pending.refs.failed,
+                pending.staged.failed,
+                pending.unstaged.failed,
+                pending.untracked.failed,
+            ]
+        };
+        let [refs, staged, unstaged, untracked] = failed;
+        if !failed.contains(&true) {
+            tracing::debug!("no Slot shows an error; nothing to recheck");
+            return;
+        }
+        let asked = Asked {
+            running: Running::Finish,
+            cause: "recheck",
+            span: &span,
+        };
+        if refs {
+            self.refresh_refs(path, asked);
+        }
+        if staged {
+            self.submit_staged(path, asked);
+        }
+        if unstaged {
+            self.unstaged_narrowed.everything();
+            self.submit_unstaged(path, asked);
+        }
+        if untracked {
+            self.untracked_narrowed.everything();
+            self.submit_untracked(path, asked);
+        }
+    }
+
+    fn submit_staged(&self, path: &Path, asked: Asked) {
+        self.submit(&self.staged_slot, path, asked, read_staged, |p| {
+            &mut p.staged
+        });
+    }
+
     fn submit_unstaged_and_untracked(&self, path: &Path, asked: Asked) {
+        self.submit_unstaged(path, asked);
+        self.submit_untracked(path, asked);
+    }
+
+    fn submit_unstaged(&self, path: &Path, asked: Asked) {
         let narrowed = self.unstaged_narrowed.clone();
         self.submit(
             &self.unstaged_slot,
@@ -987,6 +1047,9 @@ impl Reads {
             move |path, job| read_unstaged(path, job, &narrowed),
             |p| &mut p.unstaged,
         );
+    }
+
+    fn submit_untracked(&self, path: &Path, asked: Asked) {
         let mode = self.read_mode.lock().unwrap().clone();
         let narrowed = self.untracked_narrowed.clone();
         self.submit(
@@ -1275,6 +1338,8 @@ impl Pending {
 struct Latest<T> {
     pending: Option<Arc<SlotSnapshot<T>>>,
     newest: Option<Generation>,
+    /// The newest Snapshot published, drained or not, was an error: a Recheck reads it again.
+    failed: bool,
 }
 
 impl<T> Default for Latest<T> {
@@ -1282,6 +1347,7 @@ impl<T> Default for Latest<T> {
         Self {
             pending: None,
             newest: None,
+            failed: false,
         }
     }
 }
@@ -1359,6 +1425,7 @@ impl Outbox {
                 return;
             }
             latest.newest = Some(snapshot.generation);
+            latest.failed = snapshot.result.is_err();
             latest.pending = Some(snapshot);
             was_empty
         };
