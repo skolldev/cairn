@@ -30,6 +30,10 @@ const INDENT: f32 = 14.;
 /// The user asked to switch to this local branch, by its short name.
 pub struct SwitchTo(pub String);
 
+/// The user asked to switch to this remote-tracking branch, by its full name: to the local
+/// branch that tracks it, or to a new one.
+pub struct SwitchToRemote(pub RefName);
+
 /// The local branches whose rows are on screen changed: these want ahead/behind counts.
 pub struct ShowCounts(pub Vec<RefName>);
 
@@ -213,6 +217,7 @@ impl RefsView {
 }
 
 impl EventEmitter<SwitchTo> for RefsView {}
+impl EventEmitter<SwitchToRemote> for RefsView {}
 impl EventEmitter<ShowCounts> for RefsView {}
 
 impl Render for RefsView {
@@ -361,6 +366,12 @@ impl RefsView {
             element = element.on_click(cx.listener(move |view, event: &ClickEvent, _, cx| {
                 if event.click_count() == 2 {
                     view.switch_to(branch.clone(), cx);
+                }
+            }));
+        } else if let Some(remote) = row.remote_branch() {
+            element = element.on_click(cx.listener(move |_, event: &ClickEvent, _, cx| {
+                if event.click_count() == 2 {
+                    cx.emit(SwitchToRemote(remote.clone()));
                 }
             }));
         }

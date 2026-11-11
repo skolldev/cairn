@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cairn_repo::{JobKind, JobState};
+use cairn_repo::{JobKind, JobState, RefName};
 use gpui::TestAppContext;
 
 use super::Banner;
@@ -335,5 +335,119 @@ fn double_clicking_the_current_branch_sends_no_intent(cx: &mut TestAppContext) {
         app.jobs_seen(),
         [(switch("other"), JobState::Done(Ok(())))],
         "a Job besides the switch to other"
+    );
+}
+
+impl Fixture {
+    /// Adds a remote `origin` whose `feature/x` is at `other`, with no local branch for it.
+    fn add_remote_feature_x(&self) {
+        let bare = self.dir.path().join("origin.git");
+        let bare = bare.to_str().unwrap();
+        git(self.dir.path(), &["init", "--quiet", "--bare", bare]);
+        git(&self.repo, &["remote", "add", "origin", bare]);
+        git(
+            &self.repo,
+            &["push", "--quiet", "origin", "other:feature/x"],
+        );
+        git(&self.repo, &["fetch", "--quiet", "origin"]);
+    }
+}
+
+/// Gives `f` the remote branch `origin/feature/x`, then opens it and waits until the sidebar
+/// shows that branch and `main` as current.
+fn open_with_remote_feature_x<'a>(cx: &'a mut TestAppContext, f: &Fixture) -> App<'a> {
+    f.add_remote_feature_x();
+    let mut app = open_on_main(cx, &f.repo);
+    app.until("the sidebar shows origin/feature/x", |app| {
+        app.draw();
+        app.shown("sidebar:refs/remotes/origin/feature/x")
+    });
+    app
+}
+
+fn feature_x() -> JobKind {
+    JobKind::SwitchToRemote {
+        remote: RefName::new("refs/remotes/origin/feature/x"),
+    }
+}
+
+#[gpui::test]
+fn double_clicking_a_remote_branch_switches_to_it_through_a_new_tracking_branch(
+    cx: &mut TestAppContext,
+) {
+    let f = fixture();
+    let mut app = open_with_remote_feature_x(cx, &f);
+
+    app.double_click("sidebar:refs/remotes/origin/feature/x");
+    // The refresh can show the switch before the Job's end arrives, so wait for both.
+    app.until(
+        "the sidebar marks feature/x as current and the Job ends",
+        |app| {
+            app.draw();
+            app.shown("sidebar:current:refs/heads/feature/x")
+                && app
+                    .jobs_seen()
+                    .iter()
+                    .any(|(_, state)| matches!(state, JobState::Done(_)))
+        },
+    );
+
+    assert_eq!(app.jobs_seen(), [(feature_x(), JobState::Done(Ok(())))]);
+    assert_eq!(f.head(), "refs/heads/feature/x");
+    assert_eq!(
+        git(&f.repo, &["config", "branch.feature/x.merge"]).trim(),
+        "refs/heads/feature/x"
+    );
+}
+
+#[gpui::test]
+fn stash_and_switch_on_a_refused_switch_to_a_remote_branch_stashes_then_makes_that_switch(
+    cx: &mut TestAppContext,
+) {
+    let f = fixture();
+    // `feature/x` is at `other`, which changes `file.txt`.
+    std::fs::write(f.repo.join("file.txt"), "local\n").unwrap();
+    let mut app = open_with_remote_feature_x(cx, &f);
+
+    app.double_click("sidebar:refs/remotes/origin/feature/x");
+    app.until("the switch fails", |app| {
+        app.draw();
+        matches!(app.banner(), Some(Banner::Failed { .. }))
+    });
+    // Seen red: offering Stash and switch only for a switch to a local branch.
+    assert!(
+        matches!(
+            app.banner(),
+            Some(Banner::Failed {
+                stash_and_switch: true,
+                ..
+            })
+        ),
+        "{:?}",
+        app.banner()
+    );
+    app.click("job:stash-and-switch");
+    app.until(
+        "the sidebar marks feature/x as current and shows the stash",
+        |app| {
+            app.draw();
+            app.shown("sidebar:current:refs/heads/feature/x") && app.shown("sidebar:stash@{0}")
+        },
+    );
+
+    assert_eq!(f.head(), "refs/heads/feature/x");
+    app.until("all three Jobs are done", |app| {
+        app.jobs_seen()
+            .iter()
+            .filter(|(_, s)| matches!(s, JobState::Done(_)))
+            .count()
+            == 3
+    });
+    assert_eq!(
+        app.jobs_seen()[1..],
+        [
+            (stash(false), JobState::Done(Ok(()))),
+            (feature_x(), JobState::Done(Ok(()))),
+        ]
     );
 }

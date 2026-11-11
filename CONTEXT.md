@@ -56,7 +56,7 @@ Leaving Cairn without waiting for Local write Jobs, after a warning, because exi
 One user action made of two Jobs: a Network Job that fetches the upstream, then a Local write Job that integrates it. The second starts only if the first succeeds.
 
 **Stash and switch**:
-One user action made of two Local write Jobs: one that stashes the local changes, then the switch. The second starts only if the first succeeds. It is offered only when git refused a switch because local changes would be overwritten.
+One user action made of two Local write Jobs: one that stashes the local changes, then the switch. The second starts only if the first succeeds. It is offered only when git refused a switch because local changes would be overwritten, whether to a local branch or to a remote one, and the second Job makes that same switch.
 
 **External change**:
 A change to the repository made outside Cairn, such as a file saved in an editor or a `git` command run in a terminal. Cairn learns of it through the watcher, never from a Job of its own. Cairn's own Jobs wake the watcher too, and the extra refresh coalesces in the Slot.

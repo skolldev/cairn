@@ -6,7 +6,7 @@ mod common;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cairn_repo::{Head, Intent, JobKind, JobSnapshot, JobState, Snapshot};
+use cairn_repo::{Head, Intent, JobKind, JobSnapshot, JobState, RefName, Snapshot, SwitchTarget};
 use common::{
     Harness, Release, Seen, block_first_run, git, git_output, git_read, is_ended, make_executable,
     open, refs_of, switch_to, wait_for_file,
@@ -81,7 +81,7 @@ fn stash(untracked: bool) -> JobKind {
 
 fn stash_and_switch(branch: &str, untracked: bool) -> Intent {
     Intent::StashAndSwitch {
-        branch: branch.to_owned(),
+        to: SwitchTarget::Branch(branch.to_owned()),
         untracked,
     }
 }
@@ -127,7 +127,7 @@ fn a_switch_refused_for_tracked_changes_offers_a_stash_without_untracked_files_t
         .stash_and_switch()
         .expect("a refusal for local changes offers it");
     assert!(
-        matches!(&offer, Intent::StashAndSwitch { branch, untracked: false } if branch == "other"),
+        matches!(&offer, Intent::StashAndSwitch { to: SwitchTarget::Branch(branch), untracked: false } if branch == "other"),
         "{offer:?}"
     );
 
@@ -167,7 +167,7 @@ fn a_switch_refused_for_untracked_files_the_branch_tracks_offers_a_stash_with_th
         .stash_and_switch()
         .expect("a refusal for untracked files offers it");
     assert!(
-        matches!(&offer, Intent::StashAndSwitch { branch, untracked: true } if branch == "other"),
+        matches!(&offer, Intent::StashAndSwitch { to: SwitchTarget::Branch(branch), untracked: true } if branch == "other"),
         "{offer:?}"
     );
 
@@ -410,5 +410,72 @@ fn a_quit_while_the_stash_runs_lets_it_finish_and_never_starts_the_switch() {
     });
     assert_eq!(jobs(&seen), [(stash(false), JobState::Done(Ok(())))]);
     assert_eq!(f.head(), "refs/heads/main");
+    assert_eq!(f.stashes(), ["On main: WIP on main"]);
+}
+
+/// Gives the fixture a remote `origin` whose `feature/x` is at `other`, with no local branch
+/// for it. The remote's URL is never fetched from.
+fn remote_feature_x(f: &Fixture) -> RefName {
+    git(&f.repo, &["remote", "add", "origin", "unused"]);
+    git(
+        &f.repo,
+        &["update-ref", "refs/remotes/origin/feature/x", "other"],
+    );
+    RefName::new("refs/remotes/origin/feature/x")
+}
+
+#[test]
+fn a_switch_to_a_remote_branch_refused_for_local_changes_offers_a_stash_then_that_switch() {
+    let f = fixture();
+    let remote = remote_feature_x(&f);
+    f.edit_tracked();
+    let harness = Harness::start();
+    open(&harness, &f.repo);
+    let mut seen = Seen::default();
+    let to_remote = JobKind::SwitchToRemote {
+        remote: remote.clone(),
+    };
+
+    harness.service.send(Intent::SwitchToRemote(remote.clone()));
+    seen.until(&harness, |s| s.job(&to_remote).is_some_and(|j| is_ended(j)));
+    let refused = seen.job(&to_remote).unwrap().clone();
+    let JobState::Done(Err(error)) = &refused.state else {
+        panic!("git must refuse to overwrite file.txt: {refused:?}");
+    };
+    assert!(error.contains("Your local changes"), "{error}");
+    // git checks the worktree before it makes the branch.
+    assert!(
+        git_output(
+            &f.repo,
+            &["rev-parse", "--verify", "-q", "refs/heads/feature/x"]
+        )
+        .stdout
+        .is_empty()
+    );
+    let offer = refused
+        .stash_and_switch()
+        .expect("a refusal for local changes offers it");
+    assert!(
+        matches!(
+            &offer,
+            Intent::StashAndSwitch { to: SwitchTarget::Remote(r), untracked: false } if *r == remote
+        ),
+        "{offer:?}"
+    );
+
+    harness.service.send(offer);
+    until_jobs_end(&harness, &mut seen, 3);
+    assert_eq!(
+        jobs(&seen)[1..],
+        [
+            (stash(false), JobState::Done(Ok(()))),
+            (to_remote, JobState::Done(Ok(()))),
+        ]
+    );
+    assert_eq!(f.head(), "refs/heads/feature/x");
+    assert_eq!(
+        git(&f.repo, &["config", "branch.feature/x.merge"]).trim(),
+        "refs/heads/feature/x"
+    );
     assert_eq!(f.stashes(), ["On main: WIP on main"]);
 }

@@ -51,6 +51,11 @@ impl RefName {
         self.0.starts_with("refs/heads/")
     }
 
+    /// Whether it names a remote-tracking branch, under `refs/remotes/`.
+    pub fn is_remote_branch(&self) -> bool {
+        self.0.starts_with("refs/remotes/")
+    }
+
     /// The name without its category prefix: `main`, `origin/main`, `v1.0`.
     pub fn short(&self) -> &str {
         ["refs/heads/", "refs/remotes/", "refs/tags/", "refs/"]

@@ -155,6 +155,7 @@ fn title(kind: &JobKind) -> String {
     match kind {
         JobKind::Switch { branch } => format!("git switch {branch}"),
         JobKind::Stash { .. } => "git stash push".to_owned(),
+        JobKind::SwitchToRemote { remote } => format!("git switch --track {}", remote.short()),
         JobKind::Fetch => "git fetch".to_owned(),
         JobKind::Push => "git push".to_owned(),
     }

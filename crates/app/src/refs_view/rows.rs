@@ -81,6 +81,14 @@ impl Row {
         }
     }
 
+    /// The full name of the remote-tracking branch it stands for, if it is one.
+    pub fn remote_branch(&self) -> Option<RefName> {
+        match self {
+            Row::Ref { name, .. } if name.is_remote_branch() => Some(name.clone()),
+            _ => None,
+        }
+    }
+
     /// Whether clicking it opens or closes something.
     pub fn toggles(&self) -> bool {
         matches!(self, Row::Section { .. } | Row::Folder { .. })

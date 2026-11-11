@@ -35,7 +35,7 @@ use bridge::Bridge;
 use jobs::{JobsView, StashAndSwitch, StopJob};
 use quit::QuitView;
 use recent::{OpenRecent, Place, RecentRepos, RecentView};
-use refs_view::{RefsView, ShowCounts, SwitchTo};
+use refs_view::{RefsView, ShowCounts, SwitchTo, SwitchToRemote};
 use status_view::StatusView;
 
 struct Workspace {
@@ -52,6 +52,7 @@ struct Workspace {
     focus: gpui::FocusHandle,
     _bridge: Entity<Bridge>,
     _switch_to: gpui::Subscription,
+    _switch_to_remote: gpui::Subscription,
     _show_counts: gpui::Subscription,
     _stash_and_switch: gpui::Subscription,
     _stop_job: gpui::Subscription,
@@ -86,6 +87,11 @@ impl Workspace {
         });
         let switch_to = cx.subscribe(&refs, |workspace, _, SwitchTo(branch), _| {
             workspace.service.send(Intent::Switch(branch.clone()));
+        });
+        let switch_to_remote = cx.subscribe(&refs, |workspace, _, SwitchToRemote(remote), _| {
+            workspace
+                .service
+                .send(Intent::SwitchToRemote(remote.clone()));
         });
         let show_counts = cx.subscribe(&refs, |workspace, _, ShowCounts(branches), _| {
             workspace.service.send(Intent::ShowCounts(branches.clone()));
@@ -149,6 +155,7 @@ impl Workspace {
             focus,
             _bridge: bridge,
             _switch_to: switch_to,
+            _switch_to_remote: switch_to_remote,
             _show_counts: show_counts,
             _stash_and_switch: stash_and_switch,
             _stop_job: stop_job,
