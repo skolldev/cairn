@@ -5,9 +5,13 @@ on:
   push:
   workflow_dispatch:
 
+# Rust caches are saved only from main, and branches restore main's. One set is ~6 GB of the
+# repo's 10 GB, so a branch saving its own pushed main's out, and every save took up to 2 minutes.
+# Line tables only, as in release: backtraces keep file and line, and the caches are smaller.
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   # Only cairn-app may depend on GPUI. The dependency graph is resolved for every target,
@@ -20,6 +24,8 @@ jobs:
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Guard self-test (deliberate violations must fail)
         run: ./scripts/test-check-gpui-free.sh
       - name: Every crate except cairn-app is GPUI-free
@@ -44,6 +50,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: shellcheck (preinstalled on the runner)
+        run: shellcheck scripts/*.sh scripts/hooks/*
       - name: Guard self-test (deliberate violations must fail)
         run: ./scripts/test-check-test-gates.sh
       - name: No check-then-create gates in tests
@@ -94,6 +102,8 @@ jobs:
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Cache the small fixture
         uses: actions/cache@v4
         with:
@@ -102,11 +112,17 @@ jobs:
       - name: Small fixture
         shell: bash
         run: ./scripts/fixtures.sh small
-      - name: Self-test (deliberate regressions must fail)
+      - name: Self-tests (deliberate regressions and reused builds must fail)
         shell: bash
-        run: ./scripts/test-check-bench-regressions.sh
+        run: |
+          ./scripts/test-check-bench-regressions.sh
+          ./scripts/test-check-bench-binaries.sh
       # main compares with what it was before this push, and a branch with where it left
-      # main, or its own parent if it hasn't left.
+      # main, or its own parent if it hasn't left. The base builds into its own target
+      # directory: in a shared one, Cargo took the base's build of the workspace crates for the
+      # head's, by mtime, and the head was never benched. It starts from a copy of the cached
+      # dependencies, with the workspace crates removed for the same reason. Its results go to
+      # the head's criterion directory, where the comparison reads both.
       - name: Bench the base
         shell: bash
         env:
@@ -120,12 +136,18 @@ jobs:
           fi
           git worktree add --quiet --detach ../cairn-base "$base"
           if [ -f ../cairn-base/crates/repo/benches/reads.rs ]; then
-            (cd ../cairn-base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
-              cargo bench $BENCHES -- --save-baseline base)
-            (cd ../cairn-base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
-              "$GITHUB_WORKSPACE/scripts/bench-binary-hashes.sh" $BENCHES) \
+            mkdir -p target
+            cp -Rp target target-base
+            export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-base"
+            export CRITERION_HOME="$GITHUB_WORKSPACE/target/criterion"
+            (cd ../cairn-base && "$GITHUB_WORKSPACE/scripts/clean-workspace-crates.sh")
+            (cd ../cairn-base && cargo bench $BENCHES -- --save-baseline base)
+            (cd ../cairn-base && "$GITHUB_WORKSPACE/scripts/bench-binary-hashes.sh" $BENCHES) \
               > target/bench-binaries-base.txt
+            (cd ../cairn-base && "$GITHUB_WORKSPACE/scripts/bench-sources.sh" $BENCHES) \
+              > target/bench-sources-base.txt
             test -s target/bench-binaries-base.txt
+            echo "BENCH_BASE=$base" >> "$GITHUB_ENV"
             echo "COMPARE=true" >> "$GITHUB_ENV"
           else
             echo "$base has no benches yet, so there is nothing to compare with"
@@ -133,16 +155,25 @@ jobs:
       - name: Bench this commit
         shell: bash
         run: |
+          ./scripts/clean-workspace-crates.sh
           cargo bench $BENCHES -- --save-baseline head
           ./scripts/bench-binary-hashes.sh $BENCHES > target/bench-binaries-head.txt
+          ./scripts/bench-sources.sh $BENCHES > target/bench-sources-head.txt
           test -s target/bench-binaries-head.txt
       - name: Compare
         if: ${{ env.COMPARE == 'true' }}
         shell: bash
         run: |
-          if cmp -s target/bench-binaries-base.txt target/bench-binaries-head.txt; then
-            echo 'Benchmark executables are identical; timing differences are runner noise'
-            exit 0
+          # Exit 3: nothing the benches are built from changed, so the timings are noise.
+          if built="$(./scripts/check-bench-binaries.sh "$BENCH_BASE" \
+            target/bench-sources-base.txt target/bench-sources-head.txt \
+            target/bench-binaries-base.txt target/bench-binaries-head.txt 2>&1)"; then
+            printf '%s\n' "$built"
+          else
+            status=$?
+            printf '%s\n' "$built"
+            [ "$status" -eq 3 ] && exit 0
+            exit "$status"
           fi
           if first="$(./scripts/check-bench-regressions.sh target/criterion 2>&1)"; then
             printf '%s\n' "$first"
@@ -157,7 +188,8 @@ jobs:
 
           # Confirm on the same runner, in reverse order to counter drift during the job.
           cargo bench $BENCHES -- --save-baseline confirm-head
-          (cd ../cairn-base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
+          (cd ../cairn-base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-base" \
+            CRITERION_HOME="$GITHUB_WORKSPACE/target/criterion" \
             cargo bench $BENCHES -- --save-baseline confirm-base)
           if second="$(./scripts/check-bench-regressions.sh target/criterion 30 confirm-base confirm-head 2>&1)"; then
             printf '%s\n' "$second"
@@ -188,6 +220,8 @@ jobs:
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Cache the small fixture
         uses: actions/cache@v4
         with:
@@ -230,7 +264,10 @@ jobs:
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Cache git ${{ env.GIT_VERSION }}
+        id: git-cache
         uses: actions/cache@v4
         with:
           path: ~/git-${{ env.GIT_VERSION }}
@@ -247,8 +284,11 @@ jobs:
           ./scripts/fixtures.sh filters
       - name: Build git ${{ env.GIT_VERSION }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libz-dev libcurl4-openssl-dev
+          # Only a build needs the headers, so a cached git needs nothing from Ubuntu's mirrors.
+          if [ "${{ steps.git-cache.outputs.cache-hit }}" != "true" ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends libz-dev libcurl4-openssl-dev
+          fi
           ./scripts/oldest-git.sh "$GIT_VERSION" "$HOME/git-$GIT_VERSION" >> "$GITHUB_PATH"
       # The runner itself, and the Repo service's reads. cairn-app's tests run git too, but
       # building GPUI here isn't worth it: run those on it locally (CODING_STANDARDS.md).

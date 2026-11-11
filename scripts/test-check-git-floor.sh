@@ -30,7 +30,9 @@ pub const MINIMUM: GitVersion = GitVersion {
     patch: 0,
 };
 EOF
+  # shellcheck disable=SC2016 # the fixture script gets the expansions literally
   echo 'version="${1:-2.37.0}"' >"$tree/scripts/oldest-git.sh"
+  # shellcheck disable=SC2016
   echo 'versions="${CAIRN_GIT_VERSIONS:-2.37.0 $(newest_released)}"' >"$tree/scripts/git-matrix.sh"
   printf 'env:\n  GIT_VERSION: 2.37.0\n' >"$tree/.github/workflows/ci.yml"
 }
