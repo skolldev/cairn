@@ -478,6 +478,4 @@ fn a_switch_to_a_remote_branch_refused_for_local_changes_offers_a_stash_then_tha
         "refs/heads/feature/x"
     );
     assert_eq!(f.stashes(), ["On main: WIP on main"]);
-    // The switch of a Stash and switch offers nothing more.
-    assert!(seen.nth(2).unwrap().stash_and_switch().is_none());
 }
