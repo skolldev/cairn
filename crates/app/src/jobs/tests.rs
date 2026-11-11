@@ -379,10 +379,18 @@ fn double_clicking_a_remote_branch_switches_to_it_through_a_new_tracking_branch(
     let mut app = open_with_remote_feature_x(cx, &f);
 
     app.double_click("sidebar:refs/remotes/origin/feature/x");
-    app.until("the sidebar marks feature/x as current", |app| {
-        app.draw();
-        app.shown("sidebar:current:refs/heads/feature/x")
-    });
+    // The refresh can show the switch before the Job's end arrives, so wait for both.
+    app.until(
+        "the sidebar marks feature/x as current and the Job ends",
+        |app| {
+            app.draw();
+            app.shown("sidebar:current:refs/heads/feature/x")
+                && app
+                    .jobs_seen()
+                    .iter()
+                    .any(|(_, state)| matches!(state, JobState::Done(_)))
+        },
+    );
 
     assert_eq!(app.jobs_seen(), [(feature_x(), JobState::Done(Ok(())))]);
     assert_eq!(f.head(), "refs/heads/feature/x");
