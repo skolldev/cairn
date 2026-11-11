@@ -95,9 +95,12 @@ fn trace_of(rows: &[String]) -> PresentMonTrace {
     PresentMonTrace::parse(&format!("{HEADER}{}", rows.concat()), 10_000_000).unwrap()
 }
 
-/// Two processes that PresentMon times itself, as it does an HWND swapchain.
+/// Two processes that PresentMon times itself, as it does an HWND swapchain. DWM's one flip comes
+/// before them all, even the first Present() each process's first row implies, so it times none
+/// of their frames.
 fn csv_trace() -> PresentMonTrace {
     trace_of(&[
+        dwm("0x0", 900, "16.0000"),
         cairn(40, 1_002, "8.3", "18.0000"),
         cairn(40, 1_013, "11.0", "NA"),
         cairn(40, 1_021, "8.0", "15.0000"),
@@ -217,6 +220,17 @@ fn a_presentmon_csv_without_the_columns_is_an_error_rather_than_no_frames() {
     let wrong = "Application,ProcessID,SwapChainAddress,MsBetweenPresents\ncairn.exe,40,0x1,8.3\n";
     let error = PresentMonTrace::parse(wrong, 10_000_000).unwrap_err();
     assert!(error.contains("TimeInQPC"), "{error}");
+}
+
+#[test]
+fn a_presentmon_csv_without_dwm_is_an_error_rather_than_frames_never_presented() {
+    // Unelevated, PresentMon lists dwm.exe, which runs on another account, as `<unknown>`, and
+    // `--process_name dwm.exe` then matches nothing. Every DirectComposition frame would read as
+    // never presented, which the harness blames on the window.
+    let csv = format!("{HEADER}{}", cairn(40, 1_005, "NA", "NA"));
+    let error = PresentMonTrace::parse(&csv, 10_000_000).unwrap_err();
+    assert!(error.contains("dwm.exe"), "{error}");
+    assert!(error.contains("administrator"), "{error}");
 }
 
 #[test]

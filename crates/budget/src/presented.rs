@@ -207,6 +207,14 @@ impl PresentMonTrace {
             };
             timed.push((row, ms_as_ns(between_presents)?));
         }
+        // The harness always traces DWM, and DWM flips whenever the screen changes. A trace with
+        // no flip at all comes from a PresentMon that couldn't see it.
+        if chains.is_empty() {
+            return Err(format!(
+                "the PresentMon CSV has no frame of {DWM}: run the harness as administrator, \
+                 because an unelevated PresentMon can't see {DWM}, which runs on another account"
+            ));
+        }
         timed.sort_by_key(|(row, _)| row.present_ns);
 
         // PresentMon writes no row for a swapchain's first Present(), but the next row says how
