@@ -56,6 +56,7 @@ struct Workspace {
     _stash_and_switch: gpui::Subscription,
     _stop_job: gpui::Subscription,
     _open_recent: gpui::Subscription,
+    _recheck: gpui::Subscription,
     #[cfg(debug_assertions)]
     frame_clock: Option<std::rc::Rc<frame_overlay::FrameClock>>,
     #[cfg(feature = "measure")]
@@ -122,6 +123,13 @@ impl Workspace {
                 cx,
             )
         });
+        // Coming back to the window is when the user looks again, often after fixing in a
+        // terminal what a read failed on (ADR 0009). The service ignores it with nothing open.
+        let recheck = cx.observe_window_activation(window, |workspace, window, _| {
+            if window.is_window_active() {
+                workspace.service.send(Intent::Recheck);
+            }
+        });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let opened = path.is_some();
@@ -145,6 +153,7 @@ impl Workspace {
             _stash_and_switch: stash_and_switch,
             _stop_job: stop_job,
             _open_recent: open_recent,
+            _recheck: recheck,
             #[cfg(debug_assertions)]
             frame_clock: frame_overlay::FrameClock::enabled().then(Default::default),
             #[cfg(feature = "measure")]

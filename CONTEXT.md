@@ -61,6 +61,10 @@ One user action made of two Local write Jobs: one that stashes the local changes
 **External change**:
 A change to the repository made outside Cairn, such as a file saved in an editor or a `git` command run in a terminal. Cairn learns of it through the watcher, never from a Job of its own. Cairn's own Jobs wake the watcher too, and the extra refresh coalesces in the Slot.
 
+**Recheck**:
+Reading again, when the user comes back to the window, every Slot whose last Snapshot was an error. It answers the user looking again, not the failure, so it is not a retry.
+_Avoid_: Retry, refresh
+
 **Supersede**:
 To drop a Read Job because a newer Read Job for the same purpose has made its result unwanted.
 _Avoid_: Cancel

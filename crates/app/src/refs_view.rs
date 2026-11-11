@@ -7,6 +7,7 @@ mod rows;
 mod tests;
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(feature = "measure")]
@@ -35,6 +36,9 @@ pub struct ShowCounts(pub Vec<RefName>);
 pub struct RefsView {
     snapshot: Option<Arc<RefsSnapshot>>,
     shown: Option<Generation>,
+    /// The repository the last Refs Snapshot that read was for: an error after one is a
+    /// failed refresh of a repository already open, not a failed Open.
+    read: Option<PathBuf>,
     /// The Snapshot's refs as a tree, or `None` while there are none to show.
     tree: Option<Tree>,
     /// The ids of the sections and folders the user closed. The filter leaves it alone, so
@@ -64,6 +68,7 @@ impl RefsView {
         Self {
             snapshot: None,
             shown: None,
+            read: None,
             tree: None,
             closed: HashSet::new(),
             filter,
@@ -77,6 +82,9 @@ impl RefsView {
 
     pub fn set_snapshot(&mut self, snapshot: Arc<RefsSnapshot>, cx: &mut Context<Self>) {
         self.tree = snapshot.result.as_ref().ok().map(Tree::new);
+        if snapshot.result.is_ok() {
+            self.read = Some(snapshot.workdir.clone());
+        }
         self.snapshot = Some(snapshot);
         self.update_rows(cx);
     }
@@ -224,10 +232,24 @@ impl Render for RefsView {
         let refs = match &snapshot.result {
             Ok(refs) => refs,
             Err(error) => {
-                return sidebar.child(div().px_3().text_color(rgb(0xff7a90)).child(format!(
-                    "Couldn't open {}: {error}",
-                    snapshot.workdir.display()
-                )));
+                let (selector, failed) = if self.read.as_ref() == Some(&snapshot.workdir) {
+                    (
+                        "sidebar:error:Couldn't read refs",
+                        "Couldn't read refs".to_owned(),
+                    )
+                } else {
+                    (
+                        "sidebar:error:Couldn't open",
+                        format!("Couldn't open {}", snapshot.workdir.display()),
+                    )
+                };
+                return sidebar.child(
+                    div()
+                        .debug_selector(|| selector.to_owned())
+                        .px_3()
+                        .text_color(rgb(0xff7a90))
+                        .child(format!("{failed}: {error}")),
+                );
             }
         };
         let head = match &refs.head {

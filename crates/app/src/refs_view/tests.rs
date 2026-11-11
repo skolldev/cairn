@@ -394,3 +394,69 @@ fn frames_drawn_while_a_branch_on_screen_is_counted_never_start_its_count_over(
     // A count started over would reach the remote again.
     assert_eq!(runs(), 1, "the count of main started over");
 }
+
+/// A repository whose config includes `extra.config`, a file outside it that the watcher
+/// doesn't watch, so breaking or fixing it reports no External change. Refs read through git,
+/// as `core.safecrlf` asks, so that a broken config fails them.
+fn with_unwatched_config() -> (PathBuf, PathBuf, tempfile::TempDir) {
+    hermetic();
+    let dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_commit(dir.path(), "copy");
+    let extra = dir.path().join("extra.config");
+    std::fs::write(&extra, "").unwrap();
+    git(&repo, &["config", "core.safecrlf", "true"]);
+    git(&repo, &["config", "include.path", &slash(&extra)]);
+    (repo, extra, dir)
+}
+
+#[gpui::test]
+fn coming_back_to_the_window_reads_again_refs_that_failed_and_says_couldnt_read(
+    cx: &mut TestAppContext,
+) {
+    let (repo, extra, _dir) = with_unwatched_config();
+    let mut app = open(cx, Some(&repo));
+    app.until("the sidebar shows main", |app| {
+        app.draw();
+        app.shown("sidebar:refs/heads/main")
+    });
+    app.cx.update(|window, _| window.activate_window());
+
+    std::fs::write(&extra, "[broken\n").unwrap();
+    // HEAD written again as it was: an External change that reads Refs.
+    let head = std::fs::read(repo.join(".git/HEAD")).unwrap();
+    std::fs::write(repo.join(".git/HEAD"), &head).unwrap();
+    // Seen red: with `read` never set, a failed refresh says "Couldn't open".
+    app.until("the sidebar shows git's error", |app| {
+        app.draw();
+        app.shown("sidebar:error:Couldn't read refs")
+    });
+    assert!(!app.shown("sidebar:error:Couldn't open"));
+    // One write can report several events, and a read a late one starts after the fix would
+    // clear the error without a Recheck. Nothing marks the last one, so this waits; the
+    // control is this test going red without the Recheck on focus.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    app.until("late events are read", |app| {
+        app.draw();
+        app.shown("sidebar:error:Couldn't read refs")
+    });
+
+    std::fs::write(&extra, "").unwrap();
+    app.cx.deactivate_window();
+    app.cx.update(|window, _| window.activate_window());
+    // Seen red: without the Recheck on window activation, the error stays.
+    app.until("the sidebar shows main again", |app| {
+        app.draw();
+        app.shown("sidebar:refs/heads/main")
+    });
+}
+
+#[gpui::test]
+fn a_repository_that_never_opened_says_couldnt_open(cx: &mut TestAppContext) {
+    hermetic();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = open(cx, Some(dir.path()));
+    app.until("the sidebar shows git's error", |app| {
+        app.draw();
+        app.shown("sidebar:error:Couldn't open")
+    });
+}
