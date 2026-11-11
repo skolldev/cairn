@@ -58,6 +58,13 @@ pub enum Intent {
     /// succeeded, and not once a Quit has begun. `untracked` stashes untracked files too.
     /// [`JobSnapshot::stash_and_switch`] says when a failed switch offers this.
     StashAndSwitch { branch: String, untracked: bool },
+    /// Switch to this remote-tracking branch, such as `refs/remotes/origin/feature/x`, as a
+    /// Local write Job. The Job reads the local branches first. If one tracks it, the Job
+    /// switches to that branch as [`Intent::Switch`] does: the one named after the remote
+    /// branch (`feature/x`) if several track it, or else the first by name. If none does, it
+    /// runs `git switch --track`, which creates `feature/x` tracking it. A local `feature/x`
+    /// that tracks something else makes git refuse, and the Job fails with git's error.
+    SwitchToRemote(RefName),
     /// Fetch every remote, pruning what they deleted: `git fetch --all --prune`, run as a
     /// Network Job beside any Local write Job.
     Fetch,
@@ -131,6 +138,9 @@ pub enum JobKind {
     Switch { branch: String },
     /// `git stash push`, with `-u` when `untracked`: the first Job of Stash and switch.
     Stash { untracked: bool },
+    /// A switch to this remote-tracking branch: to the local branch that tracks it, or to a
+    /// new one made by `git switch --track`.
+    SwitchToRemote { remote: RefName },
     /// `git fetch --all --prune`.
     Fetch,
     /// `git push`. Stopping one can leave the user's work unpublished, so `app` asks first.
@@ -141,7 +151,7 @@ impl JobKind {
     /// Whether this is a Local write Job: one a Quit waits for, and that nothing stops.
     pub fn is_local_write(&self) -> bool {
         match self {
-            JobKind::Switch { .. } | JobKind::Stash { .. } => true,
+            JobKind::Switch { .. } | JobKind::Stash { .. } | JobKind::SwitchToRemote { .. } => true,
             JobKind::Fetch | JobKind::Push => false,
         }
     }
@@ -424,6 +434,22 @@ impl RepoService {
                     None,
                     move |workdir, gate, output| stash::stash(workdir, untracked, gate, output),
                     Some(next),
+                );
+            }
+            Intent::SwitchToRemote(remote) => {
+                let span =
+                    tracing::info_span!("intent", kind = "switch_to_remote", remote = %remote);
+                let kind = JobKind::SwitchToRemote {
+                    remote: remote.clone(),
+                };
+                self.write_jobs.queue(
+                    kind,
+                    span,
+                    None,
+                    move |workdir, gate, output| {
+                        switch::switch_to_remote(workdir, &remote, gate, output)
+                    },
+                    None,
                 );
             }
             Intent::ShowCounts(branches) => {

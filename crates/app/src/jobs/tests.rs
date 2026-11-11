@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cairn_repo::{JobKind, JobState};
+use cairn_repo::{JobKind, JobState, RefName};
 use gpui::TestAppContext;
 
 use super::Banner;
@@ -335,5 +335,44 @@ fn double_clicking_the_current_branch_sends_no_intent(cx: &mut TestAppContext) {
         app.jobs_seen(),
         [(switch("other"), JobState::Done(Ok(())))],
         "a Job besides the switch to other"
+    );
+}
+
+#[gpui::test]
+fn double_clicking_a_remote_branch_switches_to_it_through_a_new_tracking_branch(
+    cx: &mut TestAppContext,
+) {
+    let f = fixture();
+    let bare = f.dir.path().join("origin.git");
+    let bare = bare.to_str().unwrap();
+    git(f.dir.path(), &["init", "--quiet", "--bare", bare]);
+    git(&f.repo, &["remote", "add", "origin", bare]);
+    git(&f.repo, &["push", "--quiet", "origin", "other:feature/x"]);
+    git(&f.repo, &["fetch", "--quiet", "origin"]);
+    let mut app = open_on_main(cx, &f.repo);
+    app.until("the sidebar shows origin/feature/x", |app| {
+        app.draw();
+        app.shown("sidebar:refs/remotes/origin/feature/x")
+    });
+
+    app.double_click("sidebar:refs/remotes/origin/feature/x");
+    app.until("the sidebar marks feature/x as current", |app| {
+        app.draw();
+        app.shown("sidebar:current:refs/heads/feature/x")
+    });
+
+    assert_eq!(
+        app.jobs_seen(),
+        [(
+            JobKind::SwitchToRemote {
+                remote: RefName::new("refs/remotes/origin/feature/x")
+            },
+            JobState::Done(Ok(()))
+        )]
+    );
+    assert_eq!(f.head(), "refs/heads/feature/x");
+    assert_eq!(
+        git(&f.repo, &["config", "branch.feature/x.merge"]).trim(),
+        "refs/heads/feature/x"
     );
 }
