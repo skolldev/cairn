@@ -43,8 +43,10 @@ depinfo_for() {
 
 built="$(cargo bench "$@" --no-run --message-format=json |
   jq -c 'select(.reason == "compiler-artifact" and (.package_id | test("^path\\+")))')"
+# Windows paths come with backslashes, which dirname and basename don't split on; Git Bash takes /.
+# shellcheck disable=SC1003 # tr reads '\\' as one backslash
 artifacts="$(jq -r '(.filenames[] | select(test("\\.(rmeta|pdb|dSYM)$") | not)), (.executable // empty)' \
-  <<<"$built" | tr -d '\r' | sort -u)"
+  <<<"$built" | tr -d '\r' | tr '\\' '/' | sort -u)"
 [ -n "$artifacts" ] || { echo "error: cargo reported no workspace artifacts" >&2; exit 2; }
 
 {
