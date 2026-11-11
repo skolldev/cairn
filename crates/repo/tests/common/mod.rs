@@ -477,6 +477,24 @@ pub fn make_executable(path: &Path) {
     let _ = path;
 }
 
+/// Drains until the first Job this test sent has finished, and returns it.
+pub fn wait_for_done(harness: &Harness) -> Arc<JobSnapshot> {
+    let seen = harness.drain_until(|s| job_of(s).is_some_and(|j| is_ended(j)));
+    seen.iter()
+        .filter_map(job_of)
+        .find(|j| is_ended(j))
+        .unwrap()
+        .clone()
+}
+
+/// The full name of the branch HEAD is on, as git reads it.
+pub fn current_branch(repo: &Path) -> String {
+    String::from_utf8(git_read(repo, &["symbolic-ref", "HEAD"]))
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
 /// The Job a switch to this local branch runs.
 pub fn switch_to(branch: &str) -> JobKind {
     JobKind::Switch {

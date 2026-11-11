@@ -84,9 +84,7 @@ impl Row {
     /// The full name of the remote-tracking branch it stands for, if it is one.
     pub fn remote_branch(&self) -> Option<RefName> {
         match self {
-            Row::Ref { name, .. } if name.as_str().starts_with("refs/remotes/") => {
-                Some(name.clone())
-            }
+            Row::Ref { name, .. } if name.is_remote_branch() => Some(name.clone()),
             _ => None,
         }
     }

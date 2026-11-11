@@ -59,8 +59,8 @@ pub(crate) fn switch_to_remote(
     output: &mut dyn FnMut(&[u8]),
 ) -> Result<(), String> {
     let git = Git::shared().map_err(|e| e.to_string())?;
-    let tracking = local_upstreams(git, workdir, gate)?;
-    if let Some(local) = tracking_branch(remote, &tracking) {
+    let locals = local_upstreams(git, workdir, gate)?;
+    if let Some(local) = tracking_branch(remote, &locals) {
         return switch(workdir, local.short(), gate, output);
     }
     // The full ref name, so a local branch named `origin/feature/x` can't be taken for it.
@@ -111,7 +111,8 @@ fn tracking_branch<'a>(
     remote: &RefName,
     locals: &'a [(RefName, Option<RefName>)],
 ) -> Option<&'a RefName> {
-    // What `git switch --track` names the new branch: what follows `refs/remotes/<remote>/`.
+    // What `git switch --track` names the new branch: what follows the first `/` after
+    // `refs/remotes/`, as `builtin/checkout.c` cuts it, even for a remote whose name has one.
     let named = remote.short().split_once('/').map(|(_, name)| name);
     let mut tracking = locals
         .iter()

@@ -1,13 +1,14 @@
-//! Switch to remote Intent: switching to the local branch that tracks a remote branch, or
+//! The SwitchToRemote Intent: switching to the local branch that tracks a remote branch, or
 //! creating one with `git switch --track` when none does.
 
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use cairn_repo::{Intent, JobSnapshot, JobState, RefName};
-use common::{Harness, git, git_output, git_read, is_ended, job_of, open, small_fixture_clone};
+use cairn_repo::{Intent, JobState, RefName};
+use common::{
+    Harness, current_branch, git, git_output, git_read, open, small_fixture_clone, wait_for_done,
+};
 
 /// A clone of the small fixture with a remote-tracking branch `origin/feature/x` at the
 /// commit before HEAD, and no local branch for it. HEAD stays on the default branch.
@@ -25,23 +26,6 @@ fn repo_with_remote_branch() -> (tempfile::TempDir, PathBuf, String) {
 
 fn remote() -> RefName {
     RefName::new("refs/remotes/origin/feature/x")
-}
-
-/// Drains until the first Job this test sent has finished, and returns it.
-fn wait_for_done(harness: &Harness) -> Arc<JobSnapshot> {
-    let seen = harness.drain_until(|s| job_of(s).is_some_and(|j| is_ended(j)));
-    seen.iter()
-        .filter_map(job_of)
-        .find(|j| is_ended(j))
-        .unwrap()
-        .clone()
-}
-
-fn current_branch(repo: &Path) -> String {
-    String::from_utf8(git_read(repo, &["symbolic-ref", "HEAD"]))
-        .unwrap()
-        .trim()
-        .to_owned()
 }
 
 fn local_branches(repo: &Path) -> Vec<String> {

@@ -3,12 +3,11 @@
 mod common;
 
 use std::path::Path;
-use std::sync::Arc;
 
-use cairn_repo::{ChangesSnapshot, Head, Intent, JobSnapshot, JobState, RefsSnapshot, Snapshot};
+use cairn_repo::{ChangesSnapshot, Head, Intent, JobState, RefsSnapshot, Snapshot};
 use common::{
-    Harness, Release, Seen, git, git_output, git_read, install_blocking_hook, is_ended, job_of,
-    open, small_fixture_clone,
+    Harness, Release, Seen, current_branch, git, git_output, install_blocking_hook, is_ended,
+    job_of, open, small_fixture_clone, wait_for_done,
 };
 
 /// A clone of the small fixture with a local branch `other` one commit ahead of the
@@ -37,23 +36,6 @@ fn read_workdir(snapshot: &Snapshot) -> Option<&Path> {
         Snapshot::Counts(s) => Some(&s.workdir),
         Snapshot::Job(_) | Snapshot::Quit => None,
     }
-}
-
-/// Drains until the first Local write Job this test sent has finished, and returns it.
-fn wait_for_done(harness: &Harness) -> Arc<JobSnapshot> {
-    let seen = harness.drain_until(|s| job_of(s).is_some_and(|j| is_ended(j)));
-    seen.iter()
-        .filter_map(job_of)
-        .find(|j| is_ended(j))
-        .unwrap()
-        .clone()
-}
-
-fn current_branch(repo: &Path) -> String {
-    String::from_utf8(git_read(repo, &["symbolic-ref", "HEAD"]))
-        .unwrap()
-        .trim()
-        .to_owned()
 }
 
 #[test]

@@ -3,13 +3,14 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use cairn_repo::{Intent, JobKind, JobState, RefsSnapshot, Snapshot};
 use common::{
-    Harness, Release, Seen, commit_graph_exists, git, git_read, install_blocking_hook, is_ended,
-    lock_files, open, slow_remote, wait_until_network_job_is_waiting,
+    Harness, Release, Seen, commit_graph_exists, current_branch, git, git_read,
+    install_blocking_hook, is_ended, lock_files, open, slow_remote,
+    wait_until_network_job_is_waiting,
 };
 
 /// Where the remote-tracking branch `origin/<branch>` points in a refs Snapshot.
@@ -79,13 +80,6 @@ fn a_fetch_streams_progress_and_ends_with_a_refs_only_refresh() {
         })
         .collect();
     assert!(status.is_empty(), "a fetch refreshed status: {status:?}");
-}
-
-fn current_branch(repo: &Path) -> String {
-    String::from_utf8(git_read(repo, &["symbolic-ref", "HEAD"]))
-        .unwrap()
-        .trim()
-        .to_owned()
 }
 
 #[test]
