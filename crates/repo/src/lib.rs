@@ -53,11 +53,12 @@ pub enum Intent {
     /// Switch the open repository to this local branch: `git switch`, run as a Local
     /// write Job. It never creates a branch, not even from a remote-tracking one.
     Switch(String),
-    /// Stash and switch: stash the local changes, then switch to this local branch as
-    /// [`Intent::Switch`] does, as two Local write Jobs. The switch starts only if the stash
-    /// succeeded, and not once a Quit has begun. `untracked` stashes untracked files too.
-    /// [`JobSnapshot::stash_and_switch`] says when a failed switch offers this.
-    StashAndSwitch { branch: String, untracked: bool },
+    /// Stash and switch: stash the local changes, then make the switch `to` names, as
+    /// [`Intent::Switch`] or [`Intent::SwitchToRemote`] does, as two Local write Jobs. The
+    /// switch starts only if the stash succeeded, and not once a Quit has begun. `untracked`
+    /// stashes untracked files too. [`JobSnapshot::stash_and_switch`] says when a failed
+    /// switch offers this.
+    StashAndSwitch { to: SwitchTarget, untracked: bool },
     /// Switch to this remote-tracking branch, such as `refs/remotes/origin/feature/x`, as a
     /// Local write Job. The Job reads the local branches first. If one tracks it, the Job
     /// switches to that branch as [`Intent::Switch`] does: the one named after the remote
@@ -96,6 +97,15 @@ pub enum Intent {
     /// queues behind a running read as a refresh does. Counts never publish an error: a
     /// failed count is tried again by the next count.
     Recheck,
+}
+
+/// What a switch goes to: the second Job of a Stash and switch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwitchTarget {
+    /// A local branch, by its short name, as [`Intent::Switch`] names it.
+    Branch(String),
+    /// A remote-tracking branch, by its full name, as [`Intent::SwitchToRemote`] names it.
+    Remote(RefName),
 }
 
 /// An immutable view of repository state, shared by `Arc`. Each variant comes from its
@@ -196,14 +206,17 @@ impl JobSnapshot {
     /// changes would be overwritten, and not the switch of a Stash and switch. It stashes
     /// untracked files when git's refusal named any.
     pub fn stash_and_switch(&self) -> Option<Intent> {
-        let (JobKind::Switch { branch }, JobState::Done(Err(error)), None) =
-            (&self.kind, &self.state, self.follows)
-        else {
+        let (JobState::Done(Err(error)), None) = (&self.state, self.follows) else {
             return None;
+        };
+        let to = match &self.kind {
+            JobKind::Switch { branch } => SwitchTarget::Branch(branch.clone()),
+            JobKind::SwitchToRemote { remote } => SwitchTarget::Remote(remote.clone()),
+            JobKind::Stash { .. } | JobKind::Fetch | JobKind::Push => return None,
         };
         let refusal = switch::refusal(error)?;
         Some(Intent::StashAndSwitch {
-            branch: branch.clone(),
+            to,
             untracked: refusal.untracked,
         })
     }
@@ -417,16 +430,21 @@ impl RepoService {
                 let span = tracing::info_span!("intent", kind = "switch", branch = %branch);
                 self.write_jobs.queue_switch(branch, span, None);
             }
-            Intent::StashAndSwitch { branch, untracked } => {
+            Intent::StashAndSwitch { to, untracked } => {
                 let span = tracing::info_span!(
                     "intent",
                     kind = "stash_and_switch",
-                    branch = %branch,
+                    to = ?to,
                     untracked
                 );
                 let switch_span = span.clone();
-                let next: Next = Box::new(move |writes, stash| {
-                    writes.queue_switch(branch, switch_span, Some(stash));
+                let next: Next = Box::new(move |writes, stash| match to {
+                    SwitchTarget::Branch(branch) => {
+                        writes.queue_switch(branch, switch_span, Some(stash))
+                    }
+                    SwitchTarget::Remote(remote) => {
+                        writes.queue_switch_to_remote(remote, switch_span, Some(stash))
+                    }
                 });
                 self.write_jobs.queue(
                     JobKind::Stash { untracked },
@@ -439,18 +457,7 @@ impl RepoService {
             Intent::SwitchToRemote(remote) => {
                 let span =
                     tracing::info_span!("intent", kind = "switch_to_remote", remote = %remote);
-                let kind = JobKind::SwitchToRemote {
-                    remote: remote.clone(),
-                };
-                self.write_jobs.queue(
-                    kind,
-                    span,
-                    None,
-                    move |workdir, gate, output| {
-                        switch::switch_to_remote(workdir, &remote, gate, output)
-                    },
-                    None,
-                );
+                self.write_jobs.queue_switch_to_remote(remote, span, None);
             }
             Intent::ShowCounts(branches) => {
                 let _span =
@@ -675,6 +682,21 @@ impl Writes {
             span,
             follows,
             move |workdir, gate, output| switch::switch(workdir, &branch, gate, output),
+            None,
+        );
+    }
+
+    /// Queues a switch to the remote-tracking branch `remote`, as the SwitchToRemote Intent
+    /// does or as the second Job of a Stash and switch.
+    fn queue_switch_to_remote(&self, remote: RefName, span: tracing::Span, follows: Option<JobId>) {
+        let kind = JobKind::SwitchToRemote {
+            remote: remote.clone(),
+        };
+        self.queue(
+            kind,
+            span,
+            follows,
+            move |workdir, gate, output| switch::switch_to_remote(workdir, &remote, gate, output),
             None,
         );
     }
