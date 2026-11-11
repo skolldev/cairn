@@ -172,33 +172,27 @@ fn a_recheck_leaves_alone_the_slots_that_answered() {
     });
     // The switch's own Intent names no path, so its reads can't be matched by repository:
     // any read that closed after `from` and that the Recheck didn't ask for marks its Slot.
-    const SLOTS: [&str; 4] = ["refs", "staged", "unstaged", "untracked"];
-    let mut marked = std::collections::BTreeSet::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while marked.len() < SLOTS.len() {
-        let spans = trace::read_jobs();
-        marked = spans[from..]
-            .iter()
-            .filter(|span| span.get("refresh").is_some_and(|r| r != "recheck"))
-            .filter_map(|span| span.get("slot").cloned())
-            .filter(|slot| SLOTS.contains(&slot.as_str()))
-            .collect();
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no read after the Recheck's in every Slot: {marked:?} among {:?}",
-            spans[from..]
+    let spans = trace::wait_until(
+        trace::read_jobs,
+        from,
+        "no read after the Recheck's in every Slot",
+        |spans| {
+            ["refs", "staged", "unstaged", "untracked"]
                 .iter()
-                .map(|span| (span.get("slot"), span.get("refresh")))
-                .collect::<Vec<_>>()
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let mut rechecked: Vec<String> = trace::read_jobs()[from..]
+                .all(|slot| {
+                    spans.iter().any(|span| {
+                        span.get("slot").is_some_and(|s| s == slot)
+                            && span.get("refresh").is_some_and(|r| r != "recheck")
+                    })
+                })
+        },
+    );
+    let mut rechecked: Vec<&str> = spans
         .iter()
         .filter(|span| {
             trace::about(span, &repo) && span.get("refresh").is_some_and(|r| r == "recheck")
         })
-        .map(|span| span["slot"].clone())
+        .map(|span| span["slot"].as_str())
         .collect();
     rechecked.sort();
     // Seen red: Recheck reading every Slot lists all four.
