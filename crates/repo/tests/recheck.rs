@@ -154,6 +154,9 @@ fn a_recheck_leaves_alone_the_slots_that_answered() {
     assert_eq!(Shown::of(&seen, &repo), only_status_failed);
 
     drop(broken);
+    // Spans of the other test in this binary closed before this one opened, and every read
+    // this Recheck queued closes after this point.
+    let from = trace::read_jobs().len();
     harness.service.send(Intent::Recheck);
     // The marker: a switch to the current branch refreshes refs and status once it ends, so
     // any read a Recheck queued for Refs or Staged comes before that refresh's read.
@@ -164,19 +167,24 @@ fn a_recheck_leaves_alone_the_slots_that_answered() {
             .is_some_and(|job| matches!(job.state, JobState::Done(Ok(()))));
         switched && Shown::of(seen, &repo).untracked == Some(false)
     });
-    // The switch's own Intent names no path, so its reads are matched by what asked.
-    let marker = |slot: &'static str| {
-        move |span: &trace::Fields| {
-            span.get("slot").is_some_and(|s| s == slot)
-                && span.get("refresh").is_some_and(|r| r == "refs_and_status")
-        }
-    };
-    trace::wait_for(trace::read_jobs, "read_job", marker("refs"));
-    trace::wait_for(trace::read_jobs, "read_job", marker("staged"));
-    trace::wait_for(trace::read_jobs, "read_job", marker("unstaged"));
-    trace::wait_for(trace::read_jobs, "read_job", marker("untracked"));
-    let mut rechecked: Vec<String> = trace::read_jobs()
-        .into_iter()
+    // The switch's own Intent names no path, so its reads can't be matched by repository:
+    // they are matched by what asked, among the spans that closed after `from`.
+    let mut marked = std::collections::BTreeSet::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while marked.len() < 4 {
+        marked = trace::read_jobs()[from..]
+            .iter()
+            .filter(|span| span.get("refresh").is_some_and(|r| r == "refs_and_status"))
+            .filter_map(|span| span.get("slot").cloned())
+            .collect();
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the switch's refresh never read every Slot: {marked:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut rechecked: Vec<String> = trace::read_jobs()[from..]
+        .iter()
         .filter(|span| {
             trace::about(span, &repo) && span.get("refresh").is_some_and(|r| r == "recheck")
         })

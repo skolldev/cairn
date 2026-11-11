@@ -192,6 +192,7 @@ impl Workspace {
         self.opened = true;
         self.recent
             .update(cx, |recent, _| recent.opening(path.clone()));
+        self.refs.update(cx, |refs, _| refs.opening());
         self.service.send(Intent::Open(path));
         cx.notify();
     }

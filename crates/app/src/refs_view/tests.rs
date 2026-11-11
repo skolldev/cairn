@@ -425,7 +425,7 @@ fn coming_back_to_the_window_reads_again_refs_that_failed_and_says_couldnt_read(
     // HEAD written again as it was: an External change that reads Refs.
     let head = std::fs::read(repo.join(".git/HEAD")).unwrap();
     std::fs::write(repo.join(".git/HEAD"), &head).unwrap();
-    // Seen red: with `read` never set, a failed refresh says "Couldn't open".
+    // Seen red: with `opened` never set, a failed refresh says "Couldn't open".
     app.until("the sidebar shows git's error", |app| {
         app.draw();
         app.shown("sidebar:error:Couldn't read refs")
@@ -455,6 +455,25 @@ fn a_repository_that_never_opened_says_couldnt_open(cx: &mut TestAppContext) {
     hermetic();
     let dir = tempfile::tempdir().unwrap();
     let mut app = open(cx, Some(dir.path()));
+    app.until("the sidebar shows git's error", |app| {
+        app.draw();
+        app.shown("sidebar:error:Couldn't open")
+    });
+}
+
+#[gpui::test]
+fn opening_again_a_repository_that_read_before_says_couldnt_open_when_it_fails(
+    cx: &mut TestAppContext,
+) {
+    let (repo, extra, _dir) = with_unwatched_config();
+    let mut app = open(cx, Some(&repo));
+    app.until("the sidebar shows main", |app| {
+        app.draw();
+        app.shown("sidebar:refs/heads/main")
+    });
+
+    std::fs::write(&extra, "[broken\n").unwrap();
+    app.open_repo(&repo);
     app.until("the sidebar shows git's error", |app| {
         app.draw();
         app.shown("sidebar:error:Couldn't open")

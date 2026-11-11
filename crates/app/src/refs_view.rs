@@ -36,9 +36,9 @@ pub struct ShowCounts(pub Vec<RefName>);
 pub struct RefsView {
     snapshot: Option<Arc<RefsSnapshot>>,
     shown: Option<Generation>,
-    /// The repository the last Refs Snapshot that read was for: an error after one is a
+    /// The repository open since its Refs last read, until the next Open: an error then is a
     /// failed refresh of a repository already open, not a failed Open.
-    read: Option<PathBuf>,
+    opened: Option<PathBuf>,
     /// The Snapshot's refs as a tree, or `None` while there are none to show.
     tree: Option<Tree>,
     /// The ids of the sections and folders the user closed. The filter leaves it alone, so
@@ -68,7 +68,7 @@ impl RefsView {
         Self {
             snapshot: None,
             shown: None,
-            read: None,
+            opened: None,
             tree: None,
             closed: HashSet::new(),
             filter,
@@ -83,10 +83,16 @@ impl RefsView {
     pub fn set_snapshot(&mut self, snapshot: Arc<RefsSnapshot>, cx: &mut Context<Self>) {
         self.tree = snapshot.result.as_ref().ok().map(Tree::new);
         if snapshot.result.is_ok() {
-            self.read = Some(snapshot.workdir.clone());
+            self.opened = Some(snapshot.workdir.clone());
         }
         self.snapshot = Some(snapshot);
         self.update_rows(cx);
+    }
+
+    /// An Open was sent: until its Refs read, an error is a failed Open, even of the same
+    /// repository again.
+    pub fn opening(&mut self) {
+        self.opened = None;
     }
 
     pub fn set_counts(&mut self, counts: Arc<CountsSnapshot>) {
@@ -232,7 +238,7 @@ impl Render for RefsView {
         let refs = match &snapshot.result {
             Ok(refs) => refs,
             Err(error) => {
-                let (selector, failed) = if self.read.as_ref() == Some(&snapshot.workdir) {
+                let (selector, failed) = if self.opened.as_ref() == Some(&snapshot.workdir) {
                     (
                         "sidebar:error:Couldn't read refs",
                         "Couldn't read refs".to_owned(),
