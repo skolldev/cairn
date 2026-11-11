@@ -9,7 +9,11 @@ One break:
 Several, from a JSON array of {"name", "file", "old", "new", "test": [argv...]}:
     scripts/seen-red.py --list breaks.json [--only SUBSTRING]
 
-OLD must occur exactly once in FILE. Each test command must be green before its break, and must
+A break that takes several edits, such as two guards that each keep the test green alone, gives
+"edits": [{"file", "old", "new"}, ...] in place of "file", "old" and "new". Its edits are made
+together, in order, and may span files.
+
+OLD must occur exactly once in FILE, checked for every edit before any is made. Each test command must be green before its break, and must
 run at least one test, so a misspelt filter can't pass as red. A break that doesn't compile
 proves nothing, and neither does a run that hangs. The file is restored whatever happens,
 Ctrl-C included.
@@ -63,28 +67,41 @@ def first_failure(output):
     return found[-1][:100] if found else ""
 
 
-def restoring(path, original):
-    """Puts `original` back on SIGTERM too: a `finally` alone doesn't run for that."""
+def restoring(originals):
+    """Puts each file back on SIGTERM too: a `finally` alone doesn't run for that."""
 
     def handler(signum, _frame):
-        path.write_bytes(original)
+        for path, original in originals.items():
+            path.write_bytes(original)
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
 
     signal.signal(signal.SIGTERM, handler)
 
 
+def edits_of(item):
+    """The break's edits as (path, old, new): its "edits", or its one "file", "old" and "new"."""
+    edits = item.get("edits") or [item]
+    return [(Path(e["file"]), e["old"].encode(), e["new"].encode()) for e in edits]
+
+
 def try_break(item, timeout, known_green):
     """Returns (status, detail) for one break. `known_green` saves re-running a baseline."""
-    path = Path(item["file"])
-    try:
-        original = path.read_bytes()
-    except OSError as error:
-        return "ERROR", str(error)
-    old = item["old"].encode()
-    count = original.count(old)
-    if count != 1:
-        return "ERROR", f"OLD occurs {count} times in {path}, not once"
+    edits = edits_of(item)
+    originals = {}
+    for path, _, _ in edits:
+        if path in originals:
+            continue
+        try:
+            originals[path] = path.read_bytes()
+        except OSError as error:
+            return "ERROR", str(error)
+    broken = dict(originals)
+    for path, old, new in edits:
+        count = broken[path].count(old)
+        if count != 1:
+            return "ERROR", f"OLD occurs {count} times in {path}, not once"
+        broken[path] = broken[path].replace(old, new)
 
     key = tuple(item["test"])
     if key not in known_green:
@@ -93,12 +110,14 @@ def try_break(item, timeout, known_green):
             return "ERROR", f"before the break the test was {status}: {first_failure(output)}"
         known_green.add(key)
 
-    restoring(path, original)
+    restoring(originals)
     try:
-        path.write_bytes(original.replace(old, item["new"].encode()))
+        for path, content in broken.items():
+            path.write_bytes(content)
         status, output = run(item["test"], timeout)
     finally:
-        path.write_bytes(original)
+        for path, original in originals.items():
+            path.write_bytes(original)
     return status, first_failure(output) if status == RED else ""
 
 

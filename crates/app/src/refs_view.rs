@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 #[cfg(feature = "measure")]
 use cairn_repo::Refs;
-use cairn_repo::{Generation, Head, RefsSnapshot};
+use cairn_repo::{CountsSnapshot, Generation, Head, RefName, RefsSnapshot};
 use gpui::{
     AnyElement, ClickEvent, Context, ElementId, Entity, EventEmitter, FontWeight, IntoElement,
     ParentElement, Render, SharedString, Styled, Subscription, Window, div, prelude::*, px, rgb,
@@ -29,6 +29,9 @@ const INDENT: f32 = 14.;
 /// The user asked to switch to this local branch, by its short name.
 pub struct SwitchTo(pub String);
 
+/// The local branches whose rows are on screen changed: these want ahead/behind counts.
+pub struct ShowCounts(pub Vec<RefName>);
+
 pub struct RefsView {
     snapshot: Option<Arc<RefsSnapshot>>,
     shown: Option<Generation>,
@@ -39,6 +42,13 @@ pub struct RefsView {
     closed: HashSet<String>,
     filter: Entity<InputState>,
     rows: Vec<Row>,
+    /// The newest counts, shown only for a branch whose oids they still match.
+    counts: Option<Arc<CountsSnapshot>>,
+    /// The local branches on screen, as last reported with [`ShowCounts`].
+    visible: Vec<RefName>,
+    /// The rows the list last asked for. To measure a row it first asks for row 0 alone, on
+    /// every layout, and only then for the rows it draws.
+    drawn: std::ops::Range<usize>,
     _filter_changed: Subscription,
 }
 
@@ -58,6 +68,9 @@ impl RefsView {
             closed: HashSet::new(),
             filter,
             rows: Vec::new(),
+            counts: None,
+            visible: Vec::new(),
+            drawn: 0..0,
             _filter_changed: filter_changed,
         }
     }
@@ -66,6 +79,66 @@ impl RefsView {
         self.tree = snapshot.result.as_ref().ok().map(Tree::new);
         self.snapshot = Some(snapshot);
         self.update_rows(cx);
+    }
+
+    pub fn set_counts(&mut self, counts: Arc<CountsSnapshot>) {
+        self.counts = Some(counts);
+    }
+
+    /// The counts Snapshot shown last.
+    #[cfg(test)]
+    pub fn counts(&self) -> Option<&Arc<CountsSnapshot>> {
+        self.counts.as_ref()
+    }
+
+    /// Reports the local branches among the rows the list drew, when they differ from those
+    /// reported last. It runs once the frame is drawn, so the row the list asked for only to
+    /// measure it is never reported: the count of a branch on screen would be Superseded, and
+    /// start over, on every frame.
+    fn report_visible(&mut self, cx: &mut Context<Self>) {
+        let range = &self.drawn;
+        let visible: Vec<RefName> = self.rows
+            [range.start.min(self.rows.len())..range.end.min(self.rows.len())]
+            .iter()
+            .filter_map(|row| match row {
+                Row::Ref { name, .. } if name.is_local_branch() => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        if visible != self.visible {
+            self.visible = visible.clone();
+            cx.emit(ShowCounts(visible));
+        }
+    }
+
+    /// What to draw beside a local branch: `↑2 ↓5` against its upstream, nothing when it is
+    /// level or its count hasn't come, and `gone` when its upstream no longer exists. A count
+    /// for other oids than the row's is stale, and shows nothing until the new one comes.
+    fn divergence(&self, row: &Row) -> Option<(String, String)> {
+        let Row::Ref {
+            name,
+            target,
+            upstream: Some(upstream),
+            ..
+        } = row
+        else {
+            return None;
+        };
+        let Some(upstream_target) = &upstream.target else {
+            return Some((format!("sidebar:gone:{name}"), "gone".to_owned()));
+        };
+        let counts = self.counts.as_ref()?.result.as_ref().ok()?;
+        let count = counts.branches.get(name)?;
+        if count.local != *target || count.upstream != *upstream_target {
+            return None;
+        }
+        let text = [("↑", count.ahead), ("↓", count.behind)]
+            .iter()
+            .filter(|(_, n)| *n > 0)
+            .map(|(arrow, n)| format!("{arrow}{n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        (!text.is_empty()).then(|| (format!("sidebar:counts:{name}:{text}"), text))
     }
 
     /// The Refs Snapshot shown last.
@@ -126,6 +199,7 @@ impl RefsView {
 }
 
 impl EventEmitter<SwitchTo> for RefsView {}
+impl EventEmitter<ShowCounts> for RefsView {}
 
 impl Render for RefsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -177,7 +251,9 @@ impl Render for RefsView {
         let list = uniform_list(
             "sidebar-rows",
             self.rows.len(),
-            cx.processor(|view, range: std::ops::Range<usize>, _window, cx| {
+            cx.processor(|view, range: std::ops::Range<usize>, window, cx| {
+                view.drawn = range.clone();
+                cx.defer_in(window, |view, _, cx| view.report_visible(cx));
                 range.map(|ix| view.render_row(ix, cx)).collect::<Vec<_>>()
             }),
         )
@@ -192,6 +268,12 @@ impl Render for RefsView {
 impl RefsView {
     fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let row = &self.rows[ix];
+        let divergence = self.divergence(row).map(|(selector, text)| {
+            div()
+                .debug_selector(|| selector)
+                .text_color(rgb(DIM))
+                .child(text)
+        });
         let id = row.id();
         let selector = format!("sidebar:{id}");
         let mut element = div()
@@ -223,6 +305,7 @@ impl RefsView {
                 label,
                 depth,
                 current,
+                ..
             } => {
                 let element = element.pl(indent(*depth));
                 if *current {
@@ -232,8 +315,9 @@ impl RefsView {
                         .font_weight(FontWeight::BOLD)
                         .child(div().debug_selector(|| marker).child("●"))
                         .child(label.clone())
+                        .children(divergence)
                 } else {
-                    element.child(label.clone())
+                    element.child(label.clone()).children(divergence)
                 }
             }
             Row::Stash { index, message } => element

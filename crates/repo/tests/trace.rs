@@ -174,3 +174,35 @@ fn an_open_traces_its_read_jobs_as_open_and_not_pending() {
         }
     }
 }
+
+#[test]
+fn an_opens_count_traces_inside_the_open_and_lets_the_refs_read_span_close() {
+    trace::install();
+    let (_dir, repo) = small_fixture_clone();
+    let harness = Harness::start();
+    let opened = open(&harness, &repo);
+
+    // Every Refs read hands its branches to a count, even with none on screen. Its span sits
+    // inside the Open's, so it names the repository. Seen red: `Counter::submit` taking the
+    // Refs read's own `read_job` span, which then stayed open while an undrained Counts
+    // Snapshot held it, and this span named no repository.
+    let count = wait_for_span(|f| {
+        trace::about(f, &repo) && f.get("slot").map(String::as_str) == Some("counts")
+    });
+    assert_eq!(
+        count.get("refresh").map(String::as_str),
+        Some("refs"),
+        "{count:?}"
+    );
+    // The Counts Snapshot is still undrained here, and the Refs read's span closes anyway.
+    let refs = wait_for_span(|f| {
+        trace::about(f, &repo)
+            && f.get("slot").map(String::as_str) == Some("refs")
+            && f.get("generation") == Some(&opened.refs.get().to_string())
+    });
+    assert_eq!(
+        refs.get("refresh").map(String::as_str),
+        Some("open"),
+        "{refs:?}"
+    );
+}

@@ -227,7 +227,7 @@ impl Headless {
                             paths.iter().map(ToString::to_string).collect();
                     }
                 }
-                Snapshot::Job(_) | Snapshot::Quit => {}
+                Snapshot::Counts(_) | Snapshot::Job(_) | Snapshot::Quit => {}
             }
         }
         drained

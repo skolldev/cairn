@@ -34,6 +34,7 @@ fn read_workdir(snapshot: &Snapshot) -> Option<&Path> {
         Snapshot::Refs(s) => Some(&s.workdir),
         Snapshot::Staged(s) | Snapshot::Unstaged(s) => Some(&s.workdir),
         Snapshot::Untracked(s) => Some(&s.workdir),
+        Snapshot::Counts(s) => Some(&s.workdir),
         Snapshot::Job(_) | Snapshot::Quit => None,
     }
 }

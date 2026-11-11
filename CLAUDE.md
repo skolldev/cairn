@@ -14,4 +14,4 @@ Single-context: one `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/age
 
 ### Coding standards
 
-Review rules, including how tests are written: `CODING_STANDARDS.md`. Anything that runs git must pass on the oldest supported git: `scripts/oldest-git.sh` builds it.
+Review rules, including how tests are written: `CODING_STANDARDS.md`. Anything that runs git must pass on the oldest and the newest git: `scripts/git-matrix.sh` runs both. What differs between them: `docs/git-versions.md`.

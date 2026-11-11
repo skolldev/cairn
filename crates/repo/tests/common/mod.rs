@@ -276,6 +276,27 @@ impl Harness {
     pub fn drain_until_with_timeout(
         &self,
         timeout: Duration,
+        done: impl FnMut(&Snapshot) -> bool,
+    ) -> Vec<Snapshot> {
+        self.drain(timeout, None, done)
+    }
+
+    /// [`drain_until`](Self::drain_until) for a test that holds git until `release` exists.
+    /// A timeout writes `release` before anything else, so a failing run fails rather than
+    /// hangs: the Force quit that follows can wait on the held git, such as through a lock a
+    /// bug holds across it.
+    pub fn drain_until_releasing(
+        &self,
+        release: &Path,
+        done: impl FnMut(&Snapshot) -> bool,
+    ) -> Vec<Snapshot> {
+        self.drain(Duration::from_secs(30), Some(release), done)
+    }
+
+    fn drain(
+        &self,
+        timeout: Duration,
+        release: Option<&Path>,
         mut done: impl FnMut(&Snapshot) -> bool,
     ) -> Vec<Snapshot> {
         let deadline = Instant::now() + timeout;
@@ -289,6 +310,11 @@ impl Harness {
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
+                if let Some(release) = release {
+                    // Seen red: without this write, `a_count_held_in_git_never_delays_a_refs_snapshot`
+                    // hangs under its own break, the Force quit waiting on the counter's lock.
+                    let _ = std::fs::write(release, "");
+                }
                 // A timed-out test must not then hang while dropping a blocked Local write Job.
                 self.service.send(Intent::ForceQuit);
                 panic!("timed out waiting for a Snapshot; drained so far: {seen:?}");
@@ -736,6 +762,57 @@ pub fn wait_for_file(path: &Path) {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+pub fn wrapper_runs(log: &Path) -> usize {
+    std::fs::read_to_string(log).map_or(0, |log| log.lines().count())
+}
+
+/// Waits until `log` shows `runs` runs of the slow remote's wrapper, each a git that is now
+/// blocked in it.
+pub fn wait_for_wrapper_runs(log: &Path, runs: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while wrapper_runs(log) < runs {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "git never got to the remote"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Makes `f.repo` a partial clone of the slow remote, with the ref `at` pointing at a local tag
+/// of `f.new`, the commit only the remote has. Any git that peels that tag fetches the commit,
+/// and blocks in the remote's wrapper until `f.release` exists: a way to hold a Read Job's git
+/// in git's own extension point. Returns the tag's oid.
+///
+/// - A tag, and not a commit's missing parent: newer git no longer fetches a parent during a
+///   walk, and `A...<tag>` fetches only when written `A...<tag>^{commit}`
+///   (`docs/git-versions.md`).
+/// - `at` sits outside `refs/heads/`, `refs/remotes/` and `refs/tags/`, or the CLI Refs read's
+///   `%(*objectname)` peels it too, and the Refs read is held with it.
+pub fn tag_needing_the_remote(f: &SlowRemote, at: &str) -> String {
+    git(
+        &f.remote,
+        &["config", "uploadpack.allowAnySHA1InWant", "true"],
+    );
+    git(&f.remote, &["config", "uploadpack.allowFilter", "true"]);
+    let tag = format!(
+        "object {}\ntype commit\ntag held\ntagger Cairn Test <test@cairn.invalid> 1700000000 +0000\n\nneeds the remote\n",
+        f.new
+    );
+    let file = f.dir.path().join("tag-object");
+    std::fs::write(&file, tag).unwrap();
+    let tag = git(
+        &f.repo,
+        &["hash-object", "-t", "tag", "-w", file.to_str().unwrap()],
+    );
+    let tag = tag.trim().to_owned();
+    git(&f.repo, &["update-ref", at, &tag]);
+    git(&f.repo, &["config", "core.repositoryFormatVersion", "1"]);
+    git(&f.repo, &["config", "extensions.partialClone", "origin"]);
+    git(&f.repo, &["config", "remote.origin.promisor", "true"]);
+    tag
 }
 
 impl SlowRemote {

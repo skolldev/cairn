@@ -25,7 +25,7 @@ fn snapshot_status(repo: &Path) -> Status {
                 let list = s.result.as_ref().expect("untracked files read");
                 untracked = Some(list.iter().map(path).collect());
             }
-            Snapshot::Refs(_) | Snapshot::Job(_) | Snapshot::Quit => {}
+            Snapshot::Refs(_) | Snapshot::Counts(_) | Snapshot::Job(_) | Snapshot::Quit => {}
         }
         staged.is_some() && unstaged.is_some() && untracked.is_some()
     });
@@ -352,7 +352,7 @@ fn opening_a_path_that_is_not_a_repo_publishes_each_error() {
             Snapshot::Staged(s) => staged = Some(s.result.clone()),
             Snapshot::Unstaged(s) => unstaged = Some(s.result.clone()),
             Snapshot::Untracked(s) => untracked = Some(s.result.as_ref().err().cloned()),
-            Snapshot::Refs(_) | Snapshot::Job(_) | Snapshot::Quit => {}
+            Snapshot::Refs(_) | Snapshot::Counts(_) | Snapshot::Job(_) | Snapshot::Quit => {}
         }
         staged.is_some() && unstaged.is_some() && untracked.is_some()
     });

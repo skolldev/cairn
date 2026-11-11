@@ -43,6 +43,8 @@ pub struct Bridge {
     staged_shown: Option<Generation>,
     unstaged_shown: Option<Generation>,
     untracked_shown: Option<Generation>,
+    /// The counts Slot publishes a generation more than once, so an equal one is newer too.
+    counts_shown: Option<Generation>,
     /// A drain already ran this frame. The next-frame callback drains whatever came since.
     armed: bool,
     /// Ends the wait if no frame comes. Replacing it cancels the last one.
@@ -85,6 +87,7 @@ impl Bridge {
             staged_shown: None,
             unstaged_shown: None,
             untracked_shown: None,
+            counts_shown: None,
             armed: false,
             frameless_drain: None,
         }
@@ -162,6 +165,20 @@ impl Bridge {
                     self.quit
                         .update(cx, |view, cx| view.record_job(job.clone(), cx));
                     self.jobs.update(cx, |view, cx| view.record_job(job, cx));
+                }
+                Snapshot::Counts(counts) => {
+                    if self
+                        .counts_shown
+                        .is_some_and(|shown| shown > counts.generation)
+                    {
+                        tracing::debug!(parent: &counts.span, slot = "counts", generation = counts.generation.get(), "stale snapshot dropped");
+                    } else {
+                        self.counts_shown = Some(counts.generation);
+                        self.refs.update(cx, |view, cx| {
+                            view.set_counts(counts);
+                            cx.notify();
+                        });
+                    }
                 }
                 Snapshot::Quit => self.quit.update(cx, |view, cx| view.exit(cx)),
                 Snapshot::Untracked(untracked) => {

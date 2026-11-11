@@ -111,5 +111,50 @@ JSON
 expect 2 RED "a list with a stale break" --list breaks.json
 tail -n 1 <<<"$out" | grep -q "^summary: 1 red, 1 still green, 0 unproven, 1 not tried$" || fail "summary isn't last or miscounts: $out"
 
+# A break of several edits: two guards, either of which keeps the test green alone. Only both
+# edits together go red, and every file is restored.
+cat >>src/lib.rs <<'RUST'
+
+pub fn capped(x: u32) -> u32 {
+    let x = x.min(10);
+    x.clamp(0, 10)
+}
+
+#[test]
+fn capped_stays_under_ten() {
+    assert!(capped(50) <= 10, "over the cap");
+}
+RUST
+cat >src/other.rs <<'RUST'
+pub const CAP: u32 = 10;
+RUST
+original="$(cat src/lib.rs)"
+other_original="$(cat src/other.rs)"
+capped=(cargo test -q capped_stays_under_ten)
+expect 1 STILL-GREEN "one edit of a two-edit break" src/lib.rs "    let x = x.min(10);" "    let x = x;" -- "${capped[@]}"
+cat >breaks.json <<'JSON'
+[
+  {"name": "both", "edits": [
+    {"file": "src/lib.rs", "old": "    let x = x.min(10);", "new": "    let x = x;"},
+    {"file": "src/lib.rs", "old": "    x.clamp(0, 10)", "new": "    x"},
+    {"file": "src/other.rs", "old": "10", "new": "11"}
+  ], "test": ["cargo", "test", "-q", "capped_stays_under_ten"]}
+]
+JSON
+expect 0 RED "a two-edit break" --list breaks.json
+grep -q "over the cap" <<<"$out" || fail "didn't report why a two-edit break went red: $out"
+[ "$(cat src/other.rs)" = "$other_original" ] || fail "a second file wasn't restored"
+# Every edit is checked before any is made: a stale one leaves both files as they were.
+cat >breaks.json <<'JSON'
+[
+  {"name": "stale second", "edits": [
+    {"file": "src/lib.rs", "old": "    let x = x.min(10);", "new": "    let x = x;"},
+    {"file": "src/other.rs", "old": "99", "new": "98"}
+  ], "test": ["cargo", "test", "-q", "capped_stays_under_ten"]}
+]
+JSON
+expect 2 ERROR "a two-edit break with a stale edit" --list breaks.json
+[ "$(cat src/other.rs)" = "$other_original" ] || fail "a stale edit left a file changed"
+
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)" >&2; exit 1; }
 echo "ok: seen-red.py passes only a break that goes red, and restores the file"

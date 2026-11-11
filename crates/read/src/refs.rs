@@ -1,7 +1,10 @@
 //! Refs through gix, field for field what `git for-each-ref` and `git stash list` report.
 
-use cairn_core::{Head, Oid, RefEntry, RefName, Refs, Stash};
+use std::collections::HashMap;
 
+use cairn_core::{Head, Oid, RefEntry, RefName, Refs, Stash, Upstream};
+
+use gix::bstr::ByteSlice as _;
 use gix::prelude::ReferenceExt as _;
 
 use crate::{ReadError, err};
@@ -40,6 +43,27 @@ pub(crate) fn read(repo: &gix::Repository) -> Result<Refs, ReadError> {
             target: oid(target.detach()),
             peeled,
             symref,
+            upstream: None,
+        });
+    }
+    let targets: HashMap<String, Oid> = local
+        .iter()
+        .chain(&remote)
+        .chain(&tags)
+        .map(|entry| (entry.name.as_str().to_owned(), entry.target.clone()))
+        .collect();
+    for entry in &mut local {
+        let Some(name) = upstream_name(repo, entry.name.as_str())? else {
+            continue;
+        };
+        let target = match targets.get(&name) {
+            Some(target) => Some(target.clone()),
+            // Outside the listed refs, such as `refs/notes/x`. Rare enough to look up alone.
+            None => ref_target(repo, &name)?,
+        };
+        entry.upstream = Some(Upstream {
+            name: RefName::new(name),
+            target,
         });
     }
     // git sorts by the ref name's bytes; String's order is the same.
@@ -53,6 +77,100 @@ pub(crate) fn read(repo: &gix::Repository) -> Result<Refs, ReadError> {
         remote,
         tags,
         stashes: stashes(repo)?,
+    })
+}
+
+/// `%(upstream)` for the local branch `branch`, as git's `branch_get_upstream` finds it:
+/// `branch.<name>.remote` (the last one set) and `branch.<name>.merge` (the first one set)
+/// must both be set, and the merge ref must map through that remote's fetch refspecs. A
+/// remote of `.` means the merge ref is itself the upstream, as git's `dwim_ref` expands it.
+fn upstream_name(repo: &gix::Repository, branch: &str) -> Result<Option<String>, ReadError> {
+    let Some(short) = branch.strip_prefix("refs/heads/") else {
+        return Ok(None);
+    };
+    let config = repo.config_snapshot();
+    let config = config.plumbing();
+    let subsection: &gix::bstr::BStr = short.into();
+    let Some(remote) = config.string_by("branch", Some(subsection), "remote") else {
+        return Ok(None);
+    };
+    let Some(merge) = config
+        .strings_by("branch", Some(subsection), "merge")
+        .and_then(|merges| merges.into_iter().next())
+    else {
+        return Ok(None);
+    };
+    let merge = merge.to_string();
+    if remote == "." {
+        return dwim_local(repo, &merge).map(Some);
+    }
+    let Some(Ok(remote)) = repo.try_find_remote(remote.as_bstr()) else {
+        return Ok(None);
+    };
+    // Negative refspecs are left out: git's `remote_find_tracking` doesn't apply them, so a
+    // merge ref one of them excludes still maps to its tracking ref.
+    let specs = remote
+        .refspecs(gix::remote::Direction::Fetch)
+        .iter()
+        .map(gix::refspec::RefSpec::to_ref)
+        .filter(|spec| spec.source().is_some() && spec.destination().is_some());
+    let null = repo.object_hash().null();
+    let item = gix::refspec::match_group::Item {
+        full_ref_name: merge.as_str().into(),
+        target: &null,
+        object: None,
+    };
+    Ok(gix::refspec::MatchGroup::from_fetch_specs(specs)
+        .match_lhs(std::iter::once(item))
+        .mappings
+        .into_iter()
+        .next()
+        .and_then(|mapping| mapping.rhs)
+        .map(|name| name.to_string()))
+}
+
+/// What the ref `name` points at after following symbolic refs, as `%(objectname)` reports
+/// it: a tag stays on its tag object. `None` if it doesn't exist, and for a name outside
+/// `refs/`, which git couldn't expand and never reads as a ref.
+fn ref_target(repo: &gix::Repository, name: &str) -> Result<Option<Oid>, ReadError> {
+    if !name.starts_with("refs/") {
+        return Ok(None);
+    }
+    match repo.try_find_reference(name).map_err(err)? {
+        Some(mut reference) => Ok(Some(oid(reference
+            .follow_to_object()
+            .map_err(err)?
+            .detach()))),
+        None => Ok(None),
+    }
+}
+
+/// The merge ref of a branch whose remote is `.`: a full name as it is, and a short one
+/// expanded as git's `dwim_ref` does when exactly one rule matches a ref.
+fn dwim_local(repo: &gix::Repository, merge: &str) -> Result<String, ReadError> {
+    if merge.starts_with("refs/") {
+        return Ok(merge.to_owned());
+    }
+    let candidates = [
+        format!("refs/{merge}"),
+        format!("refs/tags/{merge}"),
+        format!("refs/heads/{merge}"),
+        format!("refs/remotes/{merge}"),
+        format!("refs/remotes/{merge}/HEAD"),
+    ];
+    let mut found = Vec::new();
+    for name in candidates {
+        if repo
+            .try_find_reference(name.as_str())
+            .map_err(err)?
+            .is_some()
+        {
+            found.push(name);
+        }
+    }
+    Ok(match <[String; 1]>::try_from(found) {
+        Ok([only]) => only,
+        Err(_) => merge.to_owned(),
     })
 }
 
