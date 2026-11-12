@@ -49,9 +49,12 @@ fn stopping_kills_git_and_what_it_started(class: JobClass) {
 
     match result {
         Err(RunError::Stopped { stderr }) => {
+            // Whole lines: git may report the killed alias as `error: <its command> died of
+            // signal 15`, and that command contains `echo waiting` and `echo released` (#113).
             let stderr = String::from_utf8_lossy(&stderr);
-            assert!(stderr.contains("waiting"), "{stderr}");
-            assert!(!stderr.contains("released"), "{stderr}");
+            let printed = |line: &str| stderr.lines().any(|l| l.trim_end() == line);
+            assert!(printed("waiting"), "{stderr}");
+            assert!(!printed("released"), "{stderr}");
         }
         other => panic!("the invocation must report it was stopped: {other:?}"),
     }
