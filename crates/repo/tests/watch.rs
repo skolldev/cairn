@@ -199,6 +199,24 @@ fn append_repeatedly(path: &Path, times: usize) {
     }
 }
 
+/// Renames `from` to `to`. Windows refuses to rename a directory while a file inside it is
+/// open, as a status read may have it, so a refusal is tried again for a while (#114).
+fn rename_when_unlocked(from: &Path, to: &Path) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match std::fs::rename(from, to) {
+            Ok(()) => return,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::PermissionDenied
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => panic!("rename {} to {}: {e}", from.display(), to.display()),
+        }
+    }
+}
+
 /// Creates the untracked file `name` and waits until an Untracked Snapshot lists it. Returns
 /// that Snapshot's generation. The file is a marker: every event the watcher saw before it
 /// has been classified, and any refresh one asked for took an older generation.
@@ -468,19 +486,22 @@ fn moving_an_ignored_directory_with_a_tracked_file_out_of_the_worktree_shows_the
     // On macOS each move reports one event, for `build`, and none for the files inside.
     let (inside, outside) = (repo.join("build"), dir.path().join("moved"));
     let mut seen = Seen::default();
-    let refreshes = status_refreshes_during(&mut seen, &harness, &repo, "moves", || {
+    let moves = changes_during(&mut seen, &harness, &repo, "moves", || {
         for _ in 0..10 {
-            std::fs::rename(&inside, &outside).unwrap();
+            rename_when_unlocked(&inside, &outside);
             std::thread::sleep(Duration::from_millis(10));
-            std::fs::rename(&outside, &inside).unwrap();
+            rename_when_unlocked(&outside, &inside);
             std::thread::sleep(Duration::from_millis(10));
         }
-        std::fs::rename(&inside, &outside).unwrap();
+        rename_when_unlocked(&inside, &outside);
     });
+    // Which change started each refresh, not how many refreshes: under load Windows merges a
+    // burst of moves into fewer events, and the count fell to 7 (#114).
     // Seen red: with `Tracked::covers` not asking `path_is_directory`, the moves are skipped.
     assert!(
-        refreshes > REFRESHED,
-        "each move of the directory refreshes: {refreshes} generations"
+        !moves.naming("build").is_empty(),
+        "no move of the directory started an External change: {:?}",
+        moves.changes
     );
     seen.until(&harness, |seen| {
         unstaged_after(seen, opened.unstaged)
